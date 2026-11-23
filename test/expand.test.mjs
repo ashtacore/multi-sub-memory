@@ -39,7 +39,7 @@ test('expansion reads original JSONL text using intersecting indexed sequence an
   const { db, directory } = fixture(t);
   const filePath = path.join(directory, 'transcript.jsonl');
   writeLines(filePath, [
-    { role: 'user', text: 'Original  request  ', timestamp, tool_names: ['fixture'] },
+    { type: 'user', timestamp, message: { role: 'user', content: 'Original  request  ', tool_names: ['fixture'] } },
     { type: 'assistant', timestamp, message: {
       role: 'assistant',
       content: [
@@ -55,8 +55,8 @@ test('expansion reads original JSONL text using intersecting indexed sequence an
     { role: 'user', content: 'Trailing record' },
   ]);
   const fileId = indexedFile(db, filePath);
-  indexedMessage(db, fileId, 5, 1, 'Original  request  ', '["fixture"]', 'user');
-  indexedMessage(db, fileId, 13, 2, 'First block\nSecond  block');
+  indexedMessage(db, fileId, 5, 1, 'Original  request  ', null, 'user');
+  indexedMessage(db, fileId, 13, 2, 'First block\nSecond  block', '["read","lookup","inspect"]');
   indexedMessage(db, fileId, 21, 4, 'Trailing record', null, 'user');
 
   const result = expandSession(db, { session_id: ' session ', start_seq: 5, end_seq: 20 });
@@ -163,7 +163,7 @@ test('expansion includes the tool name from an OMP toolCall-only assistant turn'
     message: { role: 'assistant', content: [{ type: 'toolCall', name: 'inspect' }] },
   }]);
   const fileId = indexedFile(db, filePath, { orchestrator: 'omp' });
-  indexedMessage(db, fileId, 0, 1, '');
+  indexedMessage(db, fileId, 0, 1, '', '["inspect"]');
   const result = expandSession(db, { session_id: 'session' });
   assert.equal(result.source, 'disk');
   assert.deepEqual(result.messages, [{ seq: 0, line_no: 1, role: 'assistant', text: '', tool_names: ['inspect'] }]);

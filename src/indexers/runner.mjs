@@ -4,7 +4,9 @@ import { setImmediate } from 'node:timers/promises';
 import { acquireLease, releaseLease } from '../db.mjs';
 import { DEFAULT_EMBEDDING_MODEL, encodeFloat32Vector } from '../embeddings.mjs';
 import { resolveProjectKey } from '../project-id.mjs';
+import { agyAdapter } from './agy.mjs';
 import { claudeAdapter } from './claude.mjs';
+import { codexAdapter } from './codex.mjs';
 import { ompAdapter } from './omp.mjs';
 import {
   normalizeTranscriptRole, normalizeTranscriptTimestamp, statWithoutLinks, transcriptFileIdentity, validateAdapter,
@@ -14,7 +16,7 @@ export const INDEXER_LEASE_KEY = 'transcript-indexer';
 export const DEFAULT_LEASE_TTL_MS = 60_000;
 export const MIN_EMBED_TEXT_CHARS = 10;
 export const MAX_EMBED_TEXT_CHARS = 16_000;
-export const BUILTIN_ADAPTERS = Object.freeze([ompAdapter, claudeAdapter]);
+export const BUILTIN_ADAPTERS = Object.freeze([ompAdapter, claudeAdapter, codexAdapter, agyAdapter]);
 
 export function shouldEmbedMessage({ role, text, skipEmbedding }) {
   if (skipEmbedding || (role !== 'user' && role !== 'assistant') || typeof text !== 'string') return false;

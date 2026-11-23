@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import { extractMessageContent, normalizeTranscriptRole, transcriptFileIdentity } from './indexers/types.mjs';
+import { agySessionId, parseAgyMessage } from './indexers/agy.mjs';
+import { codexSessionId, parseCodexResponseItem } from './indexers/codex.mjs';
+import {
+  extractMessageContent, firstNonBlankString, normalizeTranscriptRole, parseJsonlRecord, transcriptFileIdentity,
+} from './indexers/types.mjs';
 import { truncatePreview } from './search.mjs';
 
 export const DEFAULT_EXPAND_MAX_CHARS = 16000;
@@ -120,40 +124,66 @@ function toolName(call) {
   return call?.function?.name ?? call?.name ?? call?.recipient_name;
 }
 
-function parseRecord(line) {
-  try {
-    const record = JSON.parse(line);
-    return record && typeof record === 'object' && !Array.isArray(record) ? record : null;
-  } catch {
-    return null;
-  }
-}
-
 function matchesIndexedTranscript(db, file, fd) {
   const anchor = db.prepare(`
-    SELECT line_no, role, text FROM transcript_messages WHERE file_id = ? ORDER BY line_no ASC LIMIT 1
+    SELECT line_no, role, text, tool_names FROM transcript_messages WHERE file_id = ? ORDER BY line_no ASC LIMIT 1
   `).get(file.id);
   let lineNo = 0;
   for (const line of readLines(fd)) {
     lineNo++;
+    if (lineNo !== 1 && lineNo !== anchor?.line_no) continue;
+    const record = parseJsonlRecord(line);
     if (lineNo === 1) {
-      const record = parseRecord(line);
       const sessionIds = [record?.session_id, record?.sessionId, record?.message?.session_id, record?.message?.sessionId,
         record?.type === 'session' ? record.id : undefined];
-      if (sessionIds.some((id) => typeof id === 'string' && id !== file.session_id)) return false;
+      const declaredId = file.orchestrator === 'codex'
+        ? codexSessionId(record) ?? firstNonBlankString(record?.payload?.session_id)
+        : file.orchestrator === 'agy' ? agySessionId(record) : undefined;
+      const indexedId = file.session_id.trim();
+      if (declaredId !== undefined ? declaredId !== indexedId : sessionIds.some((id) => {
+        const normalized = firstNonBlankString(id);
+        return normalized !== undefined && normalized !== indexedId;
+      })) return false;
       if (!anchor) return true;
     }
     if (lineNo === anchor.line_no) {
-      const { role, text } = parseLine(line);
-      return role === anchor.role && text === anchor.text;
+      const { role, text, tool_names } = parseLine(line, file.orchestrator, record);
+      let toolNames;
+      switch (file.orchestrator) {
+        case 'omp':
+        case 'claude':
+          toolNames = extractMessageContent(record?.message?.content).toolNames;
+          break;
+        case 'codex':
+          toolNames = record ? parseCodexResponseItem(record)?.toolNames ?? [] : [];
+          break;
+        case 'agy':
+          toolNames = record ? parseAgyMessage(record)?.toolNames ?? [] : [];
+          break;
+        default:
+          toolNames = tool_names ?? [];
+      }
+      const indexedTools = normalizeToolNames(anchor.tool_names);
+      return role === anchor.role && text === anchor.text && toolNames.length === indexedTools.length
+        && toolNames.every((name, index) => name === indexedTools[index]);
     }
   }
   return !anchor;
 }
 
-function parseLine(line) {
-  const record = parseRecord(line);
+function parseLine(line, orchestrator, record = parseJsonlRecord(line)) {
   if (!record) return { role: 'raw', text: line };
+
+  const mapped = orchestrator === 'codex' ? parseCodexResponseItem(record, { includeToolOutput: true })
+    : orchestrator === 'agy' ? parseAgyMessage(record) : undefined;
+  if (mapped) {
+    const { role, text, timestamp, toolNames } = mapped;
+    return {
+      role, text,
+      ...(timestamp == null ? {} : { timestamp }),
+      ...(toolNames.length ? { tool_names: toolNames } : {}),
+    };
+  }
 
   const message = record.message ?? record;
   const content = message.content ?? record.content;
@@ -176,7 +206,7 @@ function parseLine(line) {
   };
 }
 
-function* diskMessages(db, fileId, fd, options) {
+function* diskMessages(db, { id: fileId, orchestrator }, fd, options) {
   const { start_seq, end_seq, line_start = 1, line_end = Infinity } = options;
   const hasSeqRange = start_seq !== undefined || end_seq !== undefined;
   const hasIndexedRows = db.prepare('SELECT 1 FROM transcript_messages WHERE file_id = ? LIMIT 1').get(fileId);
@@ -202,7 +232,7 @@ function* diskMessages(db, fileId, fd, options) {
     line_no++;
     const seq = hasIndexedRows ? lineToSeq.get(line_no) : line.trim() ? nonEmptySeq++ : undefined;
     if (line_no >= line_start && (!hasSeqRange || (seq !== undefined && seq >= (start_seq ?? 0)))) {
-      yield { ...(seq === undefined ? {} : { seq }), line_no, ...parseLine(line) };
+      yield { ...(seq === undefined ? {} : { seq }), line_no, ...parseLine(line, orchestrator) };
     }
     if (line_no >= maxTargetLineNo || (!hasIndexedRows && seq === end_seq && end_seq !== undefined)) break;
   }
@@ -255,7 +285,7 @@ export function expandSession(db, options = {}) {
   let total_chars = 0;
   let truncated = false;
   try {
-    const candidates = fd === null ? indexedMessages(db, file.id, options) : diskMessages(db, file.id, fd, options);
+    const candidates = fd === null ? indexedMessages(db, file.id, options) : diskMessages(db, file, fd, options);
     for (const message of candidates) {
       const remaining = max_chars - total_chars;
       // An exact fill is truncated only if more message text exists in the selected range.
