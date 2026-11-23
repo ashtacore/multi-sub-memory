@@ -20,10 +20,12 @@ caller-supplied database connection open.
 | `mem_note` | `write`, `update`, `dismiss` | Creates a current-project note, changes it by ID, or marks it dismissed. New notes are active by default and can be pending. A note can record a `surface_condition`. |
 | `mem_note` | `read` | Lists active and pending notes for the current project by default. Accepts a status filter or `all`. Enable `include_global` to include notes stored under the global key. |
 | `mem_bootstrap` | | Returns a Markdown summary of active memories and project notes. Accepts `token_budget`, `include_notes`, and `cwd`. |
+| `mem_search` | | Searches memories, notes, and indexed transcript messages. Accepts `query`, `cwd`, `sources`, `scope`, `orchestrators`, `since`, and `limit`. |
+| `mem_expand` | | Reads an indexed transcript by `session_id` and optional `file_id`. Accepts inclusive `start_seq` and `end_seq`, inclusive `line_start` and `line_end`, and `max_chars`. |
 
-Memory and note results contain JSON in the MCP text response. Action validation
-and errors also use MCP text responses, with the error flag set. Bootstrap
-returns the summary as plain text.
+Memory, note, search, and expansion results contain JSON in the MCP text
+response. Validation and tool errors use MCP text responses with the error flag
+set. Bootstrap returns the summary as plain text.
 
 ## Bootstrap
 
@@ -45,11 +47,56 @@ budget is too small. When notes are enabled and present, the minimum includes
 their section and the newline between sections. Set `include_notes: false` for
 a memory-only summary.
 
+## Search
+
+`mem_search` defaults to `current_project`, which includes active project and
+global memories, active and pending project notes, and indexed messages for the
+project. Use `all_projects` to search across projects. Select any combination of
+`memory`, `note`, and `transcript` with `sources`. The `orchestrators` filter
+accepts `omp`, `claude`, `codex`, and `agy`. Use `since` with an ISO 8601
+date or timestamp to include records from that instant onward. Date-only values
+start at midnight UTC. Memories and notes use their update time. Transcript
+messages use their own timestamp when valid and the file's last index time
+otherwise.
+
+FTS5 treats user input as quoted search terms and ranks candidates with BM25.
+When the local engine can embed the query, search also ranks eligible memory and
+transcript vectors by cosine similarity. The two lists use the same filters.
+Reciprocal rank fusion sums `1 / (60 + rank)` for each list a result appears in,
+using ranks that start at one. The response reports `hybrid` or `fts-only`.
+Search defaults to 10 results and clamps the requested limit to 1–50. Each
+result has a preview of at most 400 characters. Transcript hits include
+`session_id`, `file_id`, and `seq`. Pass the file ID with the session ID and
+use `seq` for both range endpoints to expand that exact hit.
+
+## Session expansion
+
+`mem_expand` accepts an optional `file_id` to disambiguate sessions that span
+multiple indexed files. The file must belong to the supplied session ID.
+Without a file ID, the tool selects the latest indexed file and breaks index
+time ties by higher file ID. The response includes the selected `file_id`.
+Sequence and line ranges are inclusive and intersect when both are supplied.
+Disk reads use indexed sequence numbers when available. Without indexed
+messages, sequence numbers count
+non-empty lines from zero. Line numbers always start at one. Results contain
+original JSONL message text, roles, timestamps when present, and tool names
+when available. Malformed JSONL lines are returned as raw text.
+
+The tool uses the absolute path stored in the index and opens it read-only. It
+rejects paths with traversal segments, non-regular files, and paths that pass
+through a symbolic link or Windows junction. The tool returns matching indexed
+messages with `source: "db-fallback"` if the file is missing, is shorter than
+the indexed byte offset, declares a different session ID on its first line,
+or lacks a match for its earliest indexed message. Matching files report
+`source: "disk"` and can include newly appended lines. The text budget defaults to 16,000 characters and applies
+across all returned message text. A partial final message ends in an ellipsis.
+The response reports `truncated` and `total_chars`.
+
 ## Design rules and why
 
 - Use `src/memory-service.mjs` for database operations shared with future local
   integrations. The stdio layer handles MCP schemas and response formatting.
-- Memory, note, and bootstrap calls share a process-local cache of up to 64
+- Memory, note, bootstrap, and search calls share a process-local cache of up to 64
   workspace identities. Entries expire after five seconds so repeated calls can
   skip Git subprocesses while still picking up changes to the workspace.
 - Deduplicate memory writes by project key, scope, and normalized content hash.

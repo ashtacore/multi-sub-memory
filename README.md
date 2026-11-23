@@ -2,6 +2,9 @@
 
 Cross-orchestrator local Memory MCP server (OMP, Claude Code, Codex, Antigravity) backed by Node's built-in `node:sqlite` (WAL + FTS5), local ONNX embeddings with FTS-only fallback, incremental transcript indexing, optional background Dreamer consolidation, optional read-only fail-open startup hooks, and a zero-build local web dashboard.
 
+The five Phase 1 MCP Core tools are `mem_memory`, `mem_note`, `mem_bootstrap`,
+`mem_search`, and `mem_expand`.
+
 ## Requirements
 
 - Node.js `^22.16.0 || >=24.0.0` (24/26+ recommended) with built-in `node:sqlite` and FTS5 support

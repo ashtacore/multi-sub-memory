@@ -17,7 +17,7 @@ import { decodeFloat32Vector } from '../src/embeddings.mjs';
 import { createMcpServer } from '../src/mcp-server.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
-const toolNames = ['mem_bootstrap', 'mem_memory', 'mem_note'];
+const toolNames = ['mem_bootstrap', 'mem_expand', 'mem_memory', 'mem_note', 'mem_search'];
 const uuidV7Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function tempDirectory(t) {
@@ -61,10 +61,12 @@ async function fixture(t, { defaultCwd = tempDirectory(t), embeddingEngine, conf
     memory: async (action, args) => JSON.parse(await readText('mem_memory', { action, ...args })),
     note: async (action, args) => JSON.parse(await readText('mem_note', { action, ...args })),
     bootstrap: (args = {}) => readText('mem_bootstrap', args),
+    search: async (args) => JSON.parse(await readText('mem_search', args)),
+    expand: async (args) => JSON.parse(await readText('mem_expand', args)),
   };
 }
 
-test('MCP advertises the three core tools and validates action inputs', async (t) => {
+test('MCP advertises the five core tools and validates action inputs', async (t) => {
   const { client, expectError } = await fixture(t);
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map(({ name }) => name).sort(), toolNames);
@@ -86,6 +88,70 @@ test('MCP advertises the three core tools and validates action inputs', async (t
   await expectError('mem_memory', { action: 'write', content: 'Fixture', scope: 'all' }, /scope/);
   await expectError('mem_note', { action: 'write', content: 'Fixture', status: 'dismissed' }, /status/);
   await expectError('mem_bootstrap', { token_budget: 0 }, /token_budget/);
+});
+
+test('MCP search uses the server workspace and accepts source and date filters', async (t) => {
+  const { memory, note, search, expectError } = await fixture(t);
+  const { memory: saved } = await memory('write', { content: 'A searchable fixture', source_orchestrator: 'codex' });
+  await note('write', { content: 'A searchable fixture note' });
+  const result = await search({
+    query: ' searchable ', sources: ['memory'], orchestrators: ['codex'],
+    since: new Date(saved.updated_at).toISOString(),
+  });
+  assert.deepEqual(result, {
+    mode: 'fts-only', query: 'searchable', scope: 'current_project', project_key: saved.project_key,
+    results: [{
+      source: 'memory', id: saved.id, score: 1 / 61, project_key: saved.project_key,
+      orchestrator: 'codex', timestamp: new Date(saved.updated_at).toISOString(), category: 'GENERAL',
+      preview: saved.content,
+    }],
+  });
+  assert.deepEqual((await search({ query: '  ' })).results, []);
+  await expectError('mem_search', {}, /query/);
+  await expectError('mem_search', { query: 'searchable', sources: ['unknown'] }, /sources/);
+  await expectError('mem_search', { query: 'searchable', since: 'invalid' }, /since/);
+});
+
+test('MCP expands the matching file when transcripts share a session and sequence across projects', async (t) => {
+  const { db, defaultCwd, memory, search, expand, expectError } = await fixture(t);
+  const { memory: saved } = await memory('write', { content: 'Workspace fixture' });
+  const sessionId = 'fixture-session';
+  const directory = fs.realpathSync(defaultCwd);
+  const text = 'Original  transcript';
+  const insertFile = db.prepare(`
+    INSERT INTO transcript_files (file_path, session_id, project_key, orchestrator, mtime_ms, last_indexed_at)
+    VALUES (?, ?, ?, 'codex', ?, ?)
+  `);
+  const insertMessage = db.prepare(`
+    INSERT INTO transcript_messages (file_id, seq, line_no, role, text)
+    VALUES (?, 7, 1, 'assistant', ?)
+  `);
+  const addTranscript = (name, projectKey, indexedAt, content) => {
+    const filePath = path.join(directory, name);
+    fs.writeFileSync(filePath, JSON.stringify({ role: 'assistant', content }) + '\n');
+    const { lastInsertRowid } = insertFile.run(filePath, sessionId, projectKey, indexedAt, indexedAt);
+    insertMessage.run(lastInsertRowid, content);
+    return lastInsertRowid;
+  };
+  const fileId = addTranscript('older.jsonl', saved.project_key, 1, text);
+  const newerFileId = addTranscript('newer.jsonl', 'other-project', 2, 'Different message');
+
+  const { results: [hit] } = await search({ query: 'transcript', sources: ['transcript'], scope: 'all_projects' });
+  assert.equal(hit.session_id, sessionId);
+  assert.equal(hit.file_id, fileId);
+  assert.equal(hit.seq, 7);
+  assert.equal((await expand({ session_id: sessionId })).file_id, newerFileId);
+  const result = await expand({ session_id: hit.session_id, file_id: hit.file_id, start_seq: hit.seq, end_seq: hit.seq });
+  assert.deepEqual(result, {
+    session_id: sessionId, file_id: fileId, orchestrator: 'codex', project_key: saved.project_key, source: 'disk',
+    truncated: false, total_chars: text.length,
+    messages: [{ seq: 7, line_no: 1, role: 'assistant', text }],
+  });
+  await expectError('mem_expand', { session_id: 'missing' }, /Session not found/);
+  await expectError('mem_expand', { session_id: sessionId, file_id: 0 }, /file_id/);
+  await expectError('mem_expand', { session_id: sessionId, line_start: 0 }, /line_start/);
+  await expectError('mem_expand', { session_id: sessionId, start_seq: 8, end_seq: 7 }, /end_seq/);
+  await expectError('mem_expand', { session_id: sessionId, max_chars: 0 }, /max_chars/);
 });
 
 test('memory writes deduplicate, merge metadata, and reactivate archived or superseded rows', async (t) => {
