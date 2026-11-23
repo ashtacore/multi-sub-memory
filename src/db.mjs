@@ -161,6 +161,16 @@ export const MIGRATIONS = [{
       );
     `);
   },
+}, {
+  version: 2,
+  up(db) {
+    db.exec(`
+      ALTER TABLE transcript_files ADD COLUMN line_count INTEGER;
+      ALTER TABLE transcript_files ADD COLUMN file_identity TEXT;
+      ALTER TABLE transcript_files ADD COLUMN checkpoint_hash TEXT;
+      ALTER TABLE transcript_files ADD COLUMN file_size INTEGER;
+    `);
+  },
 }];
 
 const busyWait = new Int32Array(new SharedArrayBuffer(4));

@@ -5,6 +5,11 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { ConfigSchema, expandHome, loadConfig, parseJsonc, stripJsonc, writeConfig } from '../src/config.mjs';
 
+const defaultIndexers = {
+  enabled: true, backgroundRefresh: false, refreshIntervalMs: 60_000,
+  omp: {}, claude: {}, codex: {}, agy: {},
+};
+
 function configFixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-config-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -23,6 +28,7 @@ test('loads defaults and expands only the current home marker', (t) => {
     embedding: { model: 'BAAI/bge-base-en-v1.5', enabled: true },
     bootstrap: { tokenBudget: 2500 },
     dreamer: { enabled: false },
+    indexers: defaultIndexers,
   });
   assert.equal(expandHome('~', homeDir), homeDir);
   assert.equal(expandHome('~/folder/memory.db', homeDir), path.join(homeDir, 'folder', 'memory.db'));
@@ -78,10 +84,12 @@ test('merges environment, project, user, and default config in precedence order'
     dbPath: '~/user.db',
     embedding: { model: 'user-model', enabled: false },
     bootstrap: { tokenBudget: 1000 },
+    indexers: { enabled: false, omp: { sessionsDir: '~/user-omp' }, claude: { sessionsDir: '~/user-claude' } },
   });
   writeConfig(path.join(projectRoot, '.multi-sub-memory.jsonc'), {
     dbPath: '~/project.db',
     embedding: { model: 'project-model' },
+    indexers: { backgroundRefresh: false, refreshIntervalMs: 30_000, omp: {}, claude: { sessionsDir: '~/project-claude' } },
   });
 
   assert.deepEqual(loadConfig(options), {
@@ -89,6 +97,10 @@ test('merges environment, project, user, and default config in precedence order'
     embedding: { model: 'project-model', enabled: false },
     bootstrap: { tokenBudget: 1000 },
     dreamer: { enabled: false },
+    indexers: {
+      ...defaultIndexers, enabled: false, backgroundRefresh: false, refreshIntervalMs: 30_000,
+      omp: { sessionsDir: path.join(homeDir, 'user-omp') }, claude: { sessionsDir: path.join(homeDir, 'project-claude') },
+    },
   });
   assert.equal(loadConfig({ ...options, projectConfigPath: path.join(projectRoot, 'absent.jsonc') }).dbPath,
     path.join(homeDir, 'user.db'));
@@ -105,6 +117,10 @@ test('merges environment, project, user, and default config in precedence order'
     embedding: { model: 'env-model', enabled: false },
     bootstrap: { tokenBudget: 1200 },
     dreamer: { enabled: false },
+    indexers: {
+      ...defaultIndexers, backgroundRefresh: false, refreshIntervalMs: 30_000,
+      claude: { sessionsDir: path.join(homeDir, 'project-claude') },
+    },
   });
   env.MULTI_SUB_MEMORY_NO_EMBEDDINGS = 'no';
   assert.equal(loadConfig({ ...options, env }).embedding.enabled, true);
@@ -125,6 +141,15 @@ test('rejects invalid values and unknown keys in individual config layers', (t) 
     { embedding: { unknown: true } },
     { unexpected: true },
     { dbPath: '' },
+    { indexers: { enabled: 'true' } },
+    { indexers: { backgroundRefresh: 1 } },
+    { indexers: { refreshIntervalMs: 0 } },
+    { indexers: { refreshIntervalMs: 2 ** 31 } },
+    { indexers: { unsupported: {} } },
+    { indexers: { omp: { sessionsDir: '' } } },
+    { indexers: { claude: { sessionsDir: false } } },
+    { indexers: { codex: { otherDir: '/fixtures' } } },
+    { indexers: { agy: null } },
   ];
   for (const invalid of invalidConfigs) {
     fs.writeFileSync(projectConfigPath, JSON.stringify(invalid));

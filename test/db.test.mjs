@@ -6,7 +6,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
-import { acquireLease, hashNormalizedContent, normalizeContent, openDatabase, releaseLease, runMigrations } from '../src/db.mjs';
+import { MIGRATIONS, acquireLease, hashNormalizedContent, normalizeContent, openDatabase, releaseLease, runMigrations } from '../src/db.mjs';
 import { cosineSimilarity, decodeFloat32Vector, encodeFloat32Vector } from '../src/embeddings.mjs';
 
 function databaseFixture(t) {
@@ -89,7 +89,7 @@ test('creates the core schema in WAL mode and preserves the migration record on 
 
   const selectMigrations = 'SELECT version, applied_at FROM schema_migrations ORDER BY version';
   const migrations = db.prepare(selectMigrations).all();
-  assert.deepEqual(migrations.map(({ version }) => version), [1]);
+  assert.deepEqual(migrations.map(({ version }) => version), [1, 2]);
   assert.ok(Number.isInteger(migrations[0].applied_at) && migrations[0].applied_at > 0);
   addMemory(db);
   const reopened = fixture.open();
@@ -122,8 +122,8 @@ test('two processes can open and migrate a fresh database concurrently', async (
     const db = openDatabase(dbPath);
     try {
       assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
-      assert.deepEqual(db.prepare('SELECT version FROM schema_migrations').all()
-        .map(({ version }) => version), [1]);
+      assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
+        .map(({ version }) => version), [1, 2]);
     } finally {
       db.close();
     }
@@ -138,8 +138,8 @@ test('two processes can open and migrate a fresh database concurrently', async (
   }
 
   const db = fixture.open({ readOnly: true });
-  assert.deepEqual(db.prepare('SELECT version FROM schema_migrations').all()
-    .map(({ version }) => version), [1]);
+  assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
+    .map(({ version }) => version), [1, 2]);
 });
 
 test('rolls back both schema changes and the migration record when migration fails', (t) => {
@@ -150,7 +150,23 @@ test('rolls back both schema changes and the migration record when migration fai
   assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name = 'memories'").get(), undefined);
   db.exec('DROP TABLE notes');
   runMigrations(db);
-  assert.equal(count(db, 'schema_migrations'), 1);
+  assert.equal(count(db, 'schema_migrations'), 2);
+});
+
+test('adds transcript checkpoint fields to a version 1 database without losing rows', (t) => {
+  const db = databaseFixture(t).openUnmigrated();
+  db.exec(`
+    CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+    INSERT INTO schema_migrations VALUES (1, 1);
+  `);
+  MIGRATIONS[0].up(db);
+  db.exec(`
+    INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, mtime_ms, byte_offset, last_indexed_at)
+    VALUES ('fixture.jsonl', 'omp', 'session', 'project', 1, 42, 1);
+  `);
+  runMigrations(db);
+  const { byte_offset, line_count, file_identity } = db.prepare('SELECT * FROM transcript_files').get();
+  assert.deepEqual([byte_offset, line_count, file_identity], [42, null, null]);
 });
 
 test('read-only connections allow reads, reject writes, and skip migrations and directory creation', (t) => {

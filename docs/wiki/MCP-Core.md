@@ -10,6 +10,9 @@ It closes the MCP transport and its own database connection when stdin ends or
 closes, the transport closes, or it receives SIGINT or SIGTERM. It leaves a
 caller-supplied database connection open.
 
+Enable automatic transcript refresh with `indexers.backgroundRefresh`. See
+[Indexers](Indexers.md) for session discovery, CLI indexing, and configuration.
+
 ## Tools
 
 | Tool | Action | Behavior |
@@ -57,7 +60,8 @@ accepts `omp`, `claude`, `codex`, and `agy`. Use `since` with an ISO 8601
 date or timestamp to include records from that instant onward. Date-only values
 start at midnight UTC. Memories and notes use their update time. Transcript
 messages use their own timestamp when valid and the file's last index time
-otherwise.
+otherwise. OMP and Claude Code indexing accepts ISO timestamps and epoch
+milliseconds from transcripts and stores valid values as UTC ISO 8601.
 
 FTS5 treats user input as quoted search terms and ranks candidates with BM25.
 When the local engine can embed the query, search also ranks eligible memory and
@@ -85,10 +89,13 @@ when available. Malformed JSONL lines are returned as raw text.
 The tool uses the absolute path stored in the index and opens it read-only. It
 rejects paths with traversal segments, non-regular files, and paths that pass
 through a symbolic link or Windows junction. The tool returns matching indexed
-messages with `source: "db-fallback"` if the file is missing, is shorter than
-the indexed byte offset, declares a different session ID on its first line,
-or lacks a match for its earliest indexed message. Matching files report
-`source: "disk"` and can include newly appended lines. The text budget defaults to 16,000 characters and applies
+messages with `source: "db-fallback"` if the file is missing, its opened
+device and inode differ from the stored file identity, it is shorter than the
+indexed byte offset, its first line declares a different session ID (including
+an OMP session header), or its earliest indexed message fails to match. Older
+rows without a stored identity still use the session and message checks.
+Matching files report `source: "disk"` and can include newly appended lines.
+The text budget defaults to 16,000 characters and applies
 across all returned message text. A partial final message ends in an ellipsis.
 The response reports `truncated` and `total_chars`.
 

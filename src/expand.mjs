@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { extractMessageContent, normalizeTranscriptRole, transcriptFileIdentity } from './indexers/types.mjs';
 import { truncatePreview } from './search.mjs';
 
 export const DEFAULT_EXPAND_MAX_CHARS = 16000;
@@ -67,6 +68,7 @@ function openIndexedFile(db, file) {
     if (current.dev !== opened.dev || current.ino !== opened.ino) {
       throw new Error('Indexed transcript changed while opening');
     }
+    if (file.file_identity != null && file.file_identity !== transcriptFileIdentity(opened)) return null;
     if (byte_offset > 0 && opened.size < BigInt(byte_offset)) return null;
     if (!matchesIndexedTranscript(db, file, fd)) return null;
     keepOpen = true;
@@ -136,7 +138,8 @@ function matchesIndexedTranscript(db, file, fd) {
     lineNo++;
     if (lineNo === 1) {
       const record = parseRecord(line);
-      const sessionIds = [record?.session_id, record?.sessionId, record?.message?.session_id, record?.message?.sessionId];
+      const sessionIds = [record?.session_id, record?.sessionId, record?.message?.session_id, record?.message?.sessionId,
+        record?.type === 'session' ? record.id : undefined];
       if (sessionIds.some((id) => typeof id === 'string' && id !== file.session_id)) return false;
       if (!anchor) return true;
     }
@@ -158,21 +161,17 @@ function parseLine(line) {
   if (message !== record) tools.push(...normalizeToolNames(message.tool_names));
   const calls = message.tool_calls ?? record.tool_calls;
   if (Array.isArray(calls)) tools.push(...calls.map(toolName));
-  const textBlocks = [];
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (typeof block?.text === 'string') textBlocks.push(block.text);
-      if (['tool_use', 'tool_call', 'function_call', 'toolCall'].includes(block?.type)) tools.push(toolName(block));
-    }
-  }
+  const { text, toolNames } = extractMessageContent(content);
+  tools.push(...toolNames);
   const names = [...new Set(normalizeToolNames(tools))];
   const timestamp = message.timestamp ?? record.timestamp;
   return {
-    role: message.role ?? record.role ?? record.type ?? 'raw',
+    role: normalizeTranscriptRole(message.role) ?? normalizeTranscriptRole(record.role)
+      ?? normalizeTranscriptRole(record.type) ?? 'raw',
     ...(timestamp == null ? {} : { timestamp }),
     text: typeof message.text === 'string' ? message.text
       : typeof record.text === 'string' ? record.text
-      : typeof content === 'string' ? content : textBlocks.join('\n'),
+      : text,
     ...(names.length ? { tool_names: names } : {}),
   };
 }
@@ -245,7 +244,7 @@ export function expandSession(db, options = {}) {
   validateRange('line_start', line_start, 'line_end', line_end, 1);
   validateInteger('max_chars', max_chars, 1);
 
-  const files = 'SELECT id, session_id, orchestrator, project_key, file_path, byte_offset FROM transcript_files';
+  const files = 'SELECT id, session_id, orchestrator, project_key, file_path, byte_offset, file_identity FROM transcript_files';
   const file = file_id === undefined
     ? db.prepare(`${files} WHERE session_id = ? ORDER BY last_indexed_at DESC, id DESC LIMIT 1`).get(session_id.trim())
     : db.prepare(`${files} WHERE id = ? AND session_id = ?`).get(file_id, session_id.trim());

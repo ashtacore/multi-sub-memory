@@ -6,6 +6,7 @@ import { loadConfig } from './config.mjs';
 import { openDatabase } from './db.mjs';
 import { createEmbeddingEngine } from './embeddings.mjs';
 import { expandSession } from './expand.mjs';
+import { runIndexers } from './indexers/runner.mjs';
 import {
   MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
   archiveMemory, dismissNote, getMemory, listMemories, readNotes,
@@ -146,10 +147,17 @@ export async function startStdioServer({ cwd, config, db, embeddingEngine } = {}
   const settings = config ?? loadConfig({ cwd });
   const database = db ?? openDatabase(settings.dbPath);
   const input = process.stdin;
+  const refreshAbort = new AbortController();
   let server;
   let shutdown;
+  let initialRefresh;
+  let periodicRefresh;
+  let refreshing;
 
   function close() {
+    refreshAbort.abort();
+    clearTimeout(initialRefresh);
+    clearInterval(periodicRefresh);
     // Let requests already read from stdin finish synchronous work before closing.
     shutdown ??= new Promise((resolve) => setImmediate(resolve)).then(async () => {
       input.off('end', requestClose);
@@ -159,7 +167,11 @@ export async function startStdioServer({ cwd, config, db, embeddingEngine } = {}
       try {
         await server?.close();
       } finally {
-        if (!db) database.close();
+        try {
+          await refreshing;
+        } finally {
+          if (!db) database.close();
+        }
       }
     });
     return shutdown;
@@ -174,10 +186,11 @@ export async function startStdioServer({ cwd, config, db, embeddingEngine } = {}
   }
 
   try {
+    const engine = embeddingEngine ?? createEmbeddingEngine({ embedding: settings.embedding });
     server = createMcpServer({
       db: database,
       config: settings,
-      embeddingEngine: embeddingEngine ?? createEmbeddingEngine({ embedding: settings.embedding }),
+      embeddingEngine: engine,
       defaultCwd: cwd,
     });
     const transport = new StdioServerTransport(input, process.stdout);
@@ -188,6 +201,20 @@ export async function startStdioServer({ cwd, config, db, embeddingEngine } = {}
     process.once('SIGTERM', requestClose);
     await server.connect(transport);
     if (input.readableEnded || input.destroyed) requestClose();
+    if (!shutdown && settings.indexers?.enabled && settings.indexers.backgroundRefresh) {
+      const refresh = () => {
+        if (refreshing || refreshAbort.signal.aborted || input.readableEnded || input.destroyed) return;
+        refreshing = runIndexers({
+          db: database, config: settings, embeddingEngine: engine, signal: refreshAbort.signal,
+        }).then(({ errors }) => {
+          if (errors.length) process.stderr.write(`Transcript refresh encountered ${errors.length} errors.\n`);
+        }).catch((error) => {
+          process.stderr.write(`Transcript refresh failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        }).finally(() => { refreshing = undefined; });
+      };
+      initialRefresh = setTimeout(refresh, 0).unref();
+      periodicRefresh = setInterval(refresh, settings.indexers.refreshIntervalMs).unref();
+    }
     return { server, close };
   } catch (error) {
     try {
