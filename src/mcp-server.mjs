@@ -1,0 +1,170 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
+import { formatBootstrap } from './bootstrap.mjs';
+import { loadConfig } from './config.mjs';
+import { openDatabase } from './db.mjs';
+import { createEmbeddingEngine } from './embeddings.mjs';
+import {
+  MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
+  archiveMemory, dismissNote, getMemory, listMemories, readNotes,
+  updateMemory, updateNote, writeMemory, writeNote,
+} from './memory-service.mjs';
+
+const cwdField = z.string().min(1).describe('Workspace directory. Defaults to the server workspace.').optional();
+const recordFields = {
+  id: z.string().trim().min(1).optional(),
+  content: z.string().optional(),
+  cwd: cwdField,
+  source_orchestrator: z.string().optional(),
+  source_session_id: z.string().optional(),
+};
+
+function requireId({ action, id }) {
+  if (!id) throw new Error(`id is required for ${action}`);
+  return id;
+}
+
+function textResult(text) {
+  return { content: [{ type: 'text', text }] };
+}
+
+function toolHandler(run, format = JSON.stringify) {
+  return async (input) => {
+    try {
+      return textResult(format(await run(input)));
+    } catch (error) {
+      return { ...textResult(error instanceof Error ? error.message : String(error)), isError: true };
+    }
+  };
+}
+
+export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
+  const server = new McpServer({ name: 'multi-sub-memory', version: '0.1.0' });
+  const context = { embeddingEngine, defaultCwd };
+
+  server.registerTool('mem_memory', {
+    description: 'Write, update, archive, get, or list durable project and global memories. Write requires content. Update, archive, and get require id.',
+    inputSchema: {
+      ...recordFields,
+      action: z.enum(['write', 'update', 'archive', 'get', 'list']),
+      category: z.enum(MEMORY_CATEGORIES).optional(),
+      scope: z.enum([...MEMORY_SCOPES, 'all']).describe('Use all only for list.').optional(),
+      importance: z.number().int().min(1).max(5).optional(),
+      status: z.enum([...MEMORY_STATUSES, 'all']).describe('Use all only for list.').optional(),
+      superseded_by: z.string().trim().min(1).optional(),
+      metadata: z.json().optional(),
+      limit: z.number().int().optional(),
+    },
+  }, toolHandler((input) => {
+    switch (input.action) {
+      case 'write':
+        return writeMemory(db, input, context);
+      case 'update':
+        requireId(input);
+        if (input.status === 'all') throw new Error('Memory status cannot be all for update');
+        return updateMemory(db, input, context);
+      case 'archive':
+        requireId(input);
+        return archiveMemory(db, input);
+      case 'get':
+        return getMemory(db, requireId(input));
+      case 'list':
+        return listMemories(db, input, context);
+    }
+  }));
+
+  server.registerTool('mem_note', {
+    description: 'Write, read, update, or dismiss handoff notes. Write requires content. Update and dismiss require id.',
+    inputSchema: {
+      ...recordFields,
+      action: z.enum(['write', 'read', 'update', 'dismiss']),
+      status: z.enum([...NOTE_STATUSES, 'all']).describe('New notes may be active or pending. Use all only for read.').optional(),
+      surface_condition: z.string().nullable().optional(),
+      include_global: z.boolean().optional(),
+    },
+  }, toolHandler((input) => {
+    switch (input.action) {
+      case 'write':
+        return writeNote(db, input, context);
+      case 'read':
+        return readNotes(db, input, context);
+      case 'update':
+        requireId(input);
+        if (input.status === 'all') throw new Error('Note status cannot be all for update');
+        return updateNote(db, input);
+      case 'dismiss':
+        return dismissNote(db, requireId(input));
+    }
+  }));
+
+  server.registerTool('mem_bootstrap', {
+    description: 'Return a token-budgeted summary of active project and global memories and project handoff notes.',
+    inputSchema: {
+      cwd: cwdField,
+      token_budget: z.number().int().positive().optional(),
+      include_notes: z.boolean().optional(),
+    },
+  }, toolHandler(({ cwd, token_budget, include_notes }) => formatBootstrap(db, {
+    cwd, defaultCwd, config, tokenBudget: token_budget, includeNotes: include_notes,
+  }), ({ text }) => text));
+
+  return server;
+}
+
+export async function startStdioServer({ cwd, config, db, embeddingEngine } = {}) {
+  const settings = config ?? loadConfig({ cwd });
+  const database = db ?? openDatabase(settings.dbPath);
+  const input = process.stdin;
+  let server;
+  let shutdown;
+
+  function close() {
+    // Let requests already read from stdin finish synchronous work before closing.
+    shutdown ??= new Promise((resolve) => setImmediate(resolve)).then(async () => {
+      input.off('end', requestClose);
+      input.off('close', requestClose);
+      process.off('SIGINT', requestClose);
+      process.off('SIGTERM', requestClose);
+      try {
+        await server?.close();
+      } finally {
+        if (!db) database.close();
+      }
+    });
+    return shutdown;
+  }
+
+  function requestClose() {
+    if (shutdown) return;
+    void close().catch((error) => {
+      process.stderr.write(`MCP shutdown failed: ${error.message}\n`);
+      process.exitCode = 1;
+    });
+  }
+
+  try {
+    server = createMcpServer({
+      db: database,
+      config: settings,
+      embeddingEngine: embeddingEngine ?? createEmbeddingEngine({ embedding: settings.embedding }),
+      defaultCwd: cwd,
+    });
+    const transport = new StdioServerTransport(input, process.stdout);
+    transport.onclose = requestClose;
+    input.once('end', requestClose);
+    input.once('close', requestClose);
+    process.once('SIGINT', requestClose);
+    process.once('SIGTERM', requestClose);
+    await server.connect(transport);
+    if (input.readableEnded || input.destroyed) requestClose();
+    return { server, close };
+  } catch (error) {
+    try {
+      await close();
+    } catch (closeError) {
+      throw new AggregateError([error, closeError], `MCP startup failed: ${error.message}; cleanup failed: ${closeError.message}`);
+    }
+    throw error;
+  }
+}

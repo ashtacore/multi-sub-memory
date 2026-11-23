@@ -17,4 +17,6 @@ Cross-orchestrator local Memory MCP server (OMP, Claude Code, Codex, Antigravity
 
 ## Quick start
 
-*(Package scaffolding and CLI entrypoints are implemented in [Issue #1](https://github.com/ashtacore/multi-sub-memory/issues/1) through [Issue #4](https://github.com/ashtacore/multi-sub-memory/issues/4).)*
+Configure your MCP host to launch `npx multi-sub-memory` over stdio. Pass
+`--cwd <path>` to set the default workspace for calls. See the [MCP core
+guide](docs/wiki/MCP-Core.md) for tool actions and workspace selection.
