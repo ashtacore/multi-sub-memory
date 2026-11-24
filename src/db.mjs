@@ -179,6 +179,14 @@ export const MIGRATIONS = [{
     if (existing) return;
     db.exec('ALTER TABLE transcript_messages ADD COLUMN embed_eligible INTEGER NOT NULL DEFAULT 0;');
   },
+}, {
+  version: 4,
+  up(db) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_transcript_messages_file_line_seq
+        ON transcript_messages (file_id, line_no, seq);
+    `);
+  },
 }];
 
 const busyWait = new Int32Array(new SharedArrayBuffer(4));

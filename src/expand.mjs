@@ -215,15 +215,18 @@ function diskMessages(db, file, fd, options, maxChars) {
         if (sessionIds.some((id) => typeof id === 'string' && id !== file.session_id)) return null;
       }
       const atAnchor = line_no === anchor?.line_no;
-      const atRequested = line_no === requested?.peek()?.line_no;
+      const outputComplete = result.truncated || line_no > line_end;
+      if (outputComplete && !atAnchor) continue;
+      const atRequested = !outputComplete && line_no === requested?.peek()?.line_no;
       let seq = !anchor && line.trim() ? nonEmptySeq++ : undefined;
-      const include = line_no >= line_start && line_no <= line_end
+      const include = !outputComplete && line_no >= line_start
         && (!hasSeqRange || (anchor ? atRequested : seq !== undefined && seq >= (start_seq ?? 0)));
       if (atAnchor || atRequested || include) {
         const parsed = parseLine(line, record);
         if (atAnchor) {
           if (!matchesMessage(parsed, anchor)) return null;
           anchorValidated = true;
+          if (outputComplete) break;
         }
         while (line_no === requested?.peek()?.line_no) {
           const expected = requested.peek();
@@ -233,10 +236,10 @@ function diskMessages(db, file, fd, options, maxChars) {
         }
         if (include) {
           appendMessage(result, { ...(seq === undefined ? {} : { seq }), line_no, ...parsed }, maxChars);
-          if (result.truncated) break;
         }
       }
-      if (anchorValidated && (line_no >= line_end || (anchor && hasSeqRange && !requested.peek()))) break;
+      if (anchorValidated && (result.truncated || line_no >= line_end
+        || (anchor && hasSeqRange && !requested.peek()))) break;
       if (!anchor && end_seq !== undefined && seq === end_seq) break;
     }
     return anchorValidated && (result.truncated || !requested?.peek()) ? result : null;

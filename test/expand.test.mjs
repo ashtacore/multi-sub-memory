@@ -82,6 +82,34 @@ test('expansion reads original JSONL text using intersecting indexed sequence an
   assert.deepEqual(expandSession(db, { session_id: 'session', start_seq: 5, end_seq: 5, line_start: 2 }).messages, []);
 });
 
+test('expansion keeps a truncated raw prefix after validating a later indexed anchor', (t) => {
+  const { db, directory } = fixture(t);
+  const filePath = path.join(directory, 'transcript.jsonl');
+  const raw = 'raw-unparsed-prefix-text';
+  const anchor = { role: 'user', text: 'First indexed user turn' };
+  writeLines(filePath, [raw, anchor]);
+  const fileId = indexedFile(db, filePath);
+  indexedMessage(db, fileId, 0, 2, anchor.text, null, anchor.role);
+
+  const options = { session_id: 'session', line_start: 1, line_end: 1, max_chars: 8 };
+  const result = expandSession(db, options);
+  assert.equal(result.source, 'disk');
+  assert.equal(result.truncated, true);
+  assert.deepEqual(result.messages, [{ line_no: 1, role: 'raw', text: 'raw-unp…' }]);
+
+  const exact = expandSession(db, { ...options, max_chars: raw.length });
+  assert.equal(exact.source, 'disk');
+  assert.equal(exact.truncated, false);
+  assert.deepEqual(exact.messages, [{ line_no: 1, role: 'raw', text: raw }]);
+
+  for (const lines of [[raw, { ...anchor, text: 'Changed user turn' }], [raw]]) {
+    writeLines(filePath, lines);
+    const fallback = expandSession(db, options);
+    assert.equal(fallback.source, 'db-fallback');
+    assert.deepEqual(fallback.messages, []);
+  }
+});
+
 test('unindexed sequence ranges count non-empty lines from zero', (t) => {
   const { db, directory } = fixture(t);
   const filePath = path.join(directory, 'transcript.jsonl');

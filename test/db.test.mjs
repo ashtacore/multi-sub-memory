@@ -83,18 +83,33 @@ test('creates the core schema in WAL mode and preserves the migration record on 
   }
   for (const index of ['idx_memories_project_status_rank', 'idx_notes_project_status',
     'idx_transcript_files_session_id', 'idx_transcript_files_project_orchestrator',
-    'idx_dream_runs_project_started']) {
+    'idx_transcript_messages_file_line_seq', 'idx_dream_runs_project_started']) {
     assert.equal(objects.get(index), 'index', index);
   }
 
   const selectMigrations = 'SELECT version, applied_at FROM schema_migrations ORDER BY version';
   const migrations = db.prepare(selectMigrations).all();
-  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3]);
+  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4]);
   assert.ok(Number.isInteger(migrations[0].applied_at) && migrations[0].applied_at > 0);
   addMemory(db);
   const reopened = fixture.open();
   assert.deepEqual(reopened.prepare(selectMigrations).all(), migrations);
   assert.equal(count(reopened, 'memories'), 1);
+});
+
+test('unrestricted transcript expansion queries read messages in index order', (t) => {
+  const db = databaseFixture(t).open();
+  const queries = [
+    `SELECT line_no, role, text, tool_names FROM transcript_messages
+      WHERE file_id = ? ORDER BY line_no ASC LIMIT 1`,
+    `SELECT line_no, seq, role, text, tool_names FROM transcript_messages
+      WHERE file_id = ? ORDER BY line_no ASC, seq ASC`,
+  ];
+  for (const query of queries) {
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all(1).map(({ detail }) => detail).join('\n');
+    assert.match(plan, /\bUSING (?:COVERING )?INDEX idx_transcript_messages_file_line_seq\b/i, query);
+    assert.doesNotMatch(plan, /TEMP B-TREE/i, query);
+  }
 });
 
 test('two processes can open and migrate a fresh database concurrently', async (t) => {
@@ -123,7 +138,7 @@ test('two processes can open and migrate a fresh database concurrently', async (
     try {
       assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
       assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-        .map(({ version }) => version), [1, 2, 3]);
+        .map(({ version }) => version), [1, 2, 3, 4]);
     } finally {
       db.close();
     }
@@ -139,7 +154,7 @@ test('two processes can open and migrate a fresh database concurrently', async (
 
   const db = fixture.open({ readOnly: true });
   assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-    .map(({ version }) => version), [1, 2, 3]);
+    .map(({ version }) => version), [1, 2, 3, 4]);
 });
 
 test('rolls back both schema changes and the migration record when migration fails', (t) => {
@@ -150,7 +165,7 @@ test('rolls back both schema changes and the migration record when migration fai
   assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name = 'memories'").get(), undefined);
   db.exec('DROP TABLE notes');
   runMigrations(db);
-  assert.equal(count(db, 'schema_migrations'), 3);
+  assert.equal(count(db, 'schema_migrations'), 4);
 });
 
 test('adds transcript checkpoints and embedding eligibility to a version 1 database without losing rows', (t) => {
@@ -194,7 +209,7 @@ test('reopens a pre-repair version 2 database and adds embedding eligibility wit
 
   const reopened = fixture.open();
   const migrations = reopened.prepare('SELECT version, applied_at FROM schema_migrations ORDER BY version').all();
-  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3]);
+  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4]);
   assert.deepEqual(migrations.slice(0, 2).map(({ applied_at }) => applied_at), [1, 2]);
   const { id, byte_offset, line_count, file_identity, checkpoint_hash, file_size } = reopened
     .prepare('SELECT * FROM transcript_files').get();
