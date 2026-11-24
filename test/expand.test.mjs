@@ -35,6 +35,10 @@ function writeLines(filePath, lines) {
   fs.writeFileSync(filePath, lines.map((line) => typeof line === 'string' ? line : JSON.stringify(line)).join('\r\n') + '\r\n');
 }
 
+function messageChars(messages) {
+  return messages.reduce((total, message) => total + JSON.stringify(message).length, 0);
+}
+
 test('expansion reads original JSONL text using intersecting indexed sequence and line ranges', (t) => {
   const { db, directory } = fixture(t);
   const filePath = path.join(directory, 'transcript.jsonl');
@@ -60,16 +64,17 @@ test('expansion reads original JSONL text using intersecting indexed sequence an
   indexedMessage(db, fileId, 21, 4, 'Trailing record', null, 'user');
 
   const result = expandSession(db, { session_id: ' session ', start_seq: 5, end_seq: 20 });
+  const expectedMessages = [
+    { seq: 5, line_no: 1, role: 'user', timestamp, text: 'Original  request  ', tool_names: ['fixture'] },
+    {
+      seq: 13, line_no: 2, role: 'assistant', timestamp, text: 'First block\nSecond  block',
+      tool_names: ['inspect', 'summarize', 'read', 'lookup'],
+    },
+  ];
   assert.deepEqual(result, {
     session_id: 'session', file_id: fileId, orchestrator: 'claude', project_key: 'fixture', source: 'disk', truncated: false,
-    total_chars: 'Original  request  First block\nSecond  block'.length,
-    messages: [
-      { seq: 5, line_no: 1, role: 'user', timestamp, text: 'Original  request  ', tool_names: ['fixture'] },
-      {
-        seq: 13, line_no: 2, role: 'assistant', timestamp, text: 'First block\nSecond  block',
-        tool_names: ['inspect', 'summarize', 'read', 'lookup'],
-      },
-    ],
+    total_chars: messageChars(expectedMessages),
+    messages: expectedMessages,
   });
   const lineRange = expandSession(db, { session_id: 'session', line_start: 2, line_end: 3 });
   assert.deepEqual(lineRange.messages, [
@@ -91,13 +96,15 @@ test('expansion keeps a truncated raw prefix after validating a later indexed an
   const fileId = indexedFile(db, filePath);
   indexedMessage(db, fileId, 0, 2, anchor.text, null, anchor.role);
 
-  const options = { session_id: 'session', line_start: 1, line_end: 1, max_chars: 8 };
+  const truncatedBudget = JSON.stringify({ line_no: 1, role: 'raw', text: 'raw-unp…' }).length;
+  const options = { session_id: 'session', line_start: 1, line_end: 1, max_chars: truncatedBudget };
   const result = expandSession(db, options);
   assert.equal(result.source, 'disk');
   assert.equal(result.truncated, true);
   assert.deepEqual(result.messages, [{ line_no: 1, role: 'raw', text: 'raw-unp…' }]);
 
-  const exact = expandSession(db, { ...options, max_chars: raw.length });
+  const exactBudget = JSON.stringify({ line_no: 1, role: 'raw', text: raw }).length;
+  const exact = expandSession(db, { ...options, max_chars: exactBudget });
   assert.equal(exact.source, 'disk');
   assert.equal(exact.truncated, false);
   assert.deepEqual(exact.messages, [{ line_no: 1, role: 'raw', text: raw }]);
@@ -183,18 +190,52 @@ test('expansion keeps appends and falls back when a transcript is replaced at th
   }
 });
 
-test('expansion includes the tool name from an OMP toolCall-only assistant turn', (t) => {
+test('expansion rejects a rotated OMP transcript with the same opening user prompt', (t) => {
   const { db, directory } = fixture(t);
   const filePath = path.join(directory, 'omp.jsonl');
-  writeLines(filePath, [{
+  const header = { type: 'session', id: 'session' };
+  const user = { type: 'message', message: { role: 'user', content: 'Shared opening prompt', timestamp } };
+  const assistant = { type: 'message', message: { role: 'assistant', content: 'Original follow-up', timestamp } };
+  writeLines(filePath, [header, user, assistant]);
+  const byteOffset = fs.statSync(filePath).size;
+  const fileId = indexedFile(db, filePath, { orchestrator: 'omp', byteOffset });
+  indexedMessage(db, fileId, 0, 2, user.message.content, null, 'user');
+  indexedMessage(db, fileId, 1, 3, assistant.message.content);
+  const options = { session_id: header.id, start_seq: 0 };
+  assert.equal(expandSession(db, options).source, 'disk');
+
+  const replacement = { ...assistant, message: { ...assistant.message, content: 'Replacement session follow-up' } };
+  writeLines(filePath, [{ ...header, id: 'another-session' }, user, replacement]);
+  assert.ok(fs.statSync(filePath).size >= byteOffset);
+  const result = expandSession(db, options);
+  assert.equal(result.source, 'db-fallback');
+  assert.deepEqual(result.messages.map(({ text }) => text), [user.message.content, assistant.message.content]);
+});
+
+test('OMP tool-call-only turns count toward the expansion budget on disk and in fallback', (t) => {
+  const { db, directory } = fixture(t);
+  const filePath = path.join(directory, 'omp.jsonl');
+  const toolRecord = {
     type: 'message',
-    message: { role: 'assistant', content: [{ type: 'toolCall', name: 'inspect' }] },
-  }]);
+    message: { role: 'assistant', timestamp, content: [{ type: 'toolCall', name: 'inspect' }] },
+  };
+  writeLines(filePath, [toolRecord, toolRecord]);
   const fileId = indexedFile(db, filePath, { orchestrator: 'omp' });
   indexedMessage(db, fileId, 0, 1, '', '["inspect"]');
-  const result = expandSession(db, { session_id: 'session' });
-  assert.equal(result.source, 'disk');
-  assert.deepEqual(result.messages, [{ seq: 0, line_no: 1, role: 'assistant', text: '', tool_names: ['inspect'] }]);
+  indexedMessage(db, fileId, 1, 2, '', '["inspect"]');
+  const first = { seq: 0, line_no: 1, role: 'assistant', timestamp, text: '', tool_names: ['inspect'] };
+  const oneRecordBudget = messageChars([first]);
+  for (const source of ['disk', 'db-fallback']) {
+    if (source === 'db-fallback') fs.unlinkSync(filePath);
+    for (const [max_chars, messages] of [[1, []], [oneRecordBudget, [first]]]) {
+      const result = expandSession(db, { session_id: 'session', max_chars });
+      assert.equal(result.source, source);
+      assert.equal(result.truncated, true);
+      assert.equal(result.total_chars, messageChars(messages));
+      assert.ok(result.total_chars <= max_chars);
+      assert.deepEqual(result.messages, messages);
+    }
+  }
 });
 
 test('expansion falls back when a requested tool-only turn names a different tool', (t) => {
@@ -295,33 +336,38 @@ test('incremental expansion preserves UTF-8 and CRLF across chunk boundaries', (
   indexedMessage(db, fileId, 2, 1, first, null, 'raw');
   indexedMessage(db, fileId, 10, 2, 'last line', null, 'raw');
 
-  const result = expandSession(db, { session_id: 'session', line_end: 1, max_chars: first.length });
-  assert.deepEqual(result.messages, [{ seq: 2, line_no: 1, role: 'raw', text: first }]);
+  const messages = [{ seq: 2, line_no: 1, role: 'raw', text: first }];
+  const result = expandSession(db, { session_id: 'session', line_end: 1, max_chars: messageChars(messages) });
+  assert.deepEqual(result.messages, messages);
   assert.equal(result.truncated, false);
   const tail = expandSession(db, { session_id: 'session', start_seq: 10, end_seq: 10 });
   assert.deepEqual(tail.messages, [{ seq: 10, line_no: 2, role: 'raw', text: 'last line' }]);
 });
 
-test('expansion truncates the final message within its text budget on disk and in fallback', (t) => {
+test('expansion truncates the final message within its JSON budget on disk and in fallback', (t) => {
   const { db, directory } = fixture(t);
   const filePath = path.join(directory, 'transcript.jsonl');
-  writeLines(filePath, ['abc', 'defghi', 'third']);
+  writeLines(filePath, ['abc', 'd\\efghi', 'third']);
   const fileId = indexedFile(db, filePath);
   indexedMessage(db, fileId, 0, 1, 'abc', null, 'raw');
-  indexedMessage(db, fileId, 1, 2, 'defghi', null, 'raw');
+  indexedMessage(db, fileId, 1, 2, 'd\\efghi', null, 'raw');
   for (const source of ['disk', 'db-fallback']) {
     if (source === 'db-fallback') fs.unlinkSync(filePath);
+    const metadata = source === 'db-fallback' ? { timestamp } : {};
+    const first = { seq: 0, line_no: 1, role: 'raw', text: 'abc', ...metadata };
+    const partial = { ...first, seq: 1, line_no: 2, text: 'd\\…' };
+    const max_chars = messageChars([first, partial]);
     const { messages, total_chars, truncated, source: actualSource } = expandSession(db, {
-      session_id: 'session', max_chars: 6,
+      session_id: 'session', max_chars,
     });
     assert.equal(actualSource, source);
     assert.equal(truncated, true);
-    assert.equal(total_chars, 6);
-    assert.deepEqual(messages.map(({ text }) => text), ['abc', 'de…']);
-    const filled = expandSession(db, { session_id: 'session', max_chars: 3 });
+    assert.equal(total_chars, max_chars);
+    assert.deepEqual(messages, [first, partial]);
+    const filled = expandSession(db, { session_id: 'session', max_chars: messageChars([first]) });
     assert.equal(filled.truncated, true);
     assert.deepEqual(filled.messages.map(({ text }) => text), ['abc']);
-    const exact = expandSession(db, { session_id: 'session', end_seq: 0, max_chars: 3 });
+    const exact = expandSession(db, { session_id: 'session', end_seq: 0, max_chars: messageChars([first]) });
     assert.equal(exact.truncated, false);
   }
 });

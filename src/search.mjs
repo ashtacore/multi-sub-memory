@@ -1,4 +1,6 @@
-import { cosineSimilarity, decodeFloat32Vector } from './embeddings.mjs';
+import {
+  cosineSimilarity, decodeFloat32Vector, DEFAULT_EMBEDDING_DIMS, DEFAULT_EMBEDDING_MODEL,
+} from './embeddings.mjs';
 import { resolveCachedProjectKey } from './memory-service.mjs';
 
 export const SEARCH_SOURCES = Object.freeze(['memory', 'note', 'transcript']);
@@ -103,6 +105,48 @@ function sourceFilter(source, { scope, projectKey, orchestrators, sinceMs }) {
   return { clauses, params };
 }
 
+function vectorFilter(filter, model, dims) {
+  const clauses = [...filter.clauses];
+  const params = [...filter.params];
+  if (typeof model === 'string' && model.length > 0) {
+    clauses.push('e.model_id = ?');
+    params.push(model);
+  }
+  if (dims !== undefined) {
+    clauses.push('e.dims = ?');
+    params.push(dims);
+  }
+  return { clauses, params };
+}
+
+function hasEligibleVectors(db, sources, filters, engine) {
+  const embeddingSources = sources.filter((source) => sourceQueries[source].embedding);
+  if (!embeddingSources.length) return false;
+  let status;
+  let expectedDims;
+  try {
+    status = engine.getStatus?.();
+    if (status?.enabled === false || status?.reason) return false;
+    if (typeof engine.getExpectedDims === 'function') {
+      expectedDims = engine.getExpectedDims();
+    } else if (status && (status.available || status.model === DEFAULT_EMBEDDING_MODEL
+      || status.dims !== DEFAULT_EMBEDDING_DIMS)) {
+      // Status-only engines can report the default width as a placeholder.
+      expectedDims = status.dims;
+    }
+  } catch {
+    return false;
+  }
+
+  const dims = Number.isInteger(expectedDims) && expectedDims > 0 ? expectedDims : undefined;
+  return embeddingSources.some((source) => {
+    const spec = sourceQueries[source];
+    const { clauses, params } = vectorFilter(sourceFilter(spec, filters), status?.model, dims);
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    return Boolean(db.prepare(`SELECT 1 FROM ${spec.from} ${spec.embedding} ${where} LIMIT 1`).get(...params));
+  });
+}
+
 function selectFields(source) {
   return `${source.id} AS id, ${source.select}, ${source.orchestrator} AS orchestrator, ${source.timestamp} AS sort_timestamp`;
 }
@@ -141,12 +185,7 @@ async function embedQuery(engine, query) {
 }
 
 function* scanVectors(db, source, filter, { vector, model }) {
-  const clauses = [...filter.clauses, 'e.dims = ?'];
-  const params = [...filter.params, vector.length];
-  if (typeof model === 'string' && model.length > 0) {
-    clauses.push('e.model_id = ?');
-    params.push(model);
-  }
+  const { clauses, params } = vectorFilter(filter, model, vector.length);
   const statement = db.prepare(`
     SELECT ${source.id} AS id, ${source.timestamp} AS sort_timestamp, e.vector AS stored_vector
     FROM ${source.from} ${source.embedding}
@@ -272,7 +311,7 @@ export async function hybridSearch(db, options = {}) {
   const match = sanitizeFtsQuery(trimmedQuery);
   const filters = { scope, projectKey, orchestrators, sinceMs };
   const fts = [];
-  const embedding = embeddingEngine && sources.some((source) => sourceQueries[source].embedding)
+  const embedding = embeddingEngine && hasEligibleVectors(db, sources, filters, embeddingEngine)
     ? await embedQuery(embeddingEngine, trimmedQuery) : null;
 
   for (const source of sources) {
@@ -287,7 +326,7 @@ export async function hybridSearch(db, options = {}) {
 
   fts.sort((a, b) => a.rank_score - b.rank_score || compareCandidates(a, b));
   const vectors = embedding ? readVectorCandidates(db, sources, filters, embedding, candidateLimit) : [];
-  result.mode = embedding ? 'hybrid' : 'fts-only';
+  result.mode = vectors.length > 0 ? 'hybrid' : 'fts-only';
   result.results = fuseRanks(fts.slice(0, candidateLimit), vectors, rrfK, limit);
   return result;
 }

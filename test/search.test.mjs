@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { openDatabase } from '../src/db.mjs';
-import { createEmbeddingEngine, encodeFloat32Vector } from '../src/embeddings.mjs';
+import { createEmbeddingEngine, DEFAULT_EMBEDDING_MODEL, encodeFloat32Vector } from '../src/embeddings.mjs';
 import { hybridSearch, sanitizeFtsQuery, truncatePreview } from '../src/search.mjs';
 
 const boundary = '2025-01-01T00:00:00.007Z';
@@ -94,6 +94,7 @@ test('hybrid search fuses both legs by exact reciprocal rank and breaks cross-le
 test('hybrid search continues in FTS-only mode when embeddings are unavailable', async (t) => {
   const db = fixture(t);
   memory(db, 'lexical', 'needle');
+  embedMemory(db, 'lexical', [1, 0], DEFAULT_EMBEDDING_MODEL);
   const disabled = createEmbeddingEngine({ enabled: false, env: {} });
   const broken = { embed: () => { throw new Error('fixture inference failure'); } };
   for (const embeddingEngine of [undefined, disabled, { embed: async () => null }, broken]) {
@@ -101,6 +102,92 @@ test('hybrid search continues in FTS-only mode when embeddings are unavailable',
     assert.equal(mode, 'fts-only');
     assert.deepEqual(results.map(({ id }) => id), ['lexical']);
   }
+});
+
+test('search skips query embedding when vector tables are empty', async (t) => {
+  const db = fixture(t);
+  memory(db, 'lexical', 'needle');
+  const embed = t.mock.fn(engine.embed);
+  const embeddingEngine = { ...engine, embed };
+  const result = await hybridSearch(db, { query: 'needle', projectKey: 'fixture', embeddingEngine });
+  assert.equal(embed.mock.callCount(), 0);
+  assert.equal(result.mode, 'fts-only');
+  assert.deepEqual(result.results.map(({ id }) => id), ['lexical']);
+});
+
+test('search skips query embedding when active filters exclude all stored vectors', async (t) => {
+  const db = fixture(t);
+  memory(db, 'lexical', 'needle');
+  memory(db, 'wrong-project', 'distinct concept', { project: 'elsewhere' });
+  embedMemory(db, 'wrong-project', [1, 0]);
+  memory(db, 'wrong-model', 'distinct concept');
+  embedMemory(db, 'wrong-model', [1, 0], 'obsolete-model');
+  const oldTranscript = transcript(db, 'old', { timestamp: null, indexedAt: now - 1 });
+  const otherOrchestrator = transcript(db, 'other-orchestrator', { orchestrator: 'omp' });
+  const insert = db.prepare('INSERT INTO transcript_embeddings VALUES (?, ?, ?, ?)');
+  for (const id of [oldTranscript, otherOrchestrator]) {
+    insert.run(id, 'fixture-model', 2, encodeFloat32Vector([1, 0]));
+  }
+  const embed = t.mock.fn(engine.embed);
+  const embeddingEngine = { ...engine, embed };
+  const result = await hybridSearch(db, {
+    query: 'needle', projectKey: 'fixture', since: boundary, orchestrators: ['codex'], embeddingEngine,
+  });
+  assert.equal(embed.mock.callCount(), 0);
+  assert.equal(result.mode, 'fts-only');
+  assert.deepEqual(result.results.map(({ id }) => id), ['lexical']);
+});
+
+test('search skips query embedding when stored vectors differ from the known model width', async (t) => {
+  const db = fixture(t);
+  memory(db, 'lexical', 'needle');
+  embedMemory(db, 'lexical', [1, 0, 0], DEFAULT_EMBEDDING_MODEL);
+  const embed = t.mock.fn(engine.embed);
+  const embeddingEngine = { ...createEmbeddingEngine({ env: {} }), embed };
+  const result = await hybridSearch(db, { query: 'needle', projectKey: 'fixture', embeddingEngine });
+  assert.equal(embed.mock.callCount(), 0);
+  assert.equal(result.mode, 'fts-only');
+  assert.deepEqual(result.results.map(({ id, score }) => [id, score]), [['lexical', 1 / 61]]);
+});
+
+test('search skips query embedding when a custom model explicitly expects 768 dimensions', async (t) => {
+  const db = fixture(t);
+  memory(db, 'lexical', 'needle');
+  embedMemory(db, 'lexical', [1, 0, 0], 'custom');
+  const embeddingEngine = createEmbeddingEngine({ model: 'custom', dims: 768, env: {} });
+  const embed = t.mock.method(embeddingEngine, 'embed', async () => null);
+  const result = await hybridSearch(db, { query: 'needle', projectKey: 'fixture', embeddingEngine });
+  assert.equal(embed.mock.callCount(), 0);
+  assert.equal(result.mode, 'fts-only');
+  assert.deepEqual(result.results.map(({ id, score }) => [id, score]), [['lexical', 1 / 61]]);
+});
+
+test('search infers a custom model width when dimensions are omitted', async (t) => {
+  const db = fixture(t);
+  memory(db, 'dual', 'needle');
+  embedMemory(db, 'dual', [1, 0, 0], 'custom');
+  const embeddingEngine = createEmbeddingEngine({
+    model: 'custom',
+    env: {},
+    loader: () => ({ pipeline: () => () => [1, 0, 0] }),
+  });
+  const embed = t.mock.method(embeddingEngine, 'embed');
+  const result = await hybridSearch(db, { query: 'needle', projectKey: 'fixture', embeddingEngine });
+  assert.equal(embed.mock.callCount(), 1);
+  assert.equal(result.mode, 'hybrid');
+  assert.deepEqual(result.results.map(({ id, score }) => [id, score]), [['dual', 2 / 61]]);
+});
+
+test('search reports FTS-only when eligible vectors have incompatible dimensions', async (t) => {
+  const db = fixture(t);
+  memory(db, 'lexical', 'needle');
+  embedMemory(db, 'lexical', [1, 0, 0]);
+  const embed = t.mock.fn(engine.embed);
+  const embeddingEngine = { ...engine, embed };
+  const result = await hybridSearch(db, { query: 'needle', projectKey: 'fixture', embeddingEngine });
+  assert.equal(embed.mock.callCount(), 1);
+  assert.equal(result.mode, 'fts-only');
+  assert.deepEqual(result.results.map(({ id, score }) => [id, score]), [['lexical', 1 / 61]]);
 });
 
 test('FTS sanitization quotes punctuation and reserved words and treats them literally', async (t) => {

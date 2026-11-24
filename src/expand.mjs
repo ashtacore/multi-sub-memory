@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { extractMessageContent, normalizeTranscriptRole, transcriptFileIdentity } from './indexers/types.mjs';
-import { truncatePreview } from './search.mjs';
 
 export const DEFAULT_EXPAND_MAX_CHARS = 16000;
 const CHUNK_BYTES = 64 * 1024;
@@ -164,14 +163,18 @@ function matchesMessage(parsed, expected) {
 
 function appendMessage(result, message, maxChars) {
   const remaining = maxChars - result.total_chars;
-  // An exact fill is truncated only if more message text exists in the selected range.
-  if (message.text.length > remaining) {
+  const cost = JSON.stringify(message).length;
+  if (cost > remaining) {
     result.truncated = true;
-    if (remaining === 0) return;
-    message = { ...message, text: truncatePreview(message.text, remaining) };
+    const partial = remaining > 0 && message.text.length > 0 ? truncateMessage(message, remaining) : null;
+    if (partial) {
+      result.messages.push(partial);
+      result.total_chars += JSON.stringify(partial).length;
+    }
+    return;
   }
   result.messages.push(message);
-  result.total_chars += message.text.length;
+  result.total_chars += cost;
 }
 
 function rowCursor(iterator) {
@@ -274,6 +277,26 @@ function* indexedMessages(db, fileId, options) {
       ...(names.length ? { tool_names: names } : {}),
     };
   }
+}
+
+function truncateMessage(message, remaining) {
+  const { text } = message;
+  const textBudget = remaining - JSON.stringify({ ...message, text: '' }).length;
+  let low = 1;
+  let high = Math.min(text.length, textBudget);
+  let truncatedText;
+  // Escaping can make a prefix longer in JSON than it is in the transcript.
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const prefix = text.slice(0, middle - 1).replace(/[\uD800-\uDBFF]$/u, '') + '…';
+    if (JSON.stringify(prefix).length - 2 <= textBudget) {
+      truncatedText = prefix;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return truncatedText === undefined ? null : { ...message, text: truncatedText };
 }
 
 export function expandSession(db, options = {}) {

@@ -142,10 +142,11 @@ test('MCP expands the matching file when transcripts share a session and sequenc
   assert.equal(hit.seq, 7);
   assert.equal((await expand({ session_id: sessionId })).file_id, newerFileId);
   const result = await expand({ session_id: hit.session_id, file_id: hit.file_id, start_seq: hit.seq, end_seq: hit.seq });
+  const message = { seq: 7, line_no: 1, role: 'assistant', text };
   assert.deepEqual(result, {
     session_id: sessionId, file_id: fileId, orchestrator: 'codex', project_key: saved.project_key, source: 'disk',
-    truncated: false, total_chars: text.length,
-    messages: [{ seq: 7, line_no: 1, role: 'assistant', text }],
+    truncated: false, total_chars: JSON.stringify(message).length,
+    messages: [message],
   });
   await expectError('mem_expand', { session_id: 'missing' }, /Session not found/);
   await expectError('mem_expand', { session_id: sessionId, file_id: 0 }, /file_id/);

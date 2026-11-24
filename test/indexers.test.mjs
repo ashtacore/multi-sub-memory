@@ -410,7 +410,8 @@ test('expanding the first indexed turn reads only the first chunk of a large che
     reads.push(position);
     return readSync(fd, buffer, offset, length, position);
   });
-  const options = { session_id: 'bounded-expand', start_seq: 0, end_seq: 0, max_chars: 8 };
+  const firstTruncatedBudget = JSON.stringify({ seq: 0, line_no: 2, role: 'user', text: 'Origina…' }).length;
+  const options = { session_id: 'bounded-expand', start_seq: 0, end_seq: 0, max_chars: firstTruncatedBudget };
   const original = expandSession(db, options);
   assert.equal(original.source, 'disk');
   assert.equal(original.truncated, true);
@@ -451,7 +452,8 @@ test('expansion without a sequence range truncates in the first chunk', async (t
     reads.push([position, count]);
     return count;
   });
-  const expanded = expandSession(db, { session_id: 'budgeted-expand', max_chars: 8 });
+  const truncatedBudget = JSON.stringify({ seq: 0, line_no: 1, role: 'user', text: 'Origina…' }).length;
+  const expanded = expandSession(db, { session_id: 'budgeted-expand', max_chars: truncatedBudget });
   assert.equal(expanded.source, 'disk');
   assert.equal(expanded.truncated, true);
   assert.deepEqual(expanded.messages, [{ seq: 0, line_no: 1, role: 'user', text: 'Origina…' }]);

@@ -1,4 +1,4 @@
-# MCP core
+﻿# MCP core
 
 Run `multi-sub-memory` or `multi-sub-memory serve` as a stdio MCP server. Set
 `--cwd <path>` to choose the server's default workspace. Clients can override
@@ -64,11 +64,15 @@ otherwise. OMP and Claude Code indexing accepts ISO timestamps and epoch
 milliseconds from transcripts and stores valid values as UTC ISO 8601.
 
 FTS5 treats user input as quoted search terms and ranks candidates with BM25.
-When the local engine can embed the query, search also ranks eligible memory and
-transcript vectors by cosine similarity. The two lists use the same filters.
+Search attempts query embedding only when the engine can attempt inference and a
+selected source has a stored vector that matches the active filters and any known
+embedding model and vector width.
+With a query embedding, search ranks compatible memory and transcript vectors by
+cosine similarity. The two lists use the same search filters.
 Reciprocal rank fusion sums `1 / (60 + rank)` for each list a result appears in,
-using ranks that start at one. The response reports `hybrid` or `fts-only`.
-Search defaults to 10 results and clamps the requested limit to 1–50. Each
+using ranks that start at one. The response reports `hybrid` when at least one
+usable vector candidate contributes to fusion and `fts-only` otherwise.
+Search defaults to 10 results and clamps the requested limit to 1â€“50. Each
 result has a preview of at most 400 characters. Transcript hits include
 `session_id`, `file_id`, and `seq`. Pass the file ID with the session ID and
 use `seq` for both range endpoints to expand that exact hit.
@@ -89,15 +93,15 @@ when available. Malformed JSONL lines are returned as raw text.
 The tool uses the absolute path stored in the index and opens it read-only. It
 rejects paths with traversal segments, non-regular files, and paths that pass
 through a symbolic link or Windows junction. The tool returns matching indexed
-messages with `source: "db-fallback"` if the file is missing, its opened
-device and inode differ from the stored file identity, it is shorter than the
-indexed byte offset, its first line declares a different session ID (including
-an OMP session header), or its earliest indexed message fails to match. Older
-rows without a stored identity still use the session and message checks.
-Matching files report `source: "disk"` and can include newly appended lines.
-The text budget defaults to 16,000 characters and applies
-across all returned message text. A partial final message ends in an ellipsis.
-The response reports `truncated` and `total_chars`.
+messages with `source: "db-fallback"` if the file is missing, is shorter than
+the indexed byte offset, declares a different session ID on its first line
+(including an OMP session header's `id`), or lacks a match for its earliest
+indexed message. Matching files report `source: "disk"` and can include newly
+appended lines. The `max_chars` budget defaults to 16,000 and applies to the sum
+of the JSON lengths of individual message records, including metadata, tool
+names, and escaped text. `total_chars` reports that sum. When the next record
+exceeds the remaining budget, `truncated` is true. A partial final record is
+included if its metadata and an ellipsis fit.
 
 ## Design rules and why
 
