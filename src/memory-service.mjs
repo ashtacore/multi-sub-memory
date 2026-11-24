@@ -181,13 +181,17 @@ export async function updateMemory(db, input, context = {}) {
   if (input.scope !== undefined && !MEMORY_SCOPES.includes(input.scope)) {
     throw new Error('Memory scope must be project or global');
   }
+  const targetProjectKey = input.scope === 'project' ? projectKeyFor('project', input, context) : GLOBAL_PROJECT_KEY;
   let result;
   try {
     result = inWriteTransaction(db, () => {
       const existing = memoryRow(db, input.id);
       const scope = input.scope ?? existing.scope;
-      const projectKey = scope === existing.scope ? existing.project_key : projectKeyFor(scope, input, context);
+      const projectKey = scope === existing.scope ? existing.project_key : targetProjectKey;
       const status = input.status ?? existing.status;
+      if (status === 'superseded' && existing.superseded_by === null) {
+        throw new Error('Use archive with superseded_by to mark a memory as superseded');
+      }
       const changedContent = content !== undefined && content !== existing.content;
       const row = db.prepare(`
         UPDATE memories SET project_key = ?, scope = ?, content = ?, normalized_hash = ?,
@@ -217,10 +221,17 @@ export async function updateMemory(db, input, context = {}) {
 
 export function archiveMemory(db, input) {
   const supersededBy = input.superseded_by ?? null;
-  const row = db.prepare(`
-    UPDATE memories SET status = ?, superseded_by = ?, updated_at = ? WHERE id = ? RETURNING *
-  `).get(supersededBy === null ? 'archived' : 'superseded', supersededBy, Date.now(), input.id);
-  return formatMemory(requireRow(row, 'Memory', input.id));
+  return inWriteTransaction(db, () => {
+    if (supersededBy !== null) {
+      if (supersededBy === input.id) throw new Error('A memory cannot supersede itself');
+      const successor = db.prepare('SELECT 1 FROM memories WHERE id = ?').get(supersededBy);
+      if (!successor) throw new Error(`Memory not found for superseded_by: ${supersededBy}`);
+    }
+    const row = db.prepare(`
+      UPDATE memories SET status = ?, superseded_by = ?, updated_at = ? WHERE id = ? RETURNING *
+    `).get(supersededBy === null ? 'archived' : 'superseded', supersededBy, Date.now(), input.id);
+    return formatMemory(requireRow(row, 'Memory', input.id));
+  });
 }
 
 export function getMemory(db, id) {

@@ -15,7 +15,7 @@ caller-supplied database connection open.
 | Tool | Action | Behavior |
 |---|---|---|
 | `mem_memory` | `write` | Stores content under the current project or the shared global key. Defaults to category `GENERAL` and importance 3. Returns the memory and flags for deduplication and reactivation. |
-| `mem_memory` | `get`, `update`, `archive` | Looks up a memory by ID. Updates can change content, category, importance, scope, status, or metadata. Archiving with `superseded_by` marks the memory as superseded. |
+| `mem_memory` | `get`, `update`, `archive` | Looks up a memory by ID. Updates can change content, category, importance, scope, status, or metadata. To mark a memory as superseded, use `archive` with `superseded_by` set to the ID of a different, existing memory. |
 | `mem_memory` | `list` | Lists active memories from the current project and global scope by default. Accepts scope, status, category, and limit filters. The default limit is 50 and the maximum is 200. |
 | `mem_note` | `write`, `update`, `dismiss` | Creates a current-project note, changes it by ID, or marks it dismissed. New notes are active by default and can be pending. A note can record a `surface_condition`. |
 | `mem_note` | `read` | Lists active and pending notes for the current project by default. Accepts a status filter or `all`. Enable `include_global` to include notes stored under the global key. |
@@ -37,11 +37,13 @@ and ties broken by ID. Each note can show its surface condition.
 The default budget is 2,500 estimated tokens and can be overridden in
 configuration or per call. The estimate uses one token per four characters,
 rounded up. Formatting includes whole items, tags, headings, and omission
-counts in the budget. If the budget cannot fit the required section wrappers
-and omission lines, `mem_bootstrap` returns an error with the minimum token
-budget. When notes are enabled and present, the minimum includes their section
-and the newline between sections. Set `include_notes: false` for a memory-only
-summary.
+counts in the budget. The minimum budget includes each required section's tags
+and uses whichever takes fewer characters between its full contents and its
+omission line.
+`mem_bootstrap` returns the minimum token budget in its error when the supplied
+budget is too small. When notes are enabled and present, the minimum includes
+their section and the newline between sections. Set `include_notes: false` for
+a memory-only summary.
 
 ## Design rules and why
 

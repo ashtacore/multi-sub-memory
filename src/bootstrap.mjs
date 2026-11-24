@@ -27,7 +27,7 @@ function section(opening, closing, items, label) {
   }
 
   return {
-    minimumLength: wrapperLength + omittedLine(items.length).length,
+    minimumLength: Math.min(fullLength, wrapperLength + omittedLine(items.length).length),
     render(budget) {
       let used = wrapperLength;
       let included = 0;

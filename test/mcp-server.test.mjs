@@ -141,6 +141,33 @@ test('memory writes deduplicate, merge metadata, and reactivate archived or supe
   assert.equal((await memory('list', { status: 'all' })).length, 2);
 });
 
+test('marking a memory as superseded requires an existing successor with a different ID', async (t) => {
+  const { memory, expectError } = await fixture(t);
+  const original = (await memory('write', { content: 'Original fixture' })).memory;
+  const { id } = original;
+
+  await expectError('mem_memory', { action: 'archive', id, superseded_by: 'missing' }, /not found for superseded_by/);
+  assert.deepEqual(await memory('get', { id }), original);
+  await expectError('mem_memory', { action: 'archive', id, superseded_by: id }, /cannot supersede itself/);
+  assert.deepEqual(await memory('get', { id }), original);
+  await expectError('mem_memory', { action: 'update', id, status: 'superseded' }, /archive with superseded_by/);
+  assert.deepEqual(await memory('get', { id }), original);
+
+  const archived = await memory('archive', { id });
+  await expectError('mem_memory', { action: 'update', id, status: 'superseded' }, /archive with superseded_by/);
+  assert.deepEqual(await memory('get', { id }), archived);
+
+  const successor = (await memory('write', { content: 'Successor fixture' })).memory;
+  const superseded = await memory('archive', { id, superseded_by: successor.id });
+  assert.equal(superseded.status, 'superseded');
+  assert.equal(superseded.superseded_by, successor.id);
+  const updated = await memory('update', { id, category: 'DECISIONS' });
+  assert.equal(updated.category, 'DECISIONS');
+  assert.equal(updated.status, 'superseded');
+  assert.equal(updated.superseded_by, successor.id);
+  assert.deepEqual(await memory('get', { id }), updated);
+});
+
 test('memory update and list preserve project boundaries, filters, and uniqueness', async (t) => {
   const { memory, expectError } = await fixture(t);
   const other = tempDirectory(t);
@@ -382,12 +409,35 @@ test('bootstrap renders deterministic sections and enforces a whole-item token b
   assert.ok(median < 50, `Median warm bootstrap took ${median.toFixed(1)} ms`);
 });
 
+test('bootstrap accepts a budget that fits a complete short note', async (t) => {
+  const { note, bootstrap } = await fixture(t);
+  await note('write', { content: 'x' });
+
+  const completeSummary = await bootstrap();
+  assert.match(completeSummary, /<active-notes>\n- \[active\] x\n<\/active-notes>$/);
+  assert.equal(await bootstrap({ token_budget: Math.ceil(completeSummary.length / 4) }), completeSummary);
+});
+
 function git(cwd, ...args) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^GIT_/i.test(name)));
   env.GIT_CONFIG_NOSYSTEM = '1';
   env.GIT_CONFIG_GLOBAL = path.join(cwd, 'absent-gitconfig');
   execFileSync('git', args, { cwd, env, timeout: 10000, windowsHide: true, stdio: 'pipe' });
 }
+
+test('memory update moves a global memory to a previously unused Git workspace', async (t) => {
+  const { memory } = await fixture(t);
+  const workspace = tempDirectory(t);
+  git(workspace, 'init', '--template=');
+  const global = (await memory('write', { content: 'Workspace fixture', scope: 'global' })).memory;
+
+  const moved = await memory('update', { id: global.id, scope: 'project', cwd: workspace });
+  assert.equal(moved.id, global.id);
+  assert.equal(moved.scope, 'project');
+  assert.match(moved.project_key, /^git:/);
+  assert.deepEqual(await memory('list', { scope: 'project', cwd: workspace }), [moved]);
+  assert.deepEqual(await memory('list'), []);
+});
 
 test('linked Git worktrees share memories through MCP', async (t) => {
   const directory = tempDirectory(t);
