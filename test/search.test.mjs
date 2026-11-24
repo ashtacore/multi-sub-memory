@@ -138,6 +138,18 @@ test('search skips query embedding when active filters exclude all stored vector
   assert.deepEqual(result.results.map(({ id }) => id), ['lexical']);
 });
 
+test('search skips query embedding when stored vectors differ from the known model width', async (t) => {
+  const db = fixture(t);
+  memory(db, 'lexical', 'needle');
+  embedMemory(db, 'lexical', [1, 0, 0], DEFAULT_EMBEDDING_MODEL);
+  const embed = t.mock.fn(engine.embed);
+  const embeddingEngine = { ...createEmbeddingEngine({ env: {} }), embed };
+  const result = await hybridSearch(db, { query: 'needle', projectKey: 'fixture', embeddingEngine });
+  assert.equal(embed.mock.callCount(), 0);
+  assert.equal(result.mode, 'fts-only');
+  assert.deepEqual(result.results.map(({ id, score }) => [id, score]), [['lexical', 1 / 61]]);
+});
+
 test('search reports FTS-only when eligible vectors have incompatible dimensions', async (t) => {
   const db = fixture(t);
   memory(db, 'lexical', 'needle');

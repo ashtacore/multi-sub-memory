@@ -1,4 +1,6 @@
-import { cosineSimilarity, decodeFloat32Vector } from './embeddings.mjs';
+import {
+  cosineSimilarity, decodeFloat32Vector, DEFAULT_EMBEDDING_DIMS, DEFAULT_EMBEDDING_MODEL,
+} from './embeddings.mjs';
 import { resolveCachedProjectKey } from './memory-service.mjs';
 
 export const SEARCH_SOURCES = Object.freeze(['memory', 'note', 'transcript']);
@@ -103,23 +105,38 @@ function sourceFilter(source, { scope, projectKey, orchestrators, sinceMs }) {
   return { clauses, params };
 }
 
-function vectorFilter(filter, model) {
-  if (typeof model !== 'string' || model.length === 0) return filter;
-  return { clauses: [...filter.clauses, 'e.model_id = ?'], params: [...filter.params, model] };
+function vectorFilter(filter, model, dims) {
+  const clauses = [...filter.clauses];
+  const params = [...filter.params];
+  if (typeof model === 'string' && model.length > 0) {
+    clauses.push('e.model_id = ?');
+    params.push(model);
+  }
+  if (dims !== undefined) {
+    clauses.push('e.dims = ?');
+    params.push(dims);
+  }
+  return { clauses, params };
 }
 
 function hasEligibleVectors(db, sources, filters, engine) {
   const embeddingSources = sources.filter((source) => sourceQueries[source].embedding);
   if (!embeddingSources.length) return false;
-  let model;
+  let status;
   try {
-    model = engine.getStatus?.()?.model;
+    status = engine.getStatus?.();
   } catch {
     return false;
   }
+  if (status?.enabled === false || status?.reason) return false;
+
+  // An uninitialized custom model can report the default width as a placeholder.
+  const dims = Number.isInteger(status?.dims) && status.dims > 0
+    && (status.available || status.model === DEFAULT_EMBEDDING_MODEL || status.dims !== DEFAULT_EMBEDDING_DIMS)
+    ? status.dims : undefined;
   return embeddingSources.some((source) => {
     const spec = sourceQueries[source];
-    const { clauses, params } = vectorFilter(sourceFilter(spec, filters), model);
+    const { clauses, params } = vectorFilter(sourceFilter(spec, filters), status?.model, dims);
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     return Boolean(db.prepare(`SELECT 1 FROM ${spec.from} ${spec.embedding} ${where} LIMIT 1`).get(...params));
   });
@@ -163,13 +180,13 @@ async function embedQuery(engine, query) {
 }
 
 function* scanVectors(db, source, filter, { vector, model }) {
-  const { clauses, params } = vectorFilter(filter, model);
+  const { clauses, params } = vectorFilter(filter, model, vector.length);
   const statement = db.prepare(`
     SELECT ${source.id} AS id, ${source.timestamp} AS sort_timestamp, e.vector AS stored_vector
     FROM ${source.from} ${source.embedding}
-    WHERE ${[...clauses, 'e.dims = ?'].join(' AND ')}
+    WHERE ${clauses.join(' AND ')}
   `);
-  for (const { stored_vector, ...row } of statement.iterate(...params, vector.length)) {
+  for (const { stored_vector, ...row } of statement.iterate(...params)) {
     if (!(stored_vector instanceof Uint8Array)
       || stored_vector.byteLength !== vector.length * Float32Array.BYTES_PER_ELEMENT) continue;
     let similarity;

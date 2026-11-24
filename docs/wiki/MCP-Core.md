@@ -60,8 +60,9 @@ messages use their own timestamp when valid and the file's last index time
 otherwise.
 
 FTS5 treats user input as quoted search terms and ranks candidates with BM25.
-Search attempts query embedding only when a selected source has a stored vector
-that matches the active filters and the configured embedding model, when known.
+Search attempts query embedding only when the engine can attempt inference and a
+selected source has a stored vector that matches the active filters and any known
+embedding model and vector width.
 With a query embedding, search ranks compatible memory and transcript vectors by
 cosine similarity. The two lists use the same search filters.
 Reciprocal rank fusion sums `1 / (60 + rank)` for each list a result appears in,
