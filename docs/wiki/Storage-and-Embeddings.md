@@ -10,7 +10,7 @@ Concurrent first opens can encounter a transient busy error even with the busy t
 
 The initial schema stores structured memories, notes, transcript files and their indexed messages, memory and transcript embeddings, Dreamer runs, and leases. Memory deduplication uses the project key, scope, and SHA-256 hash of content after trimming, collapsing whitespace, and lowercasing. An embedding row records its model and dimensions alongside its little-endian float32 vector BLOB. Foreign keys cascade memory and message deletions to their embeddings, and transcript file deletion to its indexed messages.
 
-The full-text indexes require FTS5 support in `node:sqlite`, available in official Node.js 22 builds starting with 22.16.0. External-content FTS5 indexes cover memory content, category, and project key, note content, surface condition, and project key, and transcript text, tool names, and role. Insert and delete triggers add and remove index entries. Update triggers remove the previous indexed terms before adding the current terms. Cascading transcript deletes also remove their search terms.
+The full-text indexes require FTS5 support in `node:sqlite`, available in official Node.js builds matching `^22.16.0 || >=24.0.0`. Node.js 23.x builds omit FTS5. External-content FTS5 indexes cover memory content, category, and project key, note content, surface condition, and project key, and transcript text, tool names, and role. Insert and delete triggers add and remove index entries. Update triggers remove the previous indexed terms before adding the current terms. Cascading transcript deletes also remove their search terms.
 
 ## Design rules and why
 
