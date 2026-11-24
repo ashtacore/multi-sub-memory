@@ -155,6 +155,9 @@ export function loadConfig(options = {}) {
   const project = readConfigLayer(projectConfigPath);
   const overrides = environmentLayer(env);
   const indexers = { ...defaults.indexers, ...user.indexers, ...project.indexers };
+  const projectSelectsDatabase = project.dbPath !== undefined && overrides.dbPath === undefined;
+  indexers.backgroundRefresh = user.indexers?.backgroundRefresh === true
+    && project.indexers?.backgroundRefresh !== false && !projectSelectsDatabase;
   for (const orchestrator of INDEXER_ORCHESTRATORS) {
     const adapter = { ...defaults.indexers[orchestrator], ...user.indexers?.[orchestrator], ...project.indexers?.[orchestrator] };
     if (adapter.sessionsDir !== undefined) adapter.sessionsDir = expandHome(adapter.sessionsDir, homeDir);

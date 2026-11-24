@@ -169,6 +169,7 @@ export const MIGRATIONS = [{
       ALTER TABLE transcript_files ADD COLUMN file_identity TEXT;
       ALTER TABLE transcript_files ADD COLUMN checkpoint_hash TEXT;
       ALTER TABLE transcript_files ADD COLUMN file_size INTEGER;
+      ALTER TABLE transcript_messages ADD COLUMN embed_eligible INTEGER NOT NULL DEFAULT 0;
     `);
   },
 }];

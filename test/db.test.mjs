@@ -153,7 +153,7 @@ test('rolls back both schema changes and the migration record when migration fai
   assert.equal(count(db, 'schema_migrations'), 2);
 });
 
-test('adds transcript checkpoint fields to a version 1 database without losing rows', (t) => {
+test('adds transcript checkpoints and embedding eligibility to a version 1 database without losing rows', (t) => {
   const db = databaseFixture(t).openUnmigrated();
   db.exec(`
     CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
@@ -163,10 +163,15 @@ test('adds transcript checkpoint fields to a version 1 database without losing r
   db.exec(`
     INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, mtime_ms, byte_offset, last_indexed_at)
     VALUES ('fixture.jsonl', 'omp', 'session', 'project', 1, 42, 1);
+    INSERT INTO transcript_messages (file_id, seq, role, text, line_no)
+    SELECT id, 0, 'user', 'Existing fixture message', 1 FROM transcript_files;
   `);
   runMigrations(db);
   const { byte_offset, line_count, file_identity } = db.prepare('SELECT * FROM transcript_files').get();
   assert.deepEqual([byte_offset, line_count, file_identity], [42, null, null]);
+  const { text, embed_eligible } = db.prepare('SELECT text, embed_eligible FROM transcript_messages').get();
+  assert.equal(text, 'Existing fixture message');
+  assert.equal(embed_eligible, 0);
 });
 
 test('read-only connections allow reads, reject writes, and skip migrations and directory creation', (t) => {

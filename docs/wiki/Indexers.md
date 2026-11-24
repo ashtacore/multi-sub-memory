@@ -25,12 +25,15 @@ JSONL reader. Each adapter has an `orchestrator` ID (`omp`, `claude`, `codex`,
 or `agy`) and two methods. `discoverFiles(config)` supplies candidate paths.
 `parseIncremental(filePath, byteOffset, existingMeta)` reads from the last
 checkpoint and returns session metadata, normalized messages, the new byte
-offset and line count, and file metadata. Adapters using the shared reader
-pass the previous checkpoint hash and return the reader’s checkpoint result
-so the runner can rebuild when continuity fails. A message carries a zero-based
-sequence number, a one-based physical line number, a role, optional timestamp,
-text, and tool names. The runner’s built-in registry provides OMP and Claude
-Code.
+offset and line count, and file metadata. The runner accepts synchronous and
+asynchronous adapters and passes an optional abort signal in `existingMeta`.
+The built-in adapters report whether they recognized their format. An explicit
+`recognized: false` leaves a new path available for another adapter when roots
+overlap. Adapters using the shared reader pass the previous checkpoint hash
+and return the reader’s checkpoint result so the runner can rebuild when
+continuity fails. A message carries a zero-based sequence number, a one-based
+physical line number, a role, optional timestamp, text, and tool names. The
+runner’s built-in registry provides OMP and Claude Code.
 
 ## Design rules and why
 
@@ -48,21 +51,30 @@ Code.
   so an unchanged tail can be skipped. For older rows without a stored size,
   use the committed byte offset for this check.
 - Before resuming a nonzero checkpoint, verify the trailing newline and
-  stream the entire committed prefix in 64 KiB chunks to compare its SHA-256
-  digest with `checkpoint_hash`. Rebuild from byte zero if validation fails,
+  compare the SHA-256 digest of the entire committed prefix with
+  `checkpoint_hash`. File reads run asynchronously off the main event loop in
+  64 KiB chunks, with hashing between reads, so MCP stdio requests can run
+  while verification is in progress. Only newly appended bytes are decoded and
+  parsed as JSONL during a resume. Rebuild from byte zero if validation fails,
   if the file was replaced, or if a changed file is at or below the checkpoint
-  length.
-  Delete the prior messages and insert the new ones in one transaction, so
-  FTS5 and vector rows follow the rebuild through triggers and cascades.
+  length. Delete the prior messages and insert the new ones in one transaction,
+  so FTS5 and vector rows follow the rebuild through triggers and cascades.
+- `mem_expand` validates the committed prefix before reading an indexed range
+  from disk. For rows without a checkpoint digest, it compares the first
+  indexed turn and any indexed turns in the requested range. A
+  mismatch returns the indexed text from SQLite.
 - Normalize valid ISO strings and epoch milliseconds (numbers or digit strings)
   to UTC ISO 8601. Prefer a valid message timestamp, then use the enclosing
   record's timestamp. Claude Code uses the record type when the nested role is
   missing or malformed. The index requires a nonempty string role.
-- Commit searchable text before attempting embeddings. Embed user and assistant
-  text when it is 10–16,000 characters after trimming. Tool-result turns,
-  messages containing Claude Code `tool_result` blocks, and oversized output
-  remain searchable through FTS5. Indexing can proceed when vector inference
-  is disabled or fails.
+- Commit searchable text and its embedding eligibility before attempting
+  embeddings. Each run with an embedding engine retries missing eligible
+  vectors for the selected orchestrators, including rows from unchanged files.
+  Migration 2 adds `embed_eligible` and defaults existing rows to `0`.
+  User and assistant text is eligible when it is 10–16,000 characters after
+  trimming. Tool-result turns, messages containing Claude Code `tool_result`
+  blocks, and oversized output remain searchable through FTS5. Indexing can
+  proceed when vector inference is disabled or fails.
 
 ## CLI and background refresh
 
@@ -74,21 +86,25 @@ The CLI defaults to `all`. Pass `--json` for a machine-readable run summary.
 `--cwd` selects the workspace used for project configuration. Each transcript
 still gets its project key from its own session metadata or directory fallback.
 
-Set `indexers.backgroundRefresh` to `true` to schedule a refresh on MCP startup
-and repeat it at `indexers.refreshIntervalMs`. Refresh timers do not keep the
-process alive. Shutdown stops scheduling work and waits for in-flight refresh
-work to drain before closing the database. Refresh diagnostics use stderr.
+Set `indexers.backgroundRefresh` to `true` in the user config to schedule a
+refresh on MCP startup and repeat it at `indexers.refreshIntervalMs`. Project
+config may disable automatic refresh. If project config selects `dbPath`,
+automatic refresh is disabled unless `MULTI_SUB_MEMORY_DB` overrides that path.
+Refresh timers do not keep the process alive. Shutdown stops scheduling work
+and waits for in-flight refresh work to drain before closing the database.
+Refresh diagnostics use stderr.
 
 | Config key | Default and behavior |
 |---|---|
 | `indexers.enabled` | `true`. Set it to `false` to disable both CLI indexing and background refresh. |
-| `indexers.backgroundRefresh` | `false`. Opts the stdio server into automatic indexing. |
+| `indexers.backgroundRefresh` | `false`. Automatic indexing requires user-level authorization. |
 | `indexers.refreshIntervalMs` | `60000`. Accepts a positive integer up to `2147483647`. |
 | `indexers.omp.sessionsDir` | Optional override for the OMP session root. |
 | `indexers.claude.sessionsDir` | Optional override for the Claude Code session root. |
 | `indexers.codex.sessionsDir`, `indexers.agy.sessionsDir` | Accepted path settings reserved for later adapters. |
 
-Project settings override user settings per field, including the nested
-adapter options. Session roots expand a leading `~` to the current home
-directory. See [MCP core](MCP-Core.md) for search and expansion parameters and
-[storage and embeddings](Storage-and-Embeddings.md) for embedding settings.
+For the other indexer settings, project settings override user settings per
+field, including the nested adapter options. Session roots expand a leading
+`~` to the current home directory. See [MCP core](MCP-Core.md) for search and
+expansion parameters and [storage and embeddings](Storage-and-Embeddings.md)
+for embedding settings.

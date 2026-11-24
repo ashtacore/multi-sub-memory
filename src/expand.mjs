@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -5,6 +6,7 @@ import { extractMessageContent, normalizeTranscriptRole, transcriptFileIdentity 
 import { truncatePreview } from './search.mjs';
 
 export const DEFAULT_EXPAND_MAX_CHARS = 16000;
+const CHUNK_BYTES = 64 * 1024;
 
 function validateInteger(name, value, minimum) {
   if (!Number.isInteger(value) || value < minimum) {
@@ -38,7 +40,7 @@ function statIndexedPath(resolved) {
   }
 }
 
-function openIndexedFile(db, file) {
+function openIndexedFile(db, file, options) {
   const { file_path: filePath, byte_offset } = file;
   if (typeof filePath !== 'string' || !filePath.trim() || filePath.includes('\0')
     || !path.isAbsolute(filePath) || filePath.split(/[\\/]/).includes('..')) {
@@ -70,7 +72,11 @@ function openIndexedFile(db, file) {
     }
     if (file.file_identity != null && file.file_identity !== transcriptFileIdentity(opened)) return null;
     if (byte_offset > 0 && opened.size < BigInt(byte_offset)) return null;
-    if (!matchesIndexedTranscript(db, file, fd)) return null;
+    if (file.checkpoint_hash != null && byte_offset > 0) {
+      if (!matchesCheckpoint(fd, byte_offset, file.checkpoint_hash)) return null;
+    } else if (!matchesIndexedTranscript(db, file, fd, options)) {
+      return null;
+    }
     keepOpen = true;
     return fd;
   } finally {
@@ -78,8 +84,20 @@ function openIndexedFile(db, file) {
   }
 }
 
+function matchesCheckpoint(fd, byteOffset, checkpointHash) {
+  const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
+  const hash = createHash('sha256');
+  let count;
+  for (let position = 0; position < byteOffset; position += count) {
+    count = fs.readSync(fd, buffer, 0, Math.min(buffer.length, byteOffset - position), position);
+    if (count === 0) return false;
+    hash.update(buffer.subarray(0, count));
+  }
+  return buffer[count - 1] === 0x0A && hash.digest('hex') === checkpointHash;
+}
+
 function* readLines(fd) {
-  const buffer = Buffer.allocUnsafe(64 * 1024);
+  const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
   const decoder = new StringDecoder('utf8');
   let pending = '';
   let position = 0;
@@ -129,10 +147,16 @@ function parseRecord(line) {
   }
 }
 
-function matchesIndexedTranscript(db, file, fd) {
+function matchesIndexedTranscript(db, file, fd, options) {
+  const { where, params } = messageRange(file.id, options);
+  const requested = db.prepare(`
+    SELECT line_no, role, text FROM transcript_messages WHERE ${where} ORDER BY line_no ASC
+  `).all(...params);
   const anchor = db.prepare(`
     SELECT line_no, role, text FROM transcript_messages WHERE file_id = ? ORDER BY line_no ASC LIMIT 1
   `).get(file.id);
+  if (anchor) requested.unshift(anchor);
+  let next = 0;
   let lineNo = 0;
   for (const line of readLines(fd)) {
     lineNo++;
@@ -141,14 +165,17 @@ function matchesIndexedTranscript(db, file, fd) {
       const sessionIds = [record?.session_id, record?.sessionId, record?.message?.session_id, record?.message?.sessionId,
         record?.type === 'session' ? record.id : undefined];
       if (sessionIds.some((id) => typeof id === 'string' && id !== file.session_id)) return false;
-      if (!anchor) return true;
     }
-    if (lineNo === anchor.line_no) {
+    if (lineNo === requested[next]?.line_no) {
       const { role, text } = parseLine(line);
-      return role === anchor.role && text === anchor.text;
+      do {
+        const target = requested[next++];
+        if (role !== target.role || text !== target.text) return false;
+      } while (lineNo === requested[next]?.line_no);
     }
+    if (next === requested.length) return true;
   }
-  return !anchor;
+  return requested.length === 0;
 }
 
 function parseLine(line) {
@@ -244,13 +271,14 @@ export function expandSession(db, options = {}) {
   validateRange('line_start', line_start, 'line_end', line_end, 1);
   validateInteger('max_chars', max_chars, 1);
 
-  const files = 'SELECT id, session_id, orchestrator, project_key, file_path, byte_offset, file_identity FROM transcript_files';
+  const files = `SELECT id, session_id, orchestrator, project_key, file_path, byte_offset, file_identity,
+    checkpoint_hash FROM transcript_files`;
   const file = file_id === undefined
     ? db.prepare(`${files} WHERE session_id = ? ORDER BY last_indexed_at DESC, id DESC LIMIT 1`).get(session_id.trim())
     : db.prepare(`${files} WHERE id = ? AND session_id = ?`).get(file_id, session_id.trim());
   if (!file) throw new Error(`Session not found: ${session_id.trim()}`);
 
-  const fd = openIndexedFile(db, file);
+  const fd = openIndexedFile(db, file, options);
   const messages = [];
   let total_chars = 0;
   let truncated = false;

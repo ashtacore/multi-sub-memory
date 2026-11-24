@@ -50,8 +50,8 @@ function sqlStatements(db) {
       WHERE id = ?
     `),
     addMessage: db.prepare(`
-      INSERT INTO transcript_messages (file_id, seq, role, timestamp, text, tool_names, line_no)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO transcript_messages (file_id, seq, role, timestamp, text, tool_names, line_no, embed_eligible)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `),
     putEmbedding: db.prepare(`
       INSERT INTO transcript_embeddings (message_id, model_id, dims, vector)
@@ -155,23 +155,30 @@ export async function runIndexers({
           let reindex = Boolean(existing && (replaced || fileSize <= existing.byte_offset
             || (existing.byte_offset > 0 && existing.checkpoint_hash == null)));
           const offset = existing && !reindex ? existing.byte_offset : 0;
-          const fullMeta = { sessionsDir };
-          let parsed = adapter.parseIncremental(filePath, offset, existing && !reindex ? {
+          const fullMeta = { sessionsDir, signal };
+          let parsed = await adapter.parseIncremental(filePath, offset, existing && !reindex ? {
             ...fullMeta, sessionId: existing.session_id, lineCount: existing.line_count ?? undefined,
             checkpointHash: existing.checkpoint_hash ?? undefined,
             nextSeq: sql.nextSeq.get(existing.id).nextSeq,
           } : fullMeta);
+          renewIfDue();
+          if (signal?.aborted || leaseLost) return summary;
           if (offset > 0 && (parsed.checkpointMismatch || parsed.fileSize <= offset
             || (parsed.fileIdentity && parsed.fileIdentity !== fileIdentity))) {
             reindex = true;
-            parsed = adapter.parseIncremental(filePath, 0, fullMeta);
+            parsed = await adapter.parseIncremental(filePath, 0, fullMeta);
+            if (signal?.aborted || leaseLost) return summary;
+          }
+          if (!existing && parsed.recognized === false) {
+            summary.filesSkipped++;
+            continue;
           }
 
           const { sessionId, cwd, messages, mtimeMs, newByteOffset, lineCount } = parsed;
           const projectKey = !cwd && existing && !reindex ? existing.project_key : projectKeyFor(cwd ?? path.dirname(filePath));
           const fileValues = [sessionId, projectKey, mtimeMs, newByteOffset, lineCount,
             parsed.fileIdentity ?? fileIdentity, parsed.checkpointHash ?? null, parsed.fileSize ?? fileSize, Date.now()];
-          const pending = inTransaction(db, () => {
+          const messagesIndexed = inTransaction(db, () => {
             renewIfDue();
             if (leaseLost) return null;
             let fileId = existing?.id;
@@ -181,42 +188,62 @@ export async function runIndexers({
             } else {
               fileId = sql.addFile.run(filePath, orchestrator, ...fileValues).lastInsertRowid;
             }
-            const embeddings = [];
             let messagesIndexed = 0;
             for (const message of messages) {
               const { seq, timestamp, text, toolNames, lineNo } = message;
               const role = normalizeTranscriptRole(message.role);
               if (role === null) continue;
-              const { lastInsertRowid } = sql.addMessage.run(fileId, seq, role, normalizeTranscriptTimestamp(timestamp),
-                text, toolNames.length ? JSON.stringify(toolNames) : null, lineNo);
+              sql.addMessage.run(fileId, seq, role, normalizeTranscriptTimestamp(timestamp),
+                text, toolNames.length ? JSON.stringify(toolNames) : null, lineNo, shouldEmbedMessage(message) ? 1 : 0);
               messagesIndexed++;
-              if (embeddingEngine && shouldEmbedMessage(message)) embeddings.push({ id: lastInsertRowid, text: text.trim() });
             }
-            return { embeddings, messagesIndexed };
+            return messagesIndexed;
           });
-          if (!pending) return summary;
+          if (messagesIndexed === null) return summary;
           summary.filesIndexed++;
           if (reindex) summary.filesReindexed++;
-          summary.messagesIndexed += pending.messagesIndexed;
-
-          for (const { id, text } of pending.embeddings) {
-            renewIfDue();
-            if (signal?.aborted || leaseLost) return summary;
-            try {
-              const vector = await embeddingEngine.embed(text);
-              renewIfDue();
-              if (signal?.aborted || leaseLost) return summary;
-              if (vector) {
-                const model = embeddingEngine.getStatus?.()?.model ?? config?.embedding?.model ?? DEFAULT_EMBEDDING_MODEL;
-                summary.embeddingsWritten += sql.putEmbedding.run(model, vector.length, encodeFloat32Vector(vector), id).changes;
-              }
-            } catch (error) {
-              recordError(orchestrator, filePath, error);
-            }
-          }
+          summary.messagesIndexed += messagesIndexed;
         } catch (error) {
+          if (signal?.aborted || leaseLost) return summary;
           recordError(orchestrator, filePath, error);
         }
+      }
+    }
+
+    if (!embeddingEngine || !selected.length || signal?.aborted || leaseLost) return summary;
+    const orchestratorsToEmbed = selected.map(({ orchestrator }) => orchestrator);
+    // Take one row at a time so no SQLite cursor stays open across inference or vector writes.
+    const nextEmbedding = db.prepare(`
+      SELECT m.id, m.text, f.orchestrator, f.file_path AS filePath
+      FROM transcript_messages m
+      JOIN transcript_files f ON f.id = m.file_id
+      LEFT JOIN transcript_embeddings e ON e.message_id = m.id
+      WHERE m.embed_eligible = 1 AND e.message_id IS NULL AND m.id > ?
+        AND f.orchestrator IN (${orchestratorsToEmbed.map(() => '?').join(', ')})
+      ORDER BY m.id ASC LIMIT 1
+    `);
+    let lastId = 0;
+    for (;;) {
+      renewIfDue();
+      if (signal?.aborted || leaseLost) return summary;
+      const pending = nextEmbedding.get(lastId, ...orchestratorsToEmbed);
+      if (!pending) break;
+      const { id, text, orchestrator, filePath } = pending;
+      lastId = id;
+      try {
+        const vector = await embeddingEngine.embed(text.trim());
+        renewIfDue();
+        if (signal?.aborted || leaseLost) return summary;
+        const status = embeddingEngine.getStatus?.();
+        if (!vector) {
+          if (status?.available === false) break;
+          continue;
+        }
+        const model = status?.model ?? config?.embedding?.model ?? DEFAULT_EMBEDDING_MODEL;
+        summary.embeddingsWritten += sql.putEmbedding.run(model, vector.length, encodeFloat32Vector(vector), id).changes;
+      } catch (error) {
+        if (signal?.aborted || leaseLost) return summary;
+        recordError(orchestrator, filePath, error);
       }
     }
     return summary;
