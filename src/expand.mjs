@@ -174,6 +174,21 @@ function appendMessage(result, message, maxChars) {
   result.total_chars += message.text.length;
 }
 
+function rowCursor(iterator) {
+  let next;
+  return {
+    peek() {
+      return (next ??= iterator.next()).value;
+    },
+    advance() {
+      next = undefined;
+    },
+    close() {
+      iterator.return?.();
+    },
+  };
+}
+
 function diskMessages(db, file, fd, options, maxChars) {
   const { start_seq, end_seq, line_start = 1, line_end = Infinity } = options;
   const hasSeqRange = start_seq !== undefined || end_seq !== undefined;
@@ -181,45 +196,53 @@ function diskMessages(db, file, fd, options, maxChars) {
     SELECT line_no, role, text, tool_names FROM transcript_messages WHERE file_id = ? ORDER BY line_no ASC LIMIT 1
   `).get(file.id);
   const { where, params } = messageRange(file.id, options);
-  const requested = anchor ? db.prepare(`
-    SELECT line_no, seq, role, text, tool_names FROM transcript_messages WHERE ${where} ORDER BY seq DESC
-  `).all(...params).sort((a, b) => a.line_no - b.line_no) : [];
-  const rangeEnd = anchor && hasSeqRange ? requested.at(-1)?.line_no ?? 0 : line_end;
-  const maxTargetLineNo = Math.max(rangeEnd, anchor?.line_no ?? 1);
+  const requested = anchor ? rowCursor(db.prepare(`
+    SELECT line_no, seq, role, text, tool_names FROM transcript_messages WHERE ${where} ORDER BY line_no ASC, seq ASC
+  `).iterate(...params)) : null;
 
   const result = { messages: [], total_chars: 0, truncated: false };
-  let next = 0;
+  let anchorValidated = !anchor;
   let nonEmptySeq = 0;
   let line_no = 0;
 
-  for (const line of readLines(fd)) {
-    line_no++;
-    const record = line_no === 1 ? parseRecord(line) : undefined;
-    if (line_no === 1) {
-      const sessionIds = [record?.session_id, record?.sessionId, record?.message?.session_id, record?.message?.sessionId,
-        record?.type === 'session' ? record.id : undefined];
-      if (sessionIds.some((id) => typeof id === 'string' && id !== file.session_id)) return null;
-    }
-    const atAnchor = line_no === anchor?.line_no;
-    const atRequested = line_no === requested[next]?.line_no;
-    let seq = !anchor && line.trim() ? nonEmptySeq++ : undefined;
-    const include = !result.truncated && line_no >= line_start && line_no <= line_end
-      && (!hasSeqRange || (anchor ? atRequested : seq !== undefined && seq >= (start_seq ?? 0)));
-    if (atAnchor || atRequested || include) {
-      const parsed = parseLine(line, record);
-      if (atAnchor && !matchesMessage(parsed, anchor)) return null;
-      while (line_no === requested[next]?.line_no) {
-        const expected = requested[next++];
-        if (!matchesMessage(parsed, expected)) return null;
-        seq = expected.seq;
+  try {
+    for (const line of readLines(fd)) {
+      line_no++;
+      const record = line_no === 1 ? parseRecord(line) : undefined;
+      if (line_no === 1) {
+        const sessionIds = [record?.session_id, record?.sessionId, record?.message?.session_id, record?.message?.sessionId,
+          record?.type === 'session' ? record.id : undefined];
+        if (sessionIds.some((id) => typeof id === 'string' && id !== file.session_id)) return null;
       }
-      if (include) appendMessage(result, { ...(seq === undefined ? {} : { seq }), line_no, ...parsed }, maxChars);
+      const atAnchor = line_no === anchor?.line_no;
+      const atRequested = line_no === requested?.peek()?.line_no;
+      let seq = !anchor && line.trim() ? nonEmptySeq++ : undefined;
+      const include = line_no >= line_start && line_no <= line_end
+        && (!hasSeqRange || (anchor ? atRequested : seq !== undefined && seq >= (start_seq ?? 0)));
+      if (atAnchor || atRequested || include) {
+        const parsed = parseLine(line, record);
+        if (atAnchor) {
+          if (!matchesMessage(parsed, anchor)) return null;
+          anchorValidated = true;
+        }
+        while (line_no === requested?.peek()?.line_no) {
+          const expected = requested.peek();
+          if (!matchesMessage(parsed, expected)) return null;
+          seq ??= expected.seq;
+          requested.advance();
+        }
+        if (include) {
+          appendMessage(result, { ...(seq === undefined ? {} : { seq }), line_no, ...parsed }, maxChars);
+          if (result.truncated) break;
+        }
+      }
+      if (anchorValidated && (line_no >= line_end || (anchor && hasSeqRange && !requested.peek()))) break;
+      if (!anchor && end_seq !== undefined && seq === end_seq) break;
     }
-    // Validate all selected indexed rows, even after the response has filled its text budget.
-    if (line_no >= maxTargetLineNo || (!anchor && seq === end_seq && end_seq !== undefined)
-      || (result.truncated && next === requested.length && line_no >= (anchor?.line_no ?? 0))) break;
+    return anchorValidated && (result.truncated || !requested?.peek()) ? result : null;
+  } finally {
+    requested?.close();
   }
-  return next === requested.length && line_no >= (anchor?.line_no ?? 0) ? result : null;
 }
 
 function messageRange(fileId, { start_seq, end_seq, line_start, line_end }) {
