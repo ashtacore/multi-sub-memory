@@ -123,17 +123,22 @@ function hasEligibleVectors(db, sources, filters, engine) {
   const embeddingSources = sources.filter((source) => sourceQueries[source].embedding);
   if (!embeddingSources.length) return false;
   let status;
+  let expectedDims;
   try {
     status = engine.getStatus?.();
+    if (status?.enabled === false || status?.reason) return false;
+    if (typeof engine.getExpectedDims === 'function') {
+      expectedDims = engine.getExpectedDims();
+    } else if (status && (status.available || status.model === DEFAULT_EMBEDDING_MODEL
+      || status.dims !== DEFAULT_EMBEDDING_DIMS)) {
+      // Status-only engines can report the default width as a placeholder.
+      expectedDims = status.dims;
+    }
   } catch {
     return false;
   }
-  if (status?.enabled === false || status?.reason) return false;
 
-  // An uninitialized custom model can report the default width as a placeholder.
-  const dims = Number.isInteger(status?.dims) && status.dims > 0
-    && (status.available || status.model === DEFAULT_EMBEDDING_MODEL || status.dims !== DEFAULT_EMBEDDING_DIMS)
-    ? status.dims : undefined;
+  const dims = Number.isInteger(expectedDims) && expectedDims > 0 ? expectedDims : undefined;
   return embeddingSources.some((source) => {
     const spec = sourceQueries[source];
     const { clauses, params } = vectorFilter(sourceFilter(spec, filters), status?.model, dims);
