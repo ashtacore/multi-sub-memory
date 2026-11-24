@@ -176,7 +176,12 @@ function resolveConfigDestination(configPath) {
   let hops = 0;
   while (remaining.length > 0) {
     const component = remaining.shift();
-    if (component === '.') continue;
+    if (component === '.') {
+      if (remaining.length === 0) {
+        throw new Error('Config symlink target must not be a directory path: ' + configPath);
+      }
+      continue;
+    }
     if (component === '..') {
       if (!fs.lstatSync(destination, { throwIfNoEntry: false })?.isDirectory()) {
         throw new Error('Cannot traverse .. from non-existent or non-directory path ' + destination);
@@ -195,6 +200,9 @@ function resolveConfigDestination(configPath) {
       throw new Error('Too many symbolic links resolving config path ' + configPath);
     }
     const target = fs.readlinkSync(candidate);
+    if (remaining.length === 0 && target.endsWith('/')) {
+      throw new Error('Config symlink target must not be a directory path: ' + target);
+    }
     const { root } = path.parse(target);
     if (root) destination = path.resolve(destination, root);
     remaining.unshift(...target.slice(root.length).split('/').filter(Boolean));

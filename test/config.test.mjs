@@ -241,6 +241,24 @@ test('rejects .. after a dangling directory symlink in a config target', { skip:
   assert.deepEqual(fs.readdirSync(homeDir).sort(), ['alias', 'config.jsonc', 'settings.jsonc']);
 });
 
+test('rejects dangling config symlinks with directory-only targets', { skip: process.platform === 'win32' }, (t) => {
+  const { homeDir } = configFixture(t);
+  const slashLinkPath = path.join(homeDir, 'config-slash.jsonc');
+  const dotLinkPath = path.join(homeDir, 'config-dot.jsonc');
+  fs.symlinkSync('missing-slash/', slashLinkPath, 'file');
+  fs.symlinkSync('missing-dot/.', dotLinkPath, 'file');
+
+  const replacement = { dreamer: { enabled: true } };
+  assert.throws(() => writeConfig(slashLinkPath, replacement), /Config symlink target must not be a directory path/);
+  assert.throws(() => writeConfig(dotLinkPath, replacement), /Config symlink target must not be a directory path/);
+
+  assert.equal(fs.existsSync(path.join(homeDir, 'missing-slash')), false);
+  assert.equal(fs.existsSync(path.join(homeDir, 'missing-dot')), false);
+  assert.equal(fs.lstatSync(slashLinkPath).isSymbolicLink(), true);
+  assert.equal(fs.lstatSync(dotLinkPath).isSymbolicLink(), true);
+  assert.deepEqual(fs.readdirSync(homeDir).sort(), ['config-dot.jsonc', 'config-slash.jsonc']);
+});
+
 test('preserves the mode of an existing private POSIX config', { skip: process.platform === 'win32' }, (t) => {
   const { homeDir } = configFixture(t);
   const configPath = path.join(homeDir, 'config.jsonc');
