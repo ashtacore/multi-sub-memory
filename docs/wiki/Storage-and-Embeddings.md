@@ -12,6 +12,8 @@ The initial schema stores structured memories, notes, transcript files and their
 
 Transcript files store the committed byte offset and physical line count, the observed file size, the device and inode identity, and a SHA-256 digest of the entire committed prefix. The indexer validates that digest before resuming from a nonzero checkpoint. Migration 2 adds `line_count`, `file_size`, `file_identity`, and `checkpoint_hash` as nullable fields so existing transcript rows remain readable. OMP and Claude Code message timestamps are stored as UTC ISO 8601 text when a valid timestamp is available. [Incremental indexing](Indexers.md)
 
+Migration 3 adds `embed_eligible` to transcript messages and defaults existing rows to `0`. The indexer uses it to retry missing eligible embeddings independently of the file checkpoint. [Embedding eligibility](Indexers.md#design-rules-and-why)
+
 The full-text indexes require FTS5 support in `node:sqlite`, available in official Node.js builds matching `^22.16.0 || >=24.0.0`. Node.js 23.x builds omit FTS5. External-content FTS5 indexes cover memory content, category, and project key, note content, surface condition, and project key, and transcript text, tool names, and role. Insert and delete triggers add and remove index entries. Update triggers remove the previous indexed terms before adding the current terms. Cascading transcript deletes also remove their search terms.
 
 ## Design rules and why

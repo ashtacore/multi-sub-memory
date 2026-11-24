@@ -184,6 +184,140 @@ test('keeps incomplete lines behind the checkpoint and rebuilds a shortened file
   assert.equal((await search('fresh')).results[0].session_id, 'new-file');
 });
 
+test('overlapping roots preserve format ownership for combined and separate runs', async (t) => {
+  for (const mode of ['combined', 'separate']) {
+    await t.test(mode, async (t) => {
+      const { root, omp, db, config } = fixture(t);
+      const claudeRoot = path.join(omp, 'claude');
+      fs.mkdirSync(claudeRoot);
+      config.indexers.claude.sessionsDir = claudeRoot;
+      fs.writeFileSync(path.join(omp, 'omp.jsonl'), jsonl(
+        { type: 'session', id: 'omp-owner', cwd: root }, ompMessage('user', 'OMP fixture turn'),
+      ));
+      fs.writeFileSync(path.join(claudeRoot, 'claude.jsonl'), jsonl(
+        claudeMessage('assistant', 'Claude fixture turn', { sessionId: 'claude-owner', cwd: root }),
+      ));
+      const options = { db, config };
+      if (mode === 'combined') {
+        const result = await runIndexers(options);
+        assert.deepEqual(result.errors, []);
+        assert.equal(result.filesIndexed, 2);
+      } else {
+        const ompRun = await runIndexers({ ...options, orchestrators: ['omp'] });
+        assert.deepEqual(ompRun.errors, []);
+        assert.equal(ompRun.filesIndexed, 1);
+        assert.equal(ompRun.filesSkipped, 1);
+        assert.equal(db.prepare('SELECT COUNT(*) AS count FROM transcript_files').get().count, 1);
+        const claudeRun = await runIndexers({ ...options, orchestrators: ['claude'] });
+        assert.deepEqual(claudeRun.errors, []);
+        assert.equal(claudeRun.filesIndexed, 1);
+      }
+      const rows = db.prepare(`
+        SELECT f.orchestrator, f.session_id, m.text FROM transcript_files f
+        LEFT JOIN transcript_messages m ON m.file_id = f.id ORDER BY f.orchestrator
+      `).all();
+      assert.deepEqual(rows.map(({ orchestrator, session_id, text }) => [orchestrator, session_id, text]), [
+        ['claude', 'claude-owner', 'Claude fixture turn'], ['omp', 'omp-owner', 'OMP fixture turn'],
+      ]);
+    });
+  }
+});
+
+test('an unrecognized replacement relinquishes ownership in overlapping roots', async (t) => {
+  for (const [mode, from, to] of [
+    ['combined', 'omp', 'claude'],
+    ['combined', 'claude', 'omp'],
+    ['separate', 'omp', 'claude'],
+  ]) {
+    await t.test(`${mode}: ${from} to ${to}`, async (t) => {
+      const { root, omp, db, config } = fixture(t);
+      const claudeRoot = path.join(omp, 'claude');
+      fs.mkdirSync(claudeRoot);
+      config.indexers.claude.sessionsDir = claudeRoot;
+      const file = path.join(claudeRoot, 'shared.jsonl');
+      function transcript(orchestrator, text) {
+        const sessionId = `${orchestrator}-owner`;
+        return orchestrator === 'omp'
+          ? jsonl({ type: 'session', id: sessionId, cwd: root }, ompMessage('user', text))
+          : jsonl(claudeMessage('assistant', text, { sessionId, cwd: root }));
+      }
+      fs.writeFileSync(file, transcript(from, 'Stale fixture turn'));
+      const options = { db, config };
+      const initial = await runIndexers({ ...options, orchestrators: [from] });
+      assert.deepEqual(initial.errors, []);
+      assert.equal(initial.messagesIndexed, 1);
+      assert.equal(db.prepare('SELECT orchestrator FROM transcript_files').get().orchestrator, from);
+      db.exec(`
+        INSERT INTO transcript_embeddings (message_id, model_id, dims, vector)
+        SELECT id, 'fixture-model', 1, X'0000803F' FROM transcript_messages;
+      `);
+
+      fs.renameSync(file, `${file}.bak`);
+      fs.writeFileSync(file, transcript(to, 'Replacement fixture turn'));
+      if (mode === 'combined') {
+        const result = await runIndexers(options);
+        assert.deepEqual(result.errors, []);
+        assert.equal(result.filesIndexed, 1);
+        assert.equal(result.filesSkipped, from === 'omp' ? 1 : 2);
+        assert.equal(result.messagesIndexed, 1);
+      } else {
+        const ownerRun = await runIndexers({ ...options, orchestrators: [from] });
+        assert.deepEqual(ownerRun.errors, []);
+        assert.equal(ownerRun.filesIndexed, 0);
+        assert.equal(ownerRun.filesSkipped, 1);
+        assert.equal(db.prepare('SELECT 1 FROM transcript_files').get(), undefined);
+        assert.equal(db.prepare('SELECT 1 FROM transcript_messages').get(), undefined);
+        const replacementRun = await runIndexers({ ...options, orchestrators: [to] });
+        assert.deepEqual(replacementRun.errors, []);
+        assert.equal(replacementRun.filesIndexed, 1);
+      }
+
+      const rows = db.prepare(`
+        SELECT f.orchestrator, f.session_id, m.text FROM transcript_files f
+        LEFT JOIN transcript_messages m ON m.file_id = f.id
+      `).all();
+      assert.deepEqual(rows.map(({ orchestrator, session_id, text }) => [orchestrator, session_id, text]), [
+        [to, `${to}-owner`, 'Replacement fixture turn'],
+      ]);
+      assert.equal(db.prepare('SELECT 1 FROM transcript_embeddings').get(), undefined);
+      assert.equal(db.prepare('SELECT rowid FROM transcript_messages_fts WHERE transcript_messages_fts MATCH ?')
+        .get('stale'), undefined);
+    });
+  }
+});
+
+test('a multi-chunk checkpoint refresh yields to an event-loop callback during parsing', async (t) => {
+  const { root, omp, db, config } = fixture(t);
+  const file = path.join(omp, 'responsive.jsonl');
+  const prefix = jsonl({ type: 'session', id: 'responsive', cwd: root },
+    { type: 'custom', padding: 'x'.repeat(3 * 64 * 1024) });
+  fs.writeFileSync(file, prefix);
+  const options = { db, config, orchestrators: ['omp'] };
+  assert.equal((await runIndexers(options)).filesIndexed, 1);
+  fs.appendFileSync(file, jsonl(ompMessage('user', 'New turn after the committed prefix')));
+
+  let callbackRanDuringParse = false;
+  const adapter = {
+    ...ompAdapter,
+    async parseIncremental(filePath, offset, meta) {
+      assert.equal(offset, Buffer.byteLength(prefix));
+      assert.ok(meta.checkpointHash);
+      let parsing = true;
+      const callback = setImmediate(() => { callbackRanDuringParse = parsing; });
+      try {
+        return await ompAdapter.parseIncremental(filePath, offset, meta);
+      } finally {
+        parsing = false;
+        clearImmediate(callback);
+      }
+    },
+  };
+  const result = await runIndexers({ ...options, adapters: [adapter] });
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.messagesIndexed, 1);
+  assert.equal(callbackRanDuringParse, true);
+});
+
 test('rebuilds a growing in-place rewrite in the middle of the checkpoint', async (t) => {
   const { root, omp, db, config } = fixture(t);
   const file = path.join(omp, 'rewrite.jsonl');
@@ -226,6 +360,108 @@ test('rebuilds a growing in-place rewrite in the middle of the checkpoint', asyn
   assert.equal((await search('obsolete')).results.length, 0);
   assert.equal((await search('reworked')).results[0].seq, 1);
   assert.deepEqual((await search('added')).results.map(({ seq }) => seq), [2]);
+});
+
+test('expansion falls back after a same-size in-place rewrite of a requested indexed turn', async (t) => {
+  const { root, omp, db, config } = fixture(t);
+  const file = path.join(omp, 'same-size.jsonl');
+  const prefix = Buffer.from(jsonl({ type: 'session', id: 'same-size', cwd: root },
+    ompMessage('user', 'Unchanged first turn'), { type: 'custom', padding: 'x'.repeat(64 * 1024) }));
+  const indexedText = 'Original second turn';
+  const original = Buffer.from(jsonl(ompMessage('assistant', indexedText)));
+  const replacement = Buffer.from(jsonl(ompMessage('assistant', 'Replaced second turn')));
+  assert.equal(original.length, replacement.length);
+  fs.writeFileSync(file, Buffer.concat([prefix, original]));
+  assert.equal((await runIndexers({ db, config })).messagesIndexed, 2);
+  const options = { session_id: 'same-size', start_seq: 1, end_seq: 1 };
+  assert.equal(expandSession(db, options).source, 'disk');
+  const before = fs.statSync(file, { bigint: true });
+
+  const fd = fs.openSync(file, 'r+');
+  try {
+    assert.equal(fs.writeSync(fd, replacement, 0, replacement.length, prefix.length), replacement.length);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const after = fs.statSync(file, { bigint: true });
+  assert.deepEqual([after.dev, after.ino, after.size], [before.dev, before.ino, before.size]);
+
+  const expanded = expandSession(db, options);
+  assert.equal(expanded.source, 'db-fallback');
+  assert.deepEqual(expanded.messages.map(({ text }) => text), [indexedText]);
+
+  db.exec('UPDATE transcript_files SET checkpoint_hash = NULL');
+  const legacy = expandSession(db, options);
+  assert.equal(legacy.source, 'db-fallback');
+  assert.deepEqual(legacy.messages.map(({ text }) => text), [indexedText]);
+});
+
+test('expanding the first indexed turn reads only the first chunk of a large checkpoint', async (t) => {
+  const { root, omp, db, config } = fixture(t);
+  const file = path.join(omp, 'bounded-expand.jsonl');
+  const header = jsonl({ type: 'session', id: 'bounded-expand', cwd: root });
+  const first = jsonl(ompMessage('user', 'Original first turn'));
+  fs.writeFileSync(file, header + first + jsonl({ type: 'custom', padding: 'x'.repeat(3 * 1024 * 1024) },
+    ompMessage('assistant', 'Later indexed turn')));
+  const indexed = await runIndexers({ db, config });
+  assert.deepEqual(indexed.errors, []);
+  assert.equal(indexed.messagesIndexed, 2);
+  assert.equal(db.prepare('SELECT byte_offset FROM transcript_files').get().byte_offset, fs.statSync(file).size);
+
+  const readSync = fs.readSync;
+  const reads = [];
+  t.mock.method(fs, 'readSync', (fd, buffer, offset, length, position) => {
+    reads.push(position);
+    return readSync(fd, buffer, offset, length, position);
+  });
+  const firstTruncatedBudget = JSON.stringify({ seq: 0, line_no: 2, role: 'user', text: 'Origina…' }).length;
+  const options = { session_id: 'bounded-expand', start_seq: 0, end_seq: 0, max_chars: firstTruncatedBudget };
+  const original = expandSession(db, options);
+  assert.equal(original.source, 'disk');
+  assert.equal(original.truncated, true);
+  assert.deepEqual(original.messages.map(({ text }) => text), ['Origina…']);
+  assert.deepEqual(reads, [0]);
+
+  const replacement = jsonl(ompMessage('user', 'Original other turn'));
+  assert.equal(Buffer.byteLength(replacement), Buffer.byteLength(first));
+  const fd = fs.openSync(file, 'r+');
+  try {
+    fs.writeSync(fd, replacement, Buffer.byteLength(header), 'utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+  reads.length = 0;
+  const rewritten = expandSession(db, options);
+  assert.equal(rewritten.source, 'db-fallback');
+  assert.deepEqual(rewritten.messages.map(({ text }) => text), ['Origina…']);
+  assert.deepEqual(reads, [0]);
+});
+
+test('expansion without a sequence range truncates in the first chunk', async (t) => {
+  const { omp, db, config } = fixture(t);
+  const file = path.join(omp, 'budgeted-expand.jsonl');
+  const chunkSize = 64 * 1024;
+  const laterTurns = Array.from({ length: 256 }, (_, index) =>
+    ompMessage('assistant', `Later fixture turn ${index} ${'x'.repeat(1024)}`));
+  fs.writeFileSync(file, jsonl(ompMessage('user', 'Original first turn'), ...laterTurns));
+  assert.ok(fs.statSync(file).size > 3 * chunkSize);
+  const indexed = await runIndexers({ db, config });
+  assert.deepEqual(indexed.errors, []);
+  assert.equal(indexed.messagesIndexed, 1 + laterTurns.length);
+
+  const readSync = fs.readSync;
+  const reads = [];
+  t.mock.method(fs, 'readSync', (fd, buffer, offset, length, position) => {
+    const count = readSync(fd, buffer, offset, length, position);
+    reads.push([position, count]);
+    return count;
+  });
+  const truncatedBudget = JSON.stringify({ seq: 0, line_no: 1, role: 'user', text: 'Origina…' }).length;
+  const expanded = expandSession(db, { session_id: 'budgeted-expand', max_chars: truncatedBudget });
+  assert.equal(expanded.source, 'disk');
+  assert.equal(expanded.truncated, true);
+  assert.deepEqual(expanded.messages, [{ seq: 0, line_no: 1, role: 'user', text: 'Origina…' }]);
+  assert.deepEqual(reads, [[0, chunkSize]]);
 });
 
 test('expansion falls back when a replacement file matches the session and anchor', async (t) => {
@@ -339,6 +575,47 @@ test('selective embeddings keep short, oversized, and tool output searchable', a
   assert.equal(expanded.messages[0].text, 'Claude fixturetool output');
 });
 
+test('an unchanged transcript retries missing embeddings after an interrupted run', async (t) => {
+  const { root, omp, db, config } = fixture(t);
+  const texts = ['First fixture prompt', 'Second fixture answer', 'Third fixture prompt'];
+  fs.writeFileSync(path.join(omp, 'retry.jsonl'), jsonl(
+    { type: 'session', id: 'retry', cwd: root }, ...texts.map((text) => ompMessage('user', text)),
+  ));
+  const options = { db, config, orchestrators: ['omp'] };
+  const controller = new AbortController();
+  const attempted = [];
+  const interrupted = await runIndexers({ ...options, signal: controller.signal, embeddingEngine: {
+    async embed(text) {
+      attempted.push(text);
+      if (attempted.length === 2) controller.abort();
+      return Float32Array.of(1, 0);
+    },
+  } });
+  assert.deepEqual(interrupted.errors, []);
+  assert.equal(interrupted.messagesIndexed, 3);
+  assert.equal(interrupted.embeddingsWritten, 1);
+  assert.deepEqual(attempted, texts.slice(0, 2));
+
+  const retried = [];
+  const resumed = await runIndexers({ ...options, embeddingEngine: {
+    async embed(text) {
+      retried.push(text);
+      return Float32Array.of(1, 0);
+    },
+  } });
+  assert.deepEqual(resumed.errors, []);
+  assert.equal(resumed.filesSkipped, 1);
+  assert.equal(resumed.messagesIndexed, 0);
+  assert.equal(resumed.embeddingsWritten, 2);
+  assert.deepEqual(retried, texts.slice(1));
+  const rows = db.prepare(`
+    SELECT m.seq, m.text, m.embed_eligible, e.message_id
+    FROM transcript_messages m LEFT JOIN transcript_embeddings e ON e.message_id = m.id ORDER BY m.seq
+  `).all();
+  assert.deepEqual(rows.map(({ seq, text, embed_eligible, message_id }) => [seq, text, embed_eligible, message_id != null]),
+    texts.map((text, seq) => [seq, text, 1, true]));
+});
+
 test('a second connection skips a held lease, including runs with the same owner label', async (t) => {
   const { root, omp, db, dbPath, config } = fixture(t);
   const contender = openDatabase(dbPath);
@@ -413,14 +690,14 @@ test('discovers sorted regular JSONL files and skips linked directories', (t) =>
   assert.throws(() => validateAdapter({ orchestrator: 'unknown' }), /supported orchestrator/);
 });
 
-test('Claude uses the project folder when a transcript has no recorded cwd', (t) => {
+test('Claude uses the project folder when a transcript has no recorded cwd', async (t) => {
   const { claude } = fixture(t);
   const windows = process.platform === 'win32';
   const folder = path.join(claude, windows ? 'C--work-fixture' : '-work-fixture');
   fs.mkdirSync(folder);
   const file = path.join(folder, 'fallback.jsonl');
   fs.writeFileSync(file, jsonl(claudeMessage('assistant', [{ type: 'tool_use', name: 'fixture_tool' }])));
-  const parsed = claudeAdapter.parseIncremental(file, 0, { sessionsDir: claude });
+  const parsed = await claudeAdapter.parseIncremental(file, 0, { sessionsDir: claude });
   assert.equal(parsed.sessionId, 'fallback');
   assert.equal(parsed.cwd, windows ? 'C:\\work\\fixture' : '/work/fixture');
   assert.deepEqual(parsed.messages[0].toolNames, ['fixture_tool']);

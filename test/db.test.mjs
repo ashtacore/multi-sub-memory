@@ -83,18 +83,33 @@ test('creates the core schema in WAL mode and preserves the migration record on 
   }
   for (const index of ['idx_memories_project_status_rank', 'idx_notes_project_status',
     'idx_transcript_files_session_id', 'idx_transcript_files_project_orchestrator',
-    'idx_dream_runs_project_started']) {
+    'idx_transcript_messages_file_line_seq', 'idx_dream_runs_project_started']) {
     assert.equal(objects.get(index), 'index', index);
   }
 
   const selectMigrations = 'SELECT version, applied_at FROM schema_migrations ORDER BY version';
   const migrations = db.prepare(selectMigrations).all();
-  assert.deepEqual(migrations.map(({ version }) => version), [1, 2]);
+  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4]);
   assert.ok(Number.isInteger(migrations[0].applied_at) && migrations[0].applied_at > 0);
   addMemory(db);
   const reopened = fixture.open();
   assert.deepEqual(reopened.prepare(selectMigrations).all(), migrations);
   assert.equal(count(reopened, 'memories'), 1);
+});
+
+test('unrestricted transcript expansion queries read messages in index order', (t) => {
+  const db = databaseFixture(t).open();
+  const queries = [
+    `SELECT line_no, role, text, tool_names FROM transcript_messages
+      WHERE file_id = ? ORDER BY line_no ASC LIMIT 1`,
+    `SELECT line_no, seq, role, text, tool_names FROM transcript_messages
+      WHERE file_id = ? ORDER BY line_no ASC, seq ASC`,
+  ];
+  for (const query of queries) {
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all(1).map(({ detail }) => detail).join('\n');
+    assert.match(plan, /\bUSING (?:COVERING )?INDEX idx_transcript_messages_file_line_seq\b/i, query);
+    assert.doesNotMatch(plan, /TEMP B-TREE/i, query);
+  }
 });
 
 test('two processes can open and migrate a fresh database concurrently', async (t) => {
@@ -123,7 +138,7 @@ test('two processes can open and migrate a fresh database concurrently', async (
     try {
       assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
       assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-        .map(({ version }) => version), [1, 2]);
+        .map(({ version }) => version), [1, 2, 3, 4]);
     } finally {
       db.close();
     }
@@ -139,7 +154,7 @@ test('two processes can open and migrate a fresh database concurrently', async (
 
   const db = fixture.open({ readOnly: true });
   assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-    .map(({ version }) => version), [1, 2]);
+    .map(({ version }) => version), [1, 2, 3, 4]);
 });
 
 test('rolls back both schema changes and the migration record when migration fails', (t) => {
@@ -150,10 +165,10 @@ test('rolls back both schema changes and the migration record when migration fai
   assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name = 'memories'").get(), undefined);
   db.exec('DROP TABLE notes');
   runMigrations(db);
-  assert.equal(count(db, 'schema_migrations'), 2);
+  assert.equal(count(db, 'schema_migrations'), 4);
 });
 
-test('adds transcript checkpoint fields to a version 1 database without losing rows', (t) => {
+test('adds transcript checkpoints and embedding eligibility to a version 1 database without losing rows', (t) => {
   const db = databaseFixture(t).openUnmigrated();
   db.exec(`
     CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
@@ -163,10 +178,71 @@ test('adds transcript checkpoint fields to a version 1 database without losing r
   db.exec(`
     INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, mtime_ms, byte_offset, last_indexed_at)
     VALUES ('fixture.jsonl', 'omp', 'session', 'project', 1, 42, 1);
+    INSERT INTO transcript_messages (file_id, seq, role, text, line_no)
+    SELECT id, 0, 'user', 'Existing fixture message', 1 FROM transcript_files;
   `);
   runMigrations(db);
   const { byte_offset, line_count, file_identity } = db.prepare('SELECT * FROM transcript_files').get();
   assert.deepEqual([byte_offset, line_count, file_identity], [42, null, null]);
+  const { text, embed_eligible } = db.prepare('SELECT text, embed_eligible FROM transcript_messages').get();
+  assert.equal(text, 'Existing fixture message');
+  assert.equal(embed_eligible, 0);
+});
+
+test('reopens a pre-repair version 2 database and adds embedding eligibility without losing rows', (t) => {
+  const fixture = databaseFixture(t);
+  const db = fixture.openUnmigrated();
+  MIGRATIONS[0].up(db);
+  db.exec(`
+    CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+    INSERT INTO schema_migrations VALUES (1, 1), (2, 2);
+    ALTER TABLE transcript_files ADD COLUMN line_count INTEGER;
+    ALTER TABLE transcript_files ADD COLUMN file_identity TEXT;
+    ALTER TABLE transcript_files ADD COLUMN checkpoint_hash TEXT;
+    ALTER TABLE transcript_files ADD COLUMN file_size INTEGER;
+    INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, mtime_ms,
+      byte_offset, last_indexed_at, line_count, file_identity, checkpoint_hash, file_size)
+    VALUES ('fixture.jsonl', 'omp', 'session', 'project', 1, 42, 1, 2, 'device:inode', 'digest', 48);
+    INSERT INTO transcript_messages (file_id, seq, role, text, line_no)
+    SELECT id, 0, 'user', 'Existing fixture message', 2 FROM transcript_files;
+  `);
+
+  const reopened = fixture.open();
+  const migrations = reopened.prepare('SELECT version, applied_at FROM schema_migrations ORDER BY version').all();
+  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4]);
+  assert.deepEqual(migrations.slice(0, 2).map(({ applied_at }) => applied_at), [1, 2]);
+  const { id, byte_offset, line_count, file_identity, checkpoint_hash, file_size } = reopened
+    .prepare('SELECT * FROM transcript_files').get();
+  assert.deepEqual([byte_offset, line_count, file_identity, checkpoint_hash, file_size], [42, 2, 'device:inode', 'digest', 48]);
+
+  reopened.prepare(`
+    INSERT INTO transcript_messages (file_id, seq, role, text, line_no, embed_eligible)
+    VALUES (?, 1, 'assistant', 'New fixture message', 3, 1)
+  `).run(id);
+  const messages = reopened.prepare('SELECT text, embed_eligible FROM transcript_messages ORDER BY seq').all();
+  assert.deepEqual(messages.map(({ text, embed_eligible }) => [text, embed_eligible]), [
+    ['Existing fixture message', 0], ['New fixture message', 1],
+  ]);
+});
+
+test('records migration 3 when an earlier version 2 already added embedding eligibility', (t) => {
+  const fixture = databaseFixture(t);
+  const db = fixture.openUnmigrated();
+  MIGRATIONS[0].up(db);
+  MIGRATIONS[1].up(db);
+  db.exec(`
+    CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+    INSERT INTO schema_migrations VALUES (1, 1), (2, 2);
+    ALTER TABLE transcript_messages ADD COLUMN embed_eligible INTEGER NOT NULL DEFAULT 0;
+    INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, mtime_ms, last_indexed_at)
+    VALUES ('fixture.jsonl', 'omp', 'session', 'project', 1, 1);
+    INSERT INTO transcript_messages (file_id, seq, role, text, line_no, embed_eligible)
+    SELECT id, 0, 'user', 'Eligible fixture message', 1, 1 FROM transcript_files;
+  `);
+
+  const reopened = fixture.open();
+  assert.ok(reopened.prepare('SELECT 1 FROM schema_migrations WHERE version = 3').get());
+  assert.equal(reopened.prepare('SELECT embed_eligible FROM transcript_messages').get().embed_eligible, 1);
 });
 
 test('read-only connections allow reads, reject writes, and skip migrations and directory creation', (t) => {

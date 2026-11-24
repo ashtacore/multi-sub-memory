@@ -131,6 +131,39 @@ test('merges environment, project, user, and default config in precedence order'
   }).bootstrap.tokenBudget, 1000);
 });
 
+test('project config cannot authorize background transcript refresh', (t) => {
+  const options = configFixture(t);
+  const userPath = path.join(options.homeDir, '.config', 'multi-sub-memory', 'config.jsonc');
+  const projectPath = path.join(options.projectRoot, '.multi-sub-memory.jsonc');
+  writeConfig(projectPath, { indexers: { backgroundRefresh: true } });
+  assert.equal(loadConfig(options).indexers.backgroundRefresh, false);
+
+  writeConfig(userPath, { indexers: { backgroundRefresh: false } });
+  assert.equal(loadConfig(options).indexers.backgroundRefresh, false);
+});
+
+test('user-authorized background refresh requires a database selected outside project config', (t) => {
+  const options = configFixture(t);
+  const userPath = path.join(options.homeDir, '.config', 'multi-sub-memory', 'config.jsonc');
+  const projectPath = path.join(options.projectRoot, '.multi-sub-memory.jsonc');
+  writeConfig(userPath, { dbPath: '~/user.db', indexers: { backgroundRefresh: true } });
+  writeConfig(projectPath, { indexers: { refreshIntervalMs: 30_000 } });
+  assert.equal(loadConfig(options).indexers.backgroundRefresh, true);
+
+  writeConfig(projectPath, { dbPath: '~/project.db', indexers: { backgroundRefresh: true } });
+  const projectConfig = loadConfig(options);
+  assert.equal(projectConfig.dbPath, path.join(options.homeDir, 'project.db'));
+  assert.equal(projectConfig.indexers.backgroundRefresh, false);
+
+  options.env.MULTI_SUB_MEMORY_DB = '~/env.db';
+  const envConfig = loadConfig(options);
+  assert.equal(envConfig.dbPath, path.join(options.homeDir, 'env.db'));
+  assert.equal(envConfig.indexers.backgroundRefresh, true);
+
+  writeConfig(projectPath, { indexers: { backgroundRefresh: false } });
+  assert.equal(loadConfig(options).indexers.backgroundRefresh, false);
+});
+
 test('rejects invalid values and unknown keys in individual config layers', (t) => {
   const options = configFixture(t);
   const projectConfigPath = path.join(options.projectRoot, 'invalid.jsonc');

@@ -1,9 +1,10 @@
 import os from 'node:os';
 import path from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 import { expandHome } from '../config.mjs';
 import {
   discoverJsonlFiles, extractMessageContent, normalizeTranscriptRole, normalizeTranscriptTimestamp,
-  parseJsonlRecord, readIncrementalJsonlLines,
+  parseJsonlRecord, readIncrementalJsonlLinesAsync,
 } from './types.mjs';
 
 export function getDefaultClaudeSessionsDir(homeDir = os.homedir()) {
@@ -32,19 +33,29 @@ export const claudeAdapter = {
   discoverFiles(config) {
     return discoverJsonlFiles(getSessionsDir(config));
   },
-  parseIncremental(filePath, byteOffset = 0, existingMeta = {}) {
-    const { lines, ...checkpoint } =
-      readIncrementalJsonlLines(filePath, byteOffset, existingMeta.lineCount, existingMeta.checkpointHash);
+  async parseIncremental(filePath, byteOffset = 0, existingMeta = {}) {
+    const { lineCount, checkpointHash, signal, nextSeq } = existingMeta;
+    const { lines, ...checkpoint } = await readIncrementalJsonlLinesAsync(filePath, byteOffset, lineCount, checkpointHash, signal);
     let { sessionId, cwd } = existingMeta;
-    let seq = existingMeta.nextSeq ?? 0;
+    let seq = nextSeq ?? 0;
+    let recognized = false;
     const messages = [];
 
-    for (const { line, lineNo } of lines) {
+    signal?.throwIfAborted();
+    for (const [index, { line, lineNo }] of lines.entries()) {
+      if (index > 0 && index % 256 === 0) {
+        await setImmediate();
+        signal?.throwIfAborted();
+      }
       const record = parseJsonlRecord(line);
       if (!record) continue;
-      if (typeof record.sessionId === 'string' && record.sessionId) sessionId = record.sessionId;
+      if (typeof record.sessionId === 'string' && record.sessionId) {
+        sessionId = record.sessionId;
+        recognized = true;
+      }
       if (typeof record.cwd === 'string' && record.cwd) cwd = record.cwd;
       if (record.type !== 'user' && record.type !== 'assistant') continue;
+      recognized = true;
       const { text, toolNames, hasToolResult } = extractMessageContent(record.message?.content);
       if (!text && !toolNames.length) continue;
       messages.push({
@@ -57,6 +68,6 @@ export const claudeAdapter = {
       const root = existingMeta.sessionsDir ? expandHome(existingMeta.sessionsDir) : getDefaultClaudeSessionsDir();
       cwd = decodeProjectFolder(filePath, root);
     }
-    return { sessionId: sessionId ?? path.basename(filePath, '.jsonl'), cwd, messages, ...checkpoint };
+    return { sessionId: sessionId ?? path.basename(filePath, '.jsonl'), cwd, messages, recognized, ...checkpoint };
   },
 };
