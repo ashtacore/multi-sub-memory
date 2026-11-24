@@ -4,7 +4,7 @@ Cross-orchestrator local Memory MCP server (OMP, Claude Code, Codex, Antigravity
 
 ## Requirements
 
-- Node.js `>=22.13.0` (24/26+ recommended) with built-in `node:sqlite`
+- Node.js `>=22.16.0` (24/26+ recommended) with built-in `node:sqlite` and FTS5 support
 - Pure ESM (`.mjs`), zero build step, `npx`-installable
 
 ## Repository map

@@ -8,7 +8,7 @@ export const MIGRATIONS = [{
   up(db) {
     db.exec(`
       CREATE TABLE memories (
-        id TEXT PRIMARY KEY,
+        id TEXT PRIMARY KEY NOT NULL,
         project_key TEXT NOT NULL,
         scope TEXT NOT NULL CHECK (scope IN ('project', 'global')),
         category TEXT NOT NULL CHECK (category IN (
@@ -49,7 +49,7 @@ export const MIGRATIONS = [{
       END;
 
       CREATE TABLE memory_embeddings (
-        memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+        memory_id TEXT PRIMARY KEY NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
         model_id TEXT NOT NULL,
         dims INTEGER NOT NULL,
         vector BLOB NOT NULL,
@@ -57,7 +57,7 @@ export const MIGRATIONS = [{
       );
 
       CREATE TABLE notes (
-        id TEXT PRIMARY KEY,
+        id TEXT PRIMARY KEY NOT NULL,
         project_key TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'pending', 'dismissed')),
         content TEXT NOT NULL,
@@ -131,14 +131,14 @@ export const MIGRATIONS = [{
       END;
 
       CREATE TABLE transcript_embeddings (
-        message_id INTEGER PRIMARY KEY REFERENCES transcript_messages(id) ON DELETE CASCADE,
+        message_id INTEGER PRIMARY KEY NOT NULL REFERENCES transcript_messages(id) ON DELETE CASCADE,
         model_id TEXT NOT NULL,
         dims INTEGER NOT NULL,
         vector BLOB NOT NULL
-      );
+      ) WITHOUT ROWID;
 
       CREATE TABLE dream_runs (
-        id TEXT PRIMARY KEY,
+        id TEXT PRIMARY KEY NOT NULL,
         project_key TEXT NOT NULL,
         runner TEXT NOT NULL,
         model TEXT,
@@ -154,7 +154,7 @@ export const MIGRATIONS = [{
       CREATE INDEX idx_dream_runs_project_started ON dream_runs (project_key, started_at DESC);
 
       CREATE TABLE leases (
-        lease_key TEXT PRIMARY KEY,
+        lease_key TEXT PRIMARY KEY NOT NULL,
         owner TEXT NOT NULL,
         acquired_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL

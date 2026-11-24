@@ -62,6 +62,9 @@ export function decodeFloat32Vector(blob) {
 }
 
 export function cosineSimilarity(a, b) {
+  if (a instanceof Uint8Array || a instanceof ArrayBuffer) a = decodeFloat32Vector(a);
+  if (b instanceof Uint8Array || b instanceof ArrayBuffer) b = decodeFloat32Vector(b);
+
   if (a.length === 0 || a.length !== b.length) {
     throw new RangeError('Vectors must have the same non-zero length');
   }

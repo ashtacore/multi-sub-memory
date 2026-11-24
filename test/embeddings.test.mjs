@@ -54,6 +54,17 @@ test('computes cosine similarity on unnormalized vectors and handles zero norms'
   assert.throws(() => cosineSimilarity([], []), RangeError);
 });
 
+test('decodes float32 BLOBs before comparing vectors', () => {
+  assert.equal(cosineSimilarity(encodeFloat32Vector([1]), encodeFloat32Vector([-1])), -1);
+
+  const live = new Float32Array([1, 0]);
+  const blob = encodeFloat32Vector([1, 1]);
+  assertClose(cosineSimilarity(live, blob), Math.SQRT1_2);
+  assertClose(cosineSimilarity(blob, live), Math.SQRT1_2);
+  assertClose(cosineSimilarity(live, Uint8Array.from(blob).buffer), Math.SQRT1_2);
+  assert.throws(() => cosineSimilarity(live, encodeFloat32Vector([1])), RangeError);
+});
+
 test('uses CLS pooling and accepts a 768-dimensional default model output', async () => {
   const values = new Float32Array(DEFAULT_EMBEDDING_DIMS);
   values[0] = 3;

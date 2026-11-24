@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { acquireLease, hashNormalizedContent, normalizeContent, openDatabase, releaseLease, runMigrations } from '../src/db.mjs';
-import { decodeFloat32Vector, encodeFloat32Vector } from '../src/embeddings.mjs';
+import { cosineSimilarity, decodeFloat32Vector, encodeFloat32Vector } from '../src/embeddings.mjs';
 
 function databaseFixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-db-'));
@@ -207,6 +207,17 @@ test('memory search follows writes and deleting a memory cascades to its embeddi
   assert.equal(count(db, 'memory_embeddings'), 0);
 });
 
+test('compares a live vector with a SQLite embedding BLOB', (t) => {
+  const db = openDatabase(':memory:');
+  t.after(() => db.close());
+  addMemory(db);
+  db.prepare('INSERT INTO memory_embeddings VALUES (?, ?, ?, ?, ?)')
+    .run('memory', 'fixture-model', 1, encodeFloat32Vector([-1]), 1);
+  const { vector } = db.prepare('SELECT vector FROM memory_embeddings').get();
+  assert.ok(vector instanceof Uint8Array);
+  assert.equal(cosineSimilarity(new Float32Array([1]), vector), -1);
+});
+
 test('note search follows content and surface condition changes', (t) => {
   const db = databaseFixture(t).open();
   const insert = db.prepare(`
@@ -232,6 +243,10 @@ test('transcript search follows writes and file deletion cascades through messag
     VALUES (?, ?, 'assistant', ?, ?, ?)
   `);
   const first = insert.run(file, 1, 'originalmessage', 'originaltool', 1).lastInsertRowid;
+  assert.throws(() => db.exec(`
+    INSERT INTO transcript_embeddings (message_id, model_id, dims, vector)
+    VALUES (NULL, 'fixture-model', 1, X'0000803F')
+  `), /NOT NULL constraint failed: transcript_embeddings\.message_id/);
   assert.deepEqual(matches(db, 'transcript_messages_fts', 'text:originalmessage role:assistant'), [first]);
   db.prepare('UPDATE transcript_messages SET text = ?, tool_names = ? WHERE id = ?')
     .run('revisedmessage', 'revisedtool', first);
@@ -252,6 +267,23 @@ test('transcript search follows writes and file deletion cascades through messag
 
 test('enforces schema constraints and deduplicates content per project and scope', (t) => {
   const db = databaseFixture(t).open();
+  assert.throws(() => addMemory(db, { id: null }), /NOT NULL constraint failed: memories\.id/);
+  assert.throws(() => db.exec(`
+    INSERT INTO memory_embeddings (memory_id, model_id, dims, vector, updated_at)
+    VALUES (NULL, 'fixture-model', 1, X'0000803F', 1)
+  `), /NOT NULL constraint failed: memory_embeddings\.memory_id/);
+  assert.throws(() => db.exec(`
+    INSERT INTO notes (project_key, content, created_at, updated_at)
+    VALUES ('project', 'fixture', 1, 1)
+  `), /NOT NULL constraint failed: notes\.id/);
+  assert.throws(() => db.exec(`
+    INSERT INTO dream_runs (project_key, runner, status, started_at)
+    VALUES ('project', 'fixture-runner', 'running', 1)
+  `), /NOT NULL constraint failed: dream_runs\.id/);
+  assert.throws(() => db.exec(`
+    INSERT INTO leases (owner, acquired_at, expires_at) VALUES ('fixture-owner', 1, 2)
+  `), /NOT NULL constraint failed: leases\.lease_key/);
+
   for (const overrides of [{ scope: 'other' }, { category: 'other' }, { importance: 0 },
     { importance: 6 }, { status: 'other' }]) {
     assert.throws(() => addMemory(db, overrides), /CHECK constraint failed/);
