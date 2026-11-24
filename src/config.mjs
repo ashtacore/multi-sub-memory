@@ -178,6 +178,9 @@ function resolveConfigDestination(configPath) {
     const component = remaining.shift();
     if (component === '.') continue;
     if (component === '..') {
+      if (!fs.lstatSync(destination, { throwIfNoEntry: false })?.isDirectory()) {
+        throw new Error('Cannot traverse .. from non-existent or non-directory path ' + destination);
+      }
       destination = path.dirname(destination);
       continue;
     }

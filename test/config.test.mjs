@@ -224,6 +224,23 @@ test('follows a directory symlink before applying .. in a dangling config target
   assert.deepEqual(parseJsonc(fs.readFileSync(linkPath, 'utf8')), replacement);
 });
 
+test('rejects .. after a dangling directory symlink in a config target', { skip: process.platform === 'win32' }, (t) => {
+  const { homeDir } = configFixture(t);
+  const aliasPath = path.join(homeDir, 'alias');
+  const linkPath = path.join(homeDir, 'config.jsonc');
+  const unrelatedPath = path.join(homeDir, 'settings.jsonc');
+  const sentinel = '{"dbPath":"unrelated.db"}';
+
+  fs.symlinkSync(path.join(homeDir, 'missing'), aliasPath, 'dir');
+  fs.symlinkSync(['alias', '..', 'settings.jsonc'].join(path.sep), linkPath, 'file');
+  fs.writeFileSync(unrelatedPath, sentinel);
+
+  assert.throws(() => writeConfig(linkPath, { dreamer: { enabled: true } }), /Cannot traverse \.\./);
+  assert.equal(fs.readFileSync(unrelatedPath, 'utf8'), sentinel);
+  assert.equal(fs.lstatSync(linkPath).isSymbolicLink(), true);
+  assert.deepEqual(fs.readdirSync(homeDir).sort(), ['alias', 'config.jsonc', 'settings.jsonc']);
+});
+
 test('preserves the mode of an existing private POSIX config', { skip: process.platform === 'win32' }, (t) => {
   const { homeDir } = configFixture(t);
   const configPath = path.join(homeDir, 'config.jsonc');
