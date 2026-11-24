@@ -60,10 +60,13 @@ messages use their own timestamp when valid and the file's last index time
 otherwise.
 
 FTS5 treats user input as quoted search terms and ranks candidates with BM25.
-When the local engine can embed the query, search also ranks eligible memory and
-transcript vectors by cosine similarity. The two lists use the same filters.
+Search attempts query embedding only when a selected source has a stored vector
+that matches the active filters and the configured embedding model, when known.
+With a query embedding, search ranks compatible memory and transcript vectors by
+cosine similarity. The two lists use the same search filters.
 Reciprocal rank fusion sums `1 / (60 + rank)` for each list a result appears in,
-using ranks that start at one. The response reports `hybrid` or `fts-only`.
+using ranks that start at one. The response reports `hybrid` when at least one
+usable vector candidate contributes to fusion and `fts-only` otherwise.
 Search defaults to 10 results and clamps the requested limit to 1–50. Each
 result has a preview of at most 400 characters. Transcript hits include
 `session_id`, `file_id`, and `seq`. Pass the file ID with the session ID and
@@ -86,11 +89,14 @@ The tool uses the absolute path stored in the index and opens it read-only. It
 rejects paths with traversal segments, non-regular files, and paths that pass
 through a symbolic link or Windows junction. The tool returns matching indexed
 messages with `source: "db-fallback"` if the file is missing, is shorter than
-the indexed byte offset, declares a different session ID on its first line,
-or lacks a match for its earliest indexed message. Matching files report
-`source: "disk"` and can include newly appended lines. The text budget defaults to 16,000 characters and applies
-across all returned message text. A partial final message ends in an ellipsis.
-The response reports `truncated` and `total_chars`.
+the indexed byte offset, declares a different session ID on its first line
+(including an OMP session header's `id`), or lacks a match for its earliest
+indexed message. Matching files report `source: "disk"` and can include newly
+appended lines. The `max_chars` budget defaults to 16,000 and applies to the sum
+of the JSON lengths of individual message records, including metadata, tool
+names, and escaped text. `total_chars` reports that sum. When the next record
+exceeds the remaining budget, `truncated` is true. A partial final record is
+included if its metadata and an ellipsis fit.
 
 ## Design rules and why
 

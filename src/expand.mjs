@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import { truncatePreview } from './search.mjs';
 
 export const DEFAULT_EXPAND_MAX_CHARS = 16000;
 
@@ -136,7 +135,10 @@ function matchesIndexedTranscript(db, file, fd) {
     lineNo++;
     if (lineNo === 1) {
       const record = parseRecord(line);
-      const sessionIds = [record?.session_id, record?.sessionId, record?.message?.session_id, record?.message?.sessionId];
+      const sessionIds = [
+        record?.session_id, record?.sessionId, record?.message?.session_id, record?.message?.sessionId,
+        record?.type === 'session' ? record.id : undefined,
+      ];
       if (sessionIds.some((id) => typeof id === 'string' && id !== file.session_id)) return false;
       if (!anchor) return true;
     }
@@ -237,6 +239,26 @@ function* indexedMessages(db, fileId, options) {
   }
 }
 
+function truncateMessage(message, remaining) {
+  const { text } = message;
+  const textBudget = remaining - JSON.stringify({ ...message, text: '' }).length;
+  let low = 1;
+  let high = Math.min(text.length, textBudget);
+  let truncatedText;
+  // Escaping can make a prefix longer in JSON than it is in the transcript.
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const prefix = text.slice(0, middle - 1).replace(/[\uD800-\uDBFF]$/u, '') + '…';
+    if (JSON.stringify(prefix).length - 2 <= textBudget) {
+      truncatedText = prefix;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return truncatedText === undefined ? null : { ...message, text: truncatedText };
+}
+
 export function expandSession(db, options = {}) {
   const { session_id, file_id, start_seq, end_seq, line_start, line_end, max_chars = DEFAULT_EXPAND_MAX_CHARS } = options;
   if (typeof session_id !== 'string' || !session_id.trim()) throw new Error('session_id must be a non-empty string');
@@ -259,18 +281,18 @@ export function expandSession(db, options = {}) {
     const candidates = fd === null ? indexedMessages(db, file.id, options) : diskMessages(db, file.id, fd, options);
     for (const message of candidates) {
       const remaining = max_chars - total_chars;
-      // An exact fill is truncated only if more message text exists in the selected range.
-      if (message.text.length > remaining) {
+      const cost = JSON.stringify(message).length;
+      if (cost > remaining) {
         truncated = true;
-        if (remaining > 0) {
-          const text = truncatePreview(message.text, remaining);
-          messages.push({ ...message, text });
-          total_chars += text.length;
+        const partial = remaining > 0 && message.text.length > 0 ? truncateMessage(message, remaining) : null;
+        if (partial) {
+          messages.push(partial);
+          total_chars += JSON.stringify(partial).length;
         }
         break;
       }
       messages.push(message);
-      total_chars += message.text.length;
+      total_chars += cost;
     }
   } finally {
     if (fd !== null) fs.closeSync(fd);

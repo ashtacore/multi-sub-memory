@@ -103,6 +103,28 @@ function sourceFilter(source, { scope, projectKey, orchestrators, sinceMs }) {
   return { clauses, params };
 }
 
+function vectorFilter(filter, model) {
+  if (typeof model !== 'string' || model.length === 0) return filter;
+  return { clauses: [...filter.clauses, 'e.model_id = ?'], params: [...filter.params, model] };
+}
+
+function hasEligibleVectors(db, sources, filters, engine) {
+  const embeddingSources = sources.filter((source) => sourceQueries[source].embedding);
+  if (!embeddingSources.length) return false;
+  let model;
+  try {
+    model = engine.getStatus?.()?.model;
+  } catch {
+    return false;
+  }
+  return embeddingSources.some((source) => {
+    const spec = sourceQueries[source];
+    const { clauses, params } = vectorFilter(sourceFilter(spec, filters), model);
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    return Boolean(db.prepare(`SELECT 1 FROM ${spec.from} ${spec.embedding} ${where} LIMIT 1`).get(...params));
+  });
+}
+
 function selectFields(source) {
   return `${source.id} AS id, ${source.select}, ${source.orchestrator} AS orchestrator, ${source.timestamp} AS sort_timestamp`;
 }
@@ -141,18 +163,13 @@ async function embedQuery(engine, query) {
 }
 
 function* scanVectors(db, source, filter, { vector, model }) {
-  const clauses = [...filter.clauses, 'e.dims = ?'];
-  const params = [...filter.params, vector.length];
-  if (typeof model === 'string' && model.length > 0) {
-    clauses.push('e.model_id = ?');
-    params.push(model);
-  }
+  const { clauses, params } = vectorFilter(filter, model);
   const statement = db.prepare(`
     SELECT ${source.id} AS id, ${source.timestamp} AS sort_timestamp, e.vector AS stored_vector
     FROM ${source.from} ${source.embedding}
-    WHERE ${clauses.join(' AND ')}
+    WHERE ${[...clauses, 'e.dims = ?'].join(' AND ')}
   `);
-  for (const { stored_vector, ...row } of statement.iterate(...params)) {
+  for (const { stored_vector, ...row } of statement.iterate(...params, vector.length)) {
     if (!(stored_vector instanceof Uint8Array)
       || stored_vector.byteLength !== vector.length * Float32Array.BYTES_PER_ELEMENT) continue;
     let similarity;
@@ -272,7 +289,7 @@ export async function hybridSearch(db, options = {}) {
   const match = sanitizeFtsQuery(trimmedQuery);
   const filters = { scope, projectKey, orchestrators, sinceMs };
   const fts = [];
-  const embedding = embeddingEngine && sources.some((source) => sourceQueries[source].embedding)
+  const embedding = embeddingEngine && hasEligibleVectors(db, sources, filters, embeddingEngine)
     ? await embedQuery(embeddingEngine, trimmedQuery) : null;
 
   for (const source of sources) {
@@ -287,7 +304,7 @@ export async function hybridSearch(db, options = {}) {
 
   fts.sort((a, b) => a.rank_score - b.rank_score || compareCandidates(a, b));
   const vectors = embedding ? readVectorCandidates(db, sources, filters, embedding, candidateLimit) : [];
-  result.mode = embedding ? 'hybrid' : 'fts-only';
+  result.mode = vectors.length > 0 ? 'hybrid' : 'fts-only';
   result.results = fuseRanks(fts.slice(0, candidateLimit), vectors, rrfK, limit);
   return result;
 }

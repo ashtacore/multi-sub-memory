@@ -135,7 +135,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       end_seq: z.number().int().nonnegative().optional(),
       line_start: z.number().int().positive().optional(),
       line_end: z.number().int().positive().optional(),
-      max_chars: z.number().int().positive().describe('Message text budget. Defaults to 16,000 characters.').optional(),
+      max_chars: z.number().int().positive().describe('Combined JSON length of returned message records. Defaults to 16,000 characters.').optional(),
     },
   }, toolHandler((input) => expandSession(db, input)));
 
