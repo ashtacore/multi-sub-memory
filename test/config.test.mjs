@@ -200,6 +200,30 @@ test('writes through chained config symlinks to missing and existing targets', (
   assert.deepEqual(fs.readdirSync(targetDir), ['config.jsonc']);
 });
 
+test('follows a directory symlink before applying .. in a dangling config target', { skip: process.platform === 'win32' }, (t) => {
+  const { homeDir, projectRoot: dotfilesDir } = configFixture(t);
+  const profilesDir = path.join(dotfilesDir, 'profiles');
+  const workDir = path.join(profilesDir, 'work');
+  const aliasPath = path.join(homeDir, 'alias');
+  const linkPath = path.join(homeDir, 'config.jsonc');
+  const targetPath = path.join(profilesDir, 'settings.jsonc');
+  const unrelatedPath = path.join(homeDir, 'settings.jsonc');
+  const sentinel = '{"dbPath":"unrelated.db"}';
+
+  fs.mkdirSync(workDir, { recursive: true });
+  fs.symlinkSync(workDir, aliasPath, 'dir');
+  fs.symlinkSync(['alias', '..', 'settings.jsonc'].join(path.sep), linkPath, 'file');
+  fs.writeFileSync(unrelatedPath, sentinel);
+
+  const replacement = { dreamer: { enabled: true } };
+  writeConfig(linkPath, replacement);
+
+  assert.deepEqual(parseJsonc(fs.readFileSync(targetPath, 'utf8')), replacement);
+  assert.equal(fs.readFileSync(unrelatedPath, 'utf8'), sentinel);
+  assert.equal(fs.lstatSync(linkPath).isSymbolicLink(), true);
+  assert.deepEqual(parseJsonc(fs.readFileSync(linkPath, 'utf8')), replacement);
+});
+
 test('preserves the mode of an existing private POSIX config', { skip: process.platform === 'win32' }, (t) => {
   const { homeDir } = configFixture(t);
   const configPath = path.join(homeDir, 'config.jsonc');

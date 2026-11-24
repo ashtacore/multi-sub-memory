@@ -157,17 +157,46 @@ function resolveConfigDestination(configPath) {
     if (error.code !== 'ENOENT') throw error;
   }
 
-  // A dangling link has no real path yet. Follow each link to the missing destination.
-  let destination = configPath;
-  for (let depth = 0; depth < 40; depth++) {
-    const target = fs.readlinkSync(destination);
-    const directory = fs.realpathSync.native(path.dirname(destination));
-    destination = path.resolve(directory, target);
-    if (!fs.lstatSync(destination, { throwIfNoEntry: false })?.isSymbolicLink()) {
-      return destination;
+  if (process.platform === 'win32') {
+    // Win32 collapses `..` before following any symlinks in the target path.
+    let destination = configPath;
+    for (let hops = 0; hops < 40; hops++) {
+      const directory = fs.realpathSync.native(path.dirname(destination));
+      destination = path.resolve(directory, fs.readlinkSync(destination));
+      if (!fs.lstatSync(destination, { throwIfNoEntry: false })?.isSymbolicLink()) {
+        return destination;
+      }
     }
+    throw new Error('Too many symbolic links resolving config path ' + configPath);
   }
-  throw new Error('Too many symbolic links resolving config path ' + configPath);
+
+  // POSIX follows each symlink before interpreting any later `..` components.
+  const remaining = [path.basename(configPath)];
+  let destination = fs.realpathSync.native(path.dirname(configPath));
+  let hops = 0;
+  while (remaining.length > 0) {
+    const component = remaining.shift();
+    if (component === '.') continue;
+    if (component === '..') {
+      destination = path.dirname(destination);
+      continue;
+    }
+
+    const candidate = path.join(destination, component);
+    if (!fs.lstatSync(candidate, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      destination = candidate;
+      continue;
+    }
+
+    if (++hops > 40) {
+      throw new Error('Too many symbolic links resolving config path ' + configPath);
+    }
+    const target = fs.readlinkSync(candidate);
+    const { root } = path.parse(target);
+    if (root) destination = path.resolve(destination, root);
+    remaining.unshift(...target.slice(root.length).split('/').filter(Boolean));
+  }
+  return destination;
 }
 
 export function writeConfig(configPath, configData, options = {}) {
