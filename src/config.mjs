@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { INDEXER_ORCHESTRATORS } from './indexers/types.mjs';
 import { resolveProjectKey } from './project-id.mjs';
@@ -202,11 +203,32 @@ function environmentLayer(env) {
   return configLayerSchema.parse({ dbPath: env.MULTI_SUB_MEMORY_DB, embedding });
 }
 
+export function resolveUserConfigPath({ userConfigPath, env = process.env, homeDir = os.homedir() } = {}) {
+  return userConfigPath ?? expandHome(env.MULTI_SUB_MEMORY_CONFIG || DEFAULT_CONFIG_PATH, homeDir);
+}
+
+export function assertDreamerTrust(dreamer, { userDreamer, ...configOptions } = {}) {
+  const { mode, http, cli } = dreamer;
+  if (mode !== 'cli' && mode !== 'http') return;
+  const trusted = userDreamer === undefined ? readConfigLayer(resolveUserConfigPath(configOptions)).dreamer : userDreamer;
+  if (mode === 'http') {
+    const trustedHttp = trusted?.http;
+    if (!trustedHttp?.baseUrl || http?.baseUrl !== trustedHttp.baseUrl
+      || (http.apiKeyEnv !== undefined && http.apiKeyEnv !== trustedHttp.apiKeyEnv)) {
+      throw new Error('Dreamer HTTP endpoint and API key must be authorized in user settings');
+    }
+  } else {
+    const trustedCli = trusted?.cli;
+    if (trusted?.mode !== 'cli' || !cli || cli.orchestrator !== trustedCli?.orchestrator
+      || cli.command !== trustedCli?.command || !isDeepStrictEqual(cli.args, trustedCli?.args)) {
+      throw new Error('Dreamer CLI orchestrator, command, and arguments must be authorized in user settings');
+    }
+  }
+}
+
 export function loadConfig(options = {}) {
   const { cwd, projectRoot, env = process.env, homeDir = os.homedir() } = options;
-  const userConfigPath = options.userConfigPath ?? (env.MULTI_SUB_MEMORY_CONFIG
-    ? expandHome(env.MULTI_SUB_MEMORY_CONFIG, homeDir)
-    : expandHome(DEFAULT_CONFIG_PATH, homeDir));
+  const userConfigPath = resolveUserConfigPath(options);
   const projectConfigPath = options.projectConfigPath
     ?? path.join(projectRoot ?? resolveProjectKey(cwd).projectRoot, '.multi-sub-memory.jsonc');
   const user = options.userConfigData === undefined

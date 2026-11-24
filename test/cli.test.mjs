@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { openDatabase } from '../src/db.mjs';
+import { promisify } from 'node:util';
+import { hashNormalizedContent, openDatabase } from '../src/db.mjs';
+import { normalizePath, resolveProjectKey } from '../src/project-id.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
-const plannedCommands = ['dream', 'ui', 'import'];
+const plannedCommands = ['ui', 'import'];
 
 function invoke(args, options = {}) {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
@@ -32,7 +35,7 @@ for (const flag of ['--help', '-h', 'help']) {
     assert.match(result.stdout, /\bserve\b/);
     assert.match(result.stdout, /\bindex\b/);
     assert.match(result.stdout, /<omp\|claude\|codex\|agy\|all>/);
-    for (const command of ['setup', 'doctor', ...plannedCommands]) assert.ok(result.stdout.includes(command), command);
+    for (const command of ['setup', 'doctor', 'index', 'dream', ...plannedCommands]) assert.ok(result.stdout.includes(command), command);
   });
 }
 
@@ -99,6 +102,267 @@ test('unknown commands report an error and help hint on stderr', () => {
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /unknown command: invalid-command.*--help/i);
+});
+
+function dreamCliFixture(t) {
+  const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'multi-sub-memory-cli-dream-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const configPath = path.join(directory, 'settings.jsonc');
+  const dbPath = path.join(directory, 'memory.db');
+  const env = {
+    ...process.env, MULTI_SUB_MEMORY_CONFIG: configPath,
+    MULTI_SUB_MEMORY_DB: dbPath, MULTI_SUB_MEMORY_NO_EMBEDDINGS: '1',
+  };
+  delete env.MULTI_SUB_MEMORY_AUTO_DREAM_CONTEXT;
+  return { directory, configPath, dbPath, env };
+}
+
+test('dream --dry-run --json reports disabled without opening storage', (t) => {
+  const { directory, dbPath, env } = dreamCliFixture(t);
+  const result = invoke(['dream', '--dry-run', '--json'], { cwd: directory, env });
+  assert.equal(result.status, 0, result.stderr);
+  const { skipped, reason } = JSON.parse(result.stdout);
+  assert.deepEqual({ skipped, reason }, { skipped: true, reason: 'disabled' });
+  assert.equal(fs.existsSync(dbPath), false);
+});
+
+test('dream --dry-run --json loads project config and records a proposal through HTTP', async (t) => {
+  const { directory, configPath, dbPath, env } = dreamCliFixture(t);
+  const project = path.join(directory, 'workspace');
+  fs.mkdirSync(project);
+  const requests = [];
+  const plan = { summary: 'Fixture proposal', operations: [{ type: 'add', content: 'Document fixture conventions' }] };
+  const server = http.createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    requests.push({ url: req.url, body: JSON.parse(body) });
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(plan) } }] }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+  fs.writeFileSync(configPath, JSON.stringify({ dreamer: { http: { baseUrl } } }));
+  fs.writeFileSync(path.join(project, '.multi-sub-memory.jsonc'), JSON.stringify({
+    dreamer: { enabled: true, mode: 'http', http: { model: 'fixture' } },
+  }));
+  const seed = openDatabase(dbPath);
+  try {
+    const { lastInsertRowid } = seed.prepare(`
+      INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, mtime_ms, last_indexed_at)
+      VALUES ('fixture.jsonl', 'omp', 'fixture', ?, 1, 1)
+    `).run(resolveProjectKey(project).projectKey);
+    seed.prepare(`
+      INSERT INTO transcript_messages (file_id, seq, role, text, line_no)
+      VALUES (?, 0, 'user', 'The fixture has documented conventions.', 1)
+    `).run(lastInsertRowid);
+  } finally {
+    seed.close();
+  }
+  const { stdout, stderr } = await promisify(execFile)(process.execPath, [
+    cliPath, 'dream', '--project', project, '--dry-run', '--json',
+  ], { cwd: directory, env, windowsHide: true, timeout: 10_000 });
+  assert.equal(stderr, '');
+  const result = JSON.parse(stdout);
+  assert.equal(result.status, 'dry-run');
+  assert.equal(result.memoriesAdded, 1);
+  assert.deepEqual(result.operations, plan.operations);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, '/v1/chat/completions');
+  assert.equal(requests[0].body.model, 'fixture');
+  const db = openDatabase(dbPath, { readOnly: true });
+  try {
+    assert.equal(db.prepare('SELECT status FROM dream_runs WHERE id = ?').get(result.runId).status, 'dry-run');
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM memories').get().count, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test('dream reports a trusted CLI failure without leaking native child stderr', (t) => {
+  const { directory, configPath, dbPath, env } = dreamCliFixture(t);
+  const script = path.join(directory, 'stderr fixture.mjs');
+  const secret = 'fixture-private-disk-secret';
+  fs.writeFileSync(script, `console.error(${JSON.stringify(secret)}); process.exitCode = 7;`);
+  fs.writeFileSync(configPath, JSON.stringify({
+    dreamer: {
+      enabled: true, mode: 'cli', cli: { orchestrator: 'codex', command: process.execPath, args: [script] },
+    },
+  }));
+  const result = invoke(['dream'], { cwd: directory, env });
+  const diagnostic = 'cli:codex process-exit code 7';
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr.trim(), diagnostic);
+  const db = openDatabase(dbPath, { readOnly: true });
+  try {
+    const run = db.prepare('SELECT status, error FROM dream_runs').get();
+    assert.deepEqual({ ...run }, { status: 'failed', error: diagnostic });
+  } finally {
+    db.close();
+  }
+});
+
+test('plain dream --dry-run prints proposed operations with an empty summary and preserves memories', (t) => {
+  const { directory, configPath, dbPath, env } = dreamCliFixture(t);
+  const script = path.join(directory, 'plan fixture.mjs');
+  const plan = { summary: '', operations: [
+    { type: 'merge', source_ids: ['source-a', 'source-b'], content: 'Proposed consolidation',
+      category: 'WORKFLOW', importance: 4, reason: 'Duplicate conventions' },
+    { type: 'archive', id: 'retired-c', reason: 'Obsolete convention' },
+    { type: 'update', id: 'current-d', content: 'Proposed revision', category: 'GENERAL', importance: 5 },
+    { type: 'add', content: 'Proposed new memory', reason: 'Found in transcript' },
+  ] };
+  fs.writeFileSync(script, `console.log(${JSON.stringify(JSON.stringify(plan))});`);
+  fs.writeFileSync(configPath, JSON.stringify({
+    dreamer: { enabled: true, mode: 'cli', cli: { orchestrator: 'codex', command: process.execPath, args: [script] } },
+  }));
+  const { projectKey } = resolveProjectKey(directory);
+  const memoryRows = 'SELECT * FROM memories ORDER BY id';
+  const db = openDatabase(dbPath);
+  let before;
+  try {
+    const insert = db.prepare(`
+      INSERT INTO memories (id, project_key, scope, category, content, normalized_hash, created_at, updated_at)
+      VALUES (?, ?, 'project', 'GENERAL', ?, ?, 1, 1)
+    `);
+    for (const id of ['source-a', 'source-b', 'retired-c', 'current-d']) {
+      insert.run(id, projectKey, id, hashNormalizedContent(id));
+    }
+    const file = db.prepare(`
+      INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, mtime_ms, last_indexed_at)
+      VALUES ('fixture.jsonl', 'omp', 'fixture', ?, 1, 1)
+    `).run(projectKey).lastInsertRowid;
+    db.prepare(`
+      INSERT INTO transcript_messages (file_id, seq, role, text, line_no)
+      VALUES (?, 0, 'user', 'Evidence for the proposed addition', 1)
+    `).run(file);
+    before = db.prepare(memoryRows).all();
+  } finally {
+    db.close();
+  }
+  const result = invoke(['dream', '--dry-run'], { cwd: directory, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /- merge source-a, source-b\s+Content: "Proposed consolidation"\s+Category: WORKFLOW\s+Importance: 4\s+Reason: "Duplicate conventions"/);
+  assert.match(result.stdout, /- archive retired-c\s+Reason: "Obsolete convention"/);
+  assert.match(result.stdout, /- update current-d\s+Content: "Proposed revision"\s+Category: GENERAL\s+Importance: 5/);
+  assert.match(result.stdout, /- add\s+Content: "Proposed new memory"\s+Reason: "Found in transcript"/);
+  const verified = openDatabase(dbPath, { readOnly: true });
+  try {
+    assert.deepEqual(verified.prepare(memoryRows).all(), before);
+  } finally {
+    verified.close();
+  }
+});
+
+test('the detached Dreamer command uses the indexed project key and keeps stdout empty', async (t) => {
+  const { directory, configPath, dbPath, env } = dreamCliFixture(t);
+  const projectKey = 'dir:indexed-fixture';
+  const server = http.createServer((req, res) => {
+    req.resume();
+    res.end(JSON.stringify({ choices: [{ message: { content: '{"summary":"Fixture","operations":[]}' } }] }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+  fs.writeFileSync(configPath, JSON.stringify({ dreamer: { http: { baseUrl } } }));
+  env.MULTI_SUB_MEMORY_AUTO_DREAM_CONTEXT = JSON.stringify({
+    dbPath,
+    projectKey,
+    embedding: { enabled: false },
+    dreamer: {
+      enabled: true,
+      mode: 'http',
+      http: { baseUrl, model: 'fixture' },
+      cadence: { mode: 'auto', minIntervalHours: 1, minNewMemories: 0 },
+    },
+  });
+  const { stdout, stderr } = await promisify(execFile)(process.execPath, [cliPath, 'dream'], {
+    cwd: directory, env, windowsHide: true, timeout: 10_000,
+  });
+  assert.equal(stdout, '');
+  assert.equal(stderr, '');
+  const db = openDatabase(dbPath, { readOnly: true });
+  try {
+    const runs = db.prepare('SELECT status, project_key FROM dream_runs').all();
+    assert.deepEqual(runs.map(({ status, project_key }) => [status, project_key]), [['completed', projectKey]]);
+  } finally {
+    db.close();
+  }
+});
+
+test('manual and detached Dreamer select the target project and isolate runners while using the original database', async (t) => {
+  const { directory, configPath, dbPath, env } = dreamCliFixture(t);
+  const target = path.join(directory, 'target');
+  const sessionsDir = path.join(directory, 'sessions');
+  fs.mkdirSync(target);
+  fs.mkdirSync(sessionsDir);
+  const script = path.join(directory, 'cwd fixture.mjs');
+  fs.writeFileSync(script, 'console.log(JSON.stringify({ summary: process.cwd(), operations: [] }));');
+  fs.writeFileSync(configPath, JSON.stringify({
+    dreamer: { mode: 'cli', cli: { orchestrator: 'codex', command: process.execPath, args: [script] } },
+    indexers: { omp: { sessionsDir } },
+  }));
+  fs.writeFileSync(path.join(target, '.multi-sub-memory.jsonc'), JSON.stringify({
+    dreamer: { enabled: true, cadence: { mode: 'auto', minNewMemories: 0 } },
+  }));
+  fs.writeFileSync(path.join(sessionsDir, 'fixture.jsonl'), [
+    JSON.stringify({ type: 'session', id: 'fixture', cwd: target }),
+    JSON.stringify({ type: 'message', message: { role: 'user', content: 'Fixture transcript' } }),
+    '',
+  ].join('\n'));
+
+  const options = { cwd: directory, env: { ...env, MULTI_SUB_MEMORY_DB: path.basename(dbPath) } };
+  const manual = invoke(['dream', '--project', 'target', '--dry-run', '--json'], options);
+  assert.equal(manual.status, 0, manual.stderr);
+  const result = JSON.parse(manual.stdout);
+  const projectKey = resolveProjectKey(target).projectKey;
+  assert.equal(result.projectKey, projectKey);
+  assert.notEqual(normalizePath(result.summary), normalizePath(target));
+  assert.ok(path.basename(result.summary).startsWith('msm-dream-'));
+  assert.equal(fs.existsSync(result.summary), false);
+
+  const indexed = invoke(['index', '--orchestrator', 'omp', '--json'], options);
+  assert.equal(indexed.status, 0, indexed.stderr);
+  const summary = JSON.parse(indexed.stdout);
+  assert.deepEqual(summary.errors, []);
+  assert.equal(summary.messagesIndexed, 1);
+
+  const db = openDatabase(dbPath, { readOnly: true });
+  try {
+    assert.equal(db.prepare('SELECT status FROM dream_runs WHERE id = ?').get(result.runId).status, 'dry-run');
+    const findDetached = db.prepare(`
+      SELECT status, project_key, summary, error FROM dream_runs WHERE id <> ?
+        AND NOT EXISTS (SELECT 1 FROM leases WHERE lease_key = ?)
+    `);
+    const deadline = Date.now() + 10_000;
+    let detached;
+    while (!(detached = findDetached.get(result.runId, 'dream:' + projectKey)) && Date.now() < deadline) await delay(50);
+    assert.ok(detached, 'Expected a detached Dreamer run in the original database');
+    assert.equal(detached.status, 'completed', detached.error);
+    assert.equal(detached.project_key, projectKey);
+    assert.notEqual(normalizePath(detached.summary), normalizePath(target));
+    assert.notEqual(normalizePath(detached.summary), normalizePath(result.summary));
+    assert.ok(path.basename(detached.summary).startsWith('msm-dream-'));
+    assert.equal(fs.existsSync(detached.summary), false);
+    assert.equal(fs.existsSync(path.join(target, path.basename(dbPath))), false);
+  } finally {
+    db.close();
+  }
+});
+
+test('dream rejects unknown, duplicate, conflicting, missing, and positional arguments', () => {
+  for (const args of [
+    ['--bogus'], ['--json', '--json'], ['--dry-run', '--dry-run'], ['--cwd'], ['--project', ''],
+    ['--project', 'a', '--project', 'b'], ['--project', 'a', '--cwd', 'b'], ['extra'],
+  ]) {
+    const result = invoke(['dream', ...args]);
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.ok(result.stderr.trim());
+  }
 });
 
 test('index writes JSON summaries and respects adapter selection and --cwd', (t) => {

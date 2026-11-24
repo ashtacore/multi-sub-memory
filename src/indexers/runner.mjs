@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import { acquireLease, releaseLease } from '../db.mjs';
+import { maybeTriggerAutoDream } from '../dreamer/trigger.mjs';
 import { DEFAULT_EMBEDDING_MODEL, encodeFloat32Vector } from '../embeddings.mjs';
 import { resolveProjectKey } from '../project-id.mjs';
 import { agyAdapter } from './agy.mjs';
@@ -43,12 +44,12 @@ function sqlStatements(db) {
     nextSeq: db.prepare('SELECT COALESCE(MAX(seq) + 1, 0) AS nextSeq FROM transcript_messages WHERE file_id = ?'),
     clearMessages: db.prepare('DELETE FROM transcript_messages WHERE file_id = ?'),
     addFile: db.prepare(`
-      INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, mtime_ms, byte_offset,
+      INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, project_root, mtime_ms, byte_offset,
         line_count, file_identity, checkpoint_hash, file_size, last_indexed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     updateFile: db.prepare(`
-      UPDATE transcript_files SET session_id = ?, project_key = ?, mtime_ms = ?, byte_offset = ?,
+      UPDATE transcript_files SET session_id = ?, project_key = ?, project_root = ?, mtime_ms = ?, byte_offset = ?,
         line_count = ?, file_identity = ?, checkpoint_hash = ?, file_size = ?, last_indexed_at = ?
       WHERE id = ?
     `),
@@ -67,7 +68,7 @@ function sqlStatements(db) {
 
 export async function runIndexers({
   db, config, embeddingEngine, orchestrators, adapters = BUILTIN_ADAPTERS,
-  owner, leaseTtlMs = DEFAULT_LEASE_TTL_MS, signal,
+  owner, leaseTtlMs = DEFAULT_LEASE_TTL_MS, signal, configOptions, spawnDream,
 }) {
   const summary = {
     skipped: false, filesScanned: 0, filesIndexed: 0, filesSkipped: 0, filesReindexed: 0,
@@ -84,6 +85,7 @@ export async function runIndexers({
 
   let leaseLost = false;
   let heartbeat;
+  const touchedProjects = new Map();
   function recordError(orchestrator, filePath, error) {
     summary.errors.push({ orchestrator, filePath, message: error instanceof Error ? error.message : String(error) });
   }
@@ -108,10 +110,10 @@ export async function runIndexers({
     }, Math.max(1, Math.min(2 ** 31 - 1, Math.floor(leaseTtlMs / 2)))).unref();
 
     const sql = sqlStatements(db);
-    const projectKeys = new Map();
-    function projectKeyFor(cwd) {
-      if (!projectKeys.has(cwd)) projectKeys.set(cwd, resolveProjectKey(cwd).projectKey);
-      return projectKeys.get(cwd);
+    const projects = new Map();
+    function projectFor(cwd) {
+      if (!projects.has(cwd)) projects.set(cwd, resolveProjectKey(cwd));
+      return projects.get(cwd);
     }
 
     const skippedByOwner = new Map();
@@ -164,6 +166,7 @@ export async function runIndexers({
         let parsed = await adapter.parseIncremental(filePath, offset, existing && !reindex ? {
           ...fullMeta, sessionId: existing.session_id, lineCount: existing.line_count ?? undefined,
           checkpointHash: existing.checkpoint_hash ?? undefined,
+          recoverHeaderCwd: offset > 0 && existing.project_root == null,
           nextSeq: sql.nextSeq.get(existing.id).nextSeq,
         } : fullMeta);
         renewIfDue();
@@ -188,9 +191,17 @@ export async function runIndexers({
           return;
         }
 
-        const { sessionId, cwd, messages, mtimeMs, newByteOffset, lineCount } = parsed;
-        const projectKey = !cwd && existing && !reindex ? existing.project_key : projectKeyFor(cwd ?? path.dirname(filePath));
-        const fileValues = [sessionId, projectKey, mtimeMs, newByteOffset, lineCount,
+        const { sessionId, cwd, cwdInferred, messages, mtimeMs, newByteOffset, lineCount } = parsed;
+        const project = cwd ? projectFor(cwd) : undefined;
+        const projectKey = project?.projectKey
+          ?? (existing && !reindex ? existing.project_key : projectFor(path.dirname(filePath)).projectKey);
+        let resolvedRoot = project && !cwdInferred ? project.projectRoot
+          : (existing && !reindex ? existing.project_root : null);
+        if (existing && !reindex && !project && resolvedRoot == null && parsed.headerCwd) {
+          const headerProject = projectFor(parsed.headerCwd);
+          if (headerProject.projectKey === existing.project_key) resolvedRoot = headerProject.projectRoot;
+        }
+        const fileValues = [sessionId, projectKey, resolvedRoot, mtimeMs, newByteOffset, lineCount,
           parsed.fileIdentity ?? fileIdentity, parsed.checkpointHash ?? null, parsed.fileSize ?? fileSize, Date.now()];
         const messagesIndexed = inTransaction(db, () => {
           renewIfDue();
@@ -217,6 +228,12 @@ export async function runIndexers({
         summary.filesIndexed++;
         if (reindex) summary.filesReindexed++;
         summary.messagesIndexed += messagesIndexed;
+        if (resolvedRoot && messagesIndexed) {
+          const previousRoot = touchedProjects.get(projectKey);
+          // Linked worktrees can share a project key and have different configuration.
+          touchedProjects.set(projectKey,
+            previousRoot === undefined || previousRoot === resolvedRoot ? resolvedRoot : null);
+        }
         return true;
       } catch (error) {
         if (signal?.aborted || leaseLost) return;
@@ -291,5 +308,12 @@ export async function runIndexers({
   } finally {
     clearInterval(heartbeat);
     releaseLease(db, INDEXER_LEASE_KEY, resolvedOwner);
+    if (!signal?.aborted && config?.dbPath) {
+      for (const [projectKey, cwd] of touchedProjects) {
+        if (cwd) maybeTriggerAutoDream({
+          db, config, projectKey, cwd, reloadProjectConfig: true, configOptions, spawnImpl: spawnDream,
+        });
+      }
+    }
   }
 }

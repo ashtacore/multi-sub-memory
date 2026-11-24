@@ -19,7 +19,7 @@ Setup merges the server's command and arguments into the selected host files and
 
 ## Dreamer settings
 
-Dreamer defaults to disabled. HTTP mode records an OpenAI-compatible base URL, a model, and optionally the name of the environment variable that supplies the bearer token. Changing the base URL clears the previous key binding unless you explicitly select a key variable. CLI mode records an OMP, Claude Code, or Codex preset, with optional command and model overrides. Setup checks for the chosen executable without starting it. Dreamer cadence defaults to manual. Automatic cadence stores a minimum interval and a minimum count of new memories. The settings are available to the future Dreamer runner.
+Dreamer defaults to disabled. HTTP mode records an OpenAI-compatible base URL, a model, and optionally the name of the environment variable that supplies the bearer token. Changing the base URL clears the previous key binding unless you explicitly select a key variable. CLI mode records an OMP, Claude Code, or Codex preset, with optional command and model overrides. Setup checks for the chosen executable without starting it. Dreamer cadence defaults to manual. Automatic cadence uses a minimum interval and a minimum count of new or updated memories. See [Dreamer usage and behavior](Dreamer.md).
 
 ## Diagnostics
 

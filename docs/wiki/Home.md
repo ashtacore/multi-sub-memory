@@ -9,3 +9,4 @@ Use this wiki for durable project knowledge. [GitHub Issues](https://github.com/
 | [Setup and doctor](Setup-and-Doctor.md) | Onboarding, MCP host registration, Dreamer settings, and diagnostics |
 | [MCP core](MCP-Core.md) | Stdio lifecycle, memories and handoff notes, and session bootstrap summaries |
 | [Indexers](Indexers.md) | Incremental transcript indexing for OMP, Claude Code, Codex, and Antigravity, plus background refresh |
+| [Dreamer](Dreamer.md) | Memory consolidation, runner configuration, and automatic cadence |

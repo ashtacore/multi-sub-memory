@@ -16,6 +16,8 @@ Migration 3 adds `embed_eligible` to transcript messages and defaults existing r
 
 The full-text indexes require FTS5 support in `node:sqlite`, available in official Node.js builds matching `^22.16.0 || >=24.0.0`. Node.js 23.x builds omit FTS5. External-content FTS5 indexes cover memory content, category, and project key, note content, surface condition, and project key, and transcript text, tool names, and role. Insert and delete triggers add and remove index entries. Update triggers remove the previous indexed terms before adding the current terms. Cascading transcript deletes also remove their search terms.
 
+Migration 3 adds nullable `transcript_files.project_root` and `memories.last_dreamed_at` fields. Existing transcripts gain a root when indexing reads an explicit working directory. Existing memories start with no recorded review coverage. Migration 4 adds nullable `dream_runs.last_transcript_message_id` when the column is absent and preserves cursor values in version 3 databases that already have it. Dreamer starts from the latest indexed messages if the last completed run has no recorded cursor. [Dreamer](Dreamer.md)
+
 ## Design rules and why
 
 - Embedding rows require an explicit parent ID. The `transcript_embeddings` table uses `WITHOUT ROWID` so SQLite rejects a missing message ID instead of generating one.

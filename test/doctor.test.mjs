@@ -453,7 +453,7 @@ test('the CLI Dreamer probe finds a PATH executable without launching it', async
   openDatabase(dbPath).close();
   const binDir = path.join(cwd, 'bin');
   fs.mkdirSync(binDir);
-  const executable = path.join(binDir, process.platform === 'win32' ? 'omp.cmd' : 'omp');
+  const executable = path.join(binDir, process.platform === 'win32' ? 'omp.exe' : 'omp');
   fs.writeFileSync(executable, 'this fixture cannot run', { mode: 0o700 });
   env.PATH = binDir;
   writeConfig(configPath, { ...data, dreamer: { enabled: true, mode: 'cli', cli: { orchestrator: 'omp' } } });
@@ -465,4 +465,25 @@ test('the CLI Dreamer probe finds a PATH executable without launching it', async
   const missing = await invoke(['--test-dreamer']);
   assert.equal(missing.code, 1);
   assert.match(missing.stdout, /FAIL\s+Dreamer probe .*Install the selected orchestrator/);
+});
+
+test('the CLI Dreamer probe fails with native-executable guidance for relative paths and shell shims', async (t) => {
+  const { cwd, dbPath, configPath, data, env, invoke } = fixture(t);
+  openDatabase(dbPath).close();
+  const filename = process.platform === 'win32' ? 'omp.exe' : 'omp';
+  fs.writeFileSync(path.join(cwd, filename), 'fixture', { mode: 0o700 });
+  const commands = ['./' + filename];
+  if (process.platform === 'win32') {
+    const shims = path.join(cwd, 'shims');
+    fs.mkdirSync(shims);
+    fs.writeFileSync(path.join(shims, 'omp.cmd'), '@exit /b 1');
+    env.PATH = shims;
+    commands.push('omp');
+  }
+  for (const command of commands) {
+    writeConfig(configPath, { ...data, dreamer: { enabled: true, mode: 'cli', cli: { orchestrator: 'omp', command } } });
+    const result = await invoke(['--test-dreamer']);
+    assert.equal(result.code, 1, result.stdout);
+    assert.match(result.stdout, /FAIL\s+Dreamer probe .*Dreamer requires a native executable .* on PATH or an absolute executable path/);
+  }
 });

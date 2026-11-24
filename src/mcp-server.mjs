@@ -46,7 +46,7 @@ function toolHandler(run, format = JSON.stringify) {
 
 export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
   const server = new McpServer({ name: 'multi-sub-memory', version: '0.1.0' });
-  const context = { embeddingEngine, defaultCwd };
+  const context = { config, embeddingEngine, defaultCwd };
 
   server.registerTool('mem_memory', {
     description: 'Write, update, archive, get, or list durable project and global memories. Write requires content. Update, archive, and get require id.',

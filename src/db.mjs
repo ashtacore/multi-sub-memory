@@ -187,6 +187,21 @@ export const MIGRATIONS = [{
         ON transcript_messages (file_id, line_no, seq);
     `);
   },
+}, {
+  version: 5,
+  up(db) {
+    const hasColumn = (table, column) => db.prepare(`PRAGMA table_info(${table})`).all()
+      .some((info) => info.name === column);
+    if (!hasColumn('transcript_files', 'project_root')) {
+      db.exec('ALTER TABLE transcript_files ADD COLUMN project_root TEXT;');
+    }
+    if (!hasColumn('memories', 'last_dreamed_at')) {
+      db.exec('ALTER TABLE memories ADD COLUMN last_dreamed_at INTEGER;');
+    }
+    if (!hasColumn('dream_runs', 'last_transcript_message_id')) {
+      db.exec('ALTER TABLE dream_runs ADD COLUMN last_transcript_message_id INTEGER;');
+    }
+  },
 }];
 
 const busyWait = new Int32Array(new SharedArrayBuffer(4));

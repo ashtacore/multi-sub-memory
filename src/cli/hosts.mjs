@@ -14,11 +14,21 @@ export const HOSTS = {
   },
 };
 
+function dreamCliPreset(command, headlessArgs, restrictedArgs) {
+  return { command, args: [...headlessArgs, ...restrictedArgs], restrictedArgs };
+}
+
 export const CLI_PRESETS = {
-  omp: { command: 'omp', args: ['-p', '--no-session'] },
-  claude: { command: 'claude', args: ['-p'] },
-  codex: { command: 'codex', args: ['exec'] },
+  omp: dreamCliPreset('omp', ['-p', '--no-session'], ['--no-tools']),
+  claude: dreamCliPreset('claude', ['-p'], ['--tools', '', '--strict-mcp-config']),
+  codex: dreamCliPreset('codex', ['exec'], [
+    '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config',
+    '--ignore-rules', '-c', 'mcp_servers={}', '-c', 'features.shell_tool=false',
+  ]),
 };
+
+export const DREAMER_EXECUTABLE_GUIDANCE =
+  'Dreamer requires a native executable (.exe or .com on Windows) on PATH or an absolute executable path. Shell shims and relative paths are unsupported.';
 
 const server = 'multi-sub-memory';
 const entry = { command: 'npx', args: ['-y', server] };
@@ -320,27 +330,31 @@ export function prepareHostRegistration(host, options = {}) {
   };
 }
 
-export function findExecutable(command, env = process.env, cwd = process.cwd()) {
+export function findExecutable(command, env = process.env, cwd = process.cwd(), { forSpawn = false } = {}) {
   if (!command) return undefined;
   const windows = process.platform === 'win32';
   const envValue = (key) => windows
     ? env[Object.keys(env).find((name) => name.toUpperCase() === key)]
     : env[key];
-  const extensions = windows
-    ? [...new Set((envValue('PATHEXT') ?? '').toLowerCase().split(';')
+  const extensions = !windows ? [] : forSpawn ? ['.com', '.exe']
+    : [...new Set((envValue('PATHEXT') ?? '').toLowerCase().split(';')
       .filter((extension) => /^\.[a-z0-9]+$/.test(extension))
-      .concat('.exe', '.cmd', '.bat', '.com', '.ps1'))]
-    : [];
+      .concat('.exe', '.cmd', '.bat', '.com', '.ps1'))];
   const extension = path.extname(command).toLowerCase();
   const suffixes = !windows || extension ? [''] : extensions;
   if (windows && extension && !extensions.includes(extension)) return undefined;
-  const directPath = /[\\/]/.test(command) || path.isAbsolute(command);
-  const directories = directPath ? [''] : (envValue('PATH') ?? '').split(path.delimiter).filter(Boolean);
+  const directPath = /[\\/]/.test(command) || (forSpawn && windows && /^[a-z]:/i.test(command));
+  // Windows also treats root-relative paths like \bin as absolute, despite their implicit drive.
+  const fullyQualified = (value) => path.isAbsolute(value) && (!windows || path.parse(value).root.length > 1);
+  if (forSpawn && directPath && !fullyQualified(command)) return undefined;
+  const directories = directPath ? [''] : (envValue('PATH') ?? '').split(path.delimiter)
+    .filter(Boolean).map((entry) => entry.replace(/^"(.*)"$/, '$1'));
   for (const directory of directories) {
+    if (forSpawn && !directPath && !fullyQualified(directory)) continue;
     for (const suffix of suffixes) {
       const candidate = directPath
         ? path.resolve(cwd, command + suffix)
-        : path.resolve(cwd, directory.replace(/^"(.*)"$/, '$1'), command + suffix);
+        : path.resolve(cwd, directory, command + suffix);
       try {
         if (!fs.statSync(candidate).isFile()) continue;
         fs.accessSync(candidate, windows ? fs.constants.F_OK : fs.constants.X_OK);

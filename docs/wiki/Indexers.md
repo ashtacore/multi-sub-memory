@@ -111,6 +111,16 @@ Refresh timers do not keep the process alive. Shutdown stops scheduling work
 and waits for in-flight refresh work to drain before closing the database.
 Refresh diagnostics use stderr.
 
+When Dreamer uses automatic cadence, indexing checks each project with newly
+indexed messages and an identifiable target workspace after releasing the indexer
+lease. Indexing stores explicitly recorded workspace roots with the file
+checkpoint so later appends can use them. An OMP append recovers a missing
+workspace root from the first line of the verified checkpoint when the session
+header's working directory resolves to the stored project key. The background
+process uses that workspace's Dreamer settings and the database that received
+the indexed messages.
+[Dreamer](Dreamer.md)
+
 | Config key | Default and behavior |
 |---|---|
 | `indexers.enabled` | `true`. Set it to `false` to disable both CLI indexing and background refresh. |

@@ -11,6 +11,12 @@ export function getDefaultOmpSessionsDir(homeDir = os.homedir()) {
   return path.join(homeDir, '.omp', 'agent', 'sessions');
 }
 
+function readHeaderCwd(line) {
+  if (line === undefined) return undefined;
+  const record = parseJsonlRecord(line);
+  if (record?.type === 'session' && typeof record.cwd === 'string' && record.cwd.trim()) return record.cwd;
+}
+
 /** @type {import('./types.mjs').TranscriptAdapter} */
 export const ompAdapter = {
   orchestrator: 'omp',
@@ -19,8 +25,10 @@ export const ompAdapter = {
     return discoverJsonlFiles(root ? expandHome(root) : getDefaultOmpSessionsDir());
   },
   async parseIncremental(filePath, byteOffset = 0, existingMeta = {}) {
-    const { lineCount, checkpointHash, signal, nextSeq } = existingMeta;
-    const { lines, ...checkpoint } = await readIncrementalJsonlLinesAsync(filePath, byteOffset, lineCount, checkpointHash, signal);
+    const { lineCount, checkpointHash, signal, nextSeq, recoverHeaderCwd } = existingMeta;
+    const { lines, headerLine, ...checkpoint } = await readIncrementalJsonlLinesAsync(
+      filePath, byteOffset, lineCount, checkpointHash, signal, recoverHeaderCwd,
+    );
     let { sessionId, cwd } = existingMeta;
     let seq = nextSeq ?? 0;
     let recognized = false;
@@ -50,6 +58,9 @@ export const ompAdapter = {
         skipEmbedding: hasToolResult,
       });
     }
-    return { sessionId: sessionId ?? path.basename(filePath, '.jsonl'), cwd, messages, recognized, ...checkpoint };
+    return {
+      sessionId: sessionId ?? path.basename(filePath, '.jsonl'), cwd, messages, recognized, ...checkpoint,
+      headerCwd: readHeaderCwd(headerLine),
+    };
   },
 };

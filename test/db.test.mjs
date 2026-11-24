@@ -89,7 +89,7 @@ test('creates the core schema in WAL mode and preserves the migration record on 
 
   const selectMigrations = 'SELECT version, applied_at FROM schema_migrations ORDER BY version';
   const migrations = db.prepare(selectMigrations).all();
-  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4]);
+  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4, 5]);
   assert.ok(Number.isInteger(migrations[0].applied_at) && migrations[0].applied_at > 0);
   addMemory(db);
   const reopened = fixture.open();
@@ -138,7 +138,7 @@ test('two processes can open and migrate a fresh database concurrently', async (
     try {
       assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
       assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-        .map(({ version }) => version), [1, 2, 3, 4]);
+        .map(({ version }) => version), [1, 2, 3, 4, 5]);
     } finally {
       db.close();
     }
@@ -154,7 +154,7 @@ test('two processes can open and migrate a fresh database concurrently', async (
 
   const db = fixture.open({ readOnly: true });
   assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-    .map(({ version }) => version), [1, 2, 3, 4]);
+    .map(({ version }) => version), [1, 2, 3, 4, 5]);
 });
 
 test('rolls back both schema changes and the migration record when migration fails', (t) => {
@@ -165,10 +165,10 @@ test('rolls back both schema changes and the migration record when migration fai
   assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name = 'memories'").get(), undefined);
   db.exec('DROP TABLE notes');
   runMigrations(db);
-  assert.equal(count(db, 'schema_migrations'), 4);
+  assert.equal(count(db, 'schema_migrations'), 5);
 });
 
-test('adds transcript checkpoints and embedding eligibility to a version 1 database without losing rows', (t) => {
+test('adds transcript checkpoints, embedding eligibility, and Dreamer fields to a version 1 database without losing rows', (t) => {
   const db = databaseFixture(t).openUnmigrated();
   db.exec(`
     CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
@@ -180,13 +180,21 @@ test('adds transcript checkpoints and embedding eligibility to a version 1 datab
     VALUES ('fixture.jsonl', 'omp', 'session', 'project', 1, 42, 1);
     INSERT INTO transcript_messages (file_id, seq, role, text, line_no)
     SELECT id, 0, 'user', 'Existing fixture message', 1 FROM transcript_files;
+    INSERT INTO memories (id, project_key, scope, category, content, normalized_hash, created_at, updated_at)
+    VALUES ('fixture', 'project', 'project', 'GENERAL', 'Fixture', 'fixture-hash', 1, 1);
+    INSERT INTO dream_runs (id, project_key, runner, status, started_at, finished_at)
+    VALUES ('fixture', 'project', 'fixture', 'completed', 1, 2);
   `);
   runMigrations(db);
-  const { byte_offset, line_count, file_identity } = db.prepare('SELECT * FROM transcript_files').get();
-  assert.deepEqual([byte_offset, line_count, file_identity], [42, null, null]);
+  const { byte_offset, line_count, file_identity, project_root } = db.prepare('SELECT * FROM transcript_files').get();
+  assert.deepEqual([byte_offset, line_count, file_identity, project_root], [42, null, null, null]);
   const { text, embed_eligible } = db.prepare('SELECT text, embed_eligible FROM transcript_messages').get();
   assert.equal(text, 'Existing fixture message');
   assert.equal(embed_eligible, 0);
+  const { content, last_dreamed_at } = db.prepare('SELECT * FROM memories').get();
+  assert.deepEqual([content, last_dreamed_at], ['Fixture', null]);
+  const { status, last_transcript_message_id } = db.prepare('SELECT * FROM dream_runs').get();
+  assert.deepEqual([status, last_transcript_message_id], ['completed', null]);
 });
 
 test('reopens a pre-repair version 2 database and adds embedding eligibility without losing rows', (t) => {
@@ -209,7 +217,7 @@ test('reopens a pre-repair version 2 database and adds embedding eligibility wit
 
   const reopened = fixture.open();
   const migrations = reopened.prepare('SELECT version, applied_at FROM schema_migrations ORDER BY version').all();
-  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4]);
+  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4, 5]);
   assert.deepEqual(migrations.slice(0, 2).map(({ applied_at }) => applied_at), [1, 2]);
   const { id, byte_offset, line_count, file_identity, checkpoint_hash, file_size } = reopened
     .prepare('SELECT * FROM transcript_files').get();
@@ -243,6 +251,55 @@ test('records migration 3 when an earlier version 2 already added embedding elig
   const reopened = fixture.open();
   assert.ok(reopened.prepare('SELECT 1 FROM schema_migrations WHERE version = 3').get());
   assert.equal(reopened.prepare('SELECT embed_eligible FROM transcript_messages').get().embed_eligible, 1);
+});
+
+test('adds Dreamer fields to a version 4 database and preserves completed runs', (t) => {
+  const fixture = databaseFixture(t);
+  const db = fixture.openUnmigrated();
+  MIGRATIONS[0].up(db);
+  MIGRATIONS[1].up(db);
+  MIGRATIONS[2].up(db);
+  MIGRATIONS[3].up(db);
+  db.exec(`
+    CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+    INSERT INTO schema_migrations VALUES (1, 1), (2, 2), (3, 3), (4, 4);
+    INSERT INTO dream_runs (id, project_key, runner, status, started_at, finished_at, summary)
+    VALUES ('fixture', 'project', 'fixture', 'completed', 1, 2, 'Existing review');
+  `);
+  const originalRun = db.prepare('SELECT * FROM dream_runs').get();
+  const reopened = fixture.open();
+  assert.deepEqual(reopened.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
+    .map(({ version }) => version), [1, 2, 3, 4, 5]);
+  assert.deepEqual({ ...reopened.prepare('SELECT * FROM dream_runs').get() }, {
+    ...originalRun, last_transcript_message_id: null,
+  });
+});
+
+test('records version 5 and preserves a completed run with existing Dreamer columns', (t) => {
+  const fixture = databaseFixture(t);
+  const db = fixture.openUnmigrated();
+  MIGRATIONS[0].up(db);
+  MIGRATIONS[1].up(db);
+  MIGRATIONS[2].up(db);
+  MIGRATIONS[3].up(db);
+  db.exec(`
+    ALTER TABLE transcript_files ADD COLUMN project_root TEXT;
+    ALTER TABLE memories ADD COLUMN last_dreamed_at INTEGER;
+    ALTER TABLE dream_runs ADD COLUMN last_transcript_message_id INTEGER;
+    CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+    INSERT INTO schema_migrations VALUES (1, 1), (2, 2), (3, 3), (4, 4);
+    INSERT INTO dream_runs (id, project_key, runner, status, started_at, finished_at, last_transcript_message_id)
+    VALUES ('fixture', 'project', 'fixture', 'completed', 1, 2, 42);
+  `);
+
+  const reopened = fixture.open();
+  assert.deepEqual(reopened.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
+    .map(({ version }) => version), [1, 2, 3, 4, 5]);
+  const { status, last_transcript_message_id } = reopened.prepare(
+    'SELECT status, last_transcript_message_id FROM dream_runs WHERE id = ?',
+  ).get('fixture');
+  assert.equal(status, 'completed');
+  assert.equal(last_transcript_message_id, 42);
 });
 
 test('read-only connections allow reads, reject writes, and skip migrations and directory creation', (t) => {
