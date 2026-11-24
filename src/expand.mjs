@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -124,6 +125,20 @@ function toolName(call) {
   return call?.function?.name ?? call?.name ?? call?.recipient_name;
 }
 
+function matchesCheckpointHash(fd, byteOffset, checkpointHash) {
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let endsAtNewline = false;
+  for (let position = 0; position < byteOffset;) {
+    const count = fs.readSync(fd, buffer, 0, Math.min(buffer.length, byteOffset - position), position);
+    if (count === 0) return false;
+    hash.update(buffer.subarray(0, count));
+    endsAtNewline = buffer[count - 1] === 0x0A;
+    position += count;
+  }
+  return endsAtNewline && hash.digest('hex') === checkpointHash;
+}
+
 function matchesIndexedTranscript(db, file, fd) {
   const anchor = db.prepare(`
     SELECT line_no, role, text, tool_names FROM transcript_messages WHERE file_id = ? ORDER BY line_no ASC LIMIT 1
@@ -140,10 +155,13 @@ function matchesIndexedTranscript(db, file, fd) {
         ? codexSessionId(record) ?? firstNonBlankString(record?.payload?.session_id)
         : file.orchestrator === 'agy' ? agySessionId(record) : undefined;
       const indexedId = file.session_id.trim();
-      if (declaredId !== undefined ? declaredId !== indexedId : sessionIds.some((id) => {
+      const idMismatch = declaredId !== undefined ? declaredId !== indexedId : sessionIds.some((id) => {
         const normalized = firstNonBlankString(id);
         return normalized !== undefined && normalized !== indexedId;
-      })) return false;
+      });
+      // A later record can set the indexed session ID. Verify the committed prefix in that case.
+      if (idMismatch && (file.checkpoint_hash == null || !(file.byte_offset > 0)
+        || !matchesCheckpointHash(fd, file.byte_offset, file.checkpoint_hash))) return false;
       if (!anchor) return true;
     }
     if (lineNo === anchor.line_no) {
@@ -274,7 +292,8 @@ export function expandSession(db, options = {}) {
   validateRange('line_start', line_start, 'line_end', line_end, 1);
   validateInteger('max_chars', max_chars, 1);
 
-  const files = 'SELECT id, session_id, orchestrator, project_key, file_path, byte_offset, file_identity FROM transcript_files';
+  const files = `SELECT id, session_id, orchestrator, project_key, file_path, byte_offset, file_identity, checkpoint_hash
+    FROM transcript_files`;
   const file = file_id === undefined
     ? db.prepare(`${files} WHERE session_id = ? ORDER BY last_indexed_at DESC, id DESC LIMIT 1`).get(session_id.trim())
     : db.prepare(`${files} WHERE id = ? AND session_id = ?`).get(file_id, session_id.trim());

@@ -52,7 +52,9 @@ export const agyAdapter = {
     const root = override ? expandHome(override) : getDefaultAgySessionsDir();
     return discoverJsonlFiles(root).filter((file) => {
       const segments = path.relative(root, file).split(path.sep);
-      return segments.pop() !== 'transcript_full.jsonl' && !segments.includes('chunks');
+      if (segments.length === 1) return segments[0] !== 'transcript_full.jsonl';
+      return segments.length === 4 && segments[1] === '.system_generated'
+        && segments[2] === 'logs' && segments[3] === 'transcript.jsonl';
     });
   },
   parseIncremental(filePath, byteOffset = 0, existingMeta = {}) {

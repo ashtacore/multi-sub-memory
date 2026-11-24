@@ -64,11 +64,14 @@ text, and tool names.
 - Index Codex conversation messages and tool names from `response_item`
   records. Skip event copies, developer and system prompts, reasoning, and
   standalone tool output. In Antigravity, index attributable conversation
-  turns with text or tool names. Skip `transcript_full.jsonl` and files under
-  `chunks` during discovery to avoid indexing duplicate turns. Both adapters
-  trim declared session IDs and skip blank candidates. Antigravity uses the
-  last ID declared on a complete record, so appending a declaration produces
-  the same session ID on an incremental refresh as on a full index.
+  turns with text or tool names. Discover nested Antigravity transcripts only
+  at `<conversation-id>/.system_generated/logs/transcript.jsonl`. Also accept
+  `.jsonl` files directly under the session root, except `transcript_full.jsonl`.
+  Both adapters trim declared session IDs and skip blank candidates.
+  Antigravity uses the last ID declared on a complete record, so appending a
+  declaration produces the same session ID on an incremental refresh as on a
+  full index. If the first line declares a different ID, `mem_expand` requires
+  the committed prefix to match the stored checkpoint before reading from disk.
 - Commit searchable text before attempting embeddings. Embed user and assistant
   text when it is 10–16,000 characters after trimming. Tool-result turns,
   messages containing Claude Code `tool_result` blocks, and oversized output

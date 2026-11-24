@@ -167,6 +167,25 @@ for (const [orchestrator, entry] of [['codex', codexUser], ['agy', agyUser]]) {
   });
 }
 
+test('Antigravity indexes the canonical transcript when a diagnostic log shares its directory', async (t) => {
+  const { db, config, dirs } = fixture(t);
+  const logs = path.join(dirs.agy, sessionId, '.system_generated', 'logs');
+  const message = agyUser('Canonical Antigravity message.');
+  const file = writeTranscript(path.join(logs, 'transcript.jsonl'), message);
+  writeTranscript(path.join(logs, 'zzz-diagnostics.jsonl'), { text: 'diagnostic' });
+
+  const indexed = await runIndexers({ db, config });
+  assert.deepEqual(indexed.errors, []);
+  assert.equal(indexed.filesIndexed, 1);
+  assert.deepEqual(db.prepare('SELECT file_path FROM transcript_files').all().map((row) => row.file_path), [file]);
+
+  const expanded = expandSession(db, { session_id: sessionId });
+  assert.equal(expanded.source, 'disk');
+  assert.deepEqual(expanded.messages, [
+    { seq: 0, line_no: 1, role: 'user', text: message.content, timestamp: utc },
+  ]);
+});
+
 test('Antigravity replaces a fallback session ID when the first record completes', async (t) => {
   const { db, config, dirs } = fixture(t);
   const logs = path.join(dirs.agy, 'provisional', '.system_generated', 'logs');
@@ -210,7 +229,11 @@ test('Antigravity uses the latest declared session ID regardless of refresh timi
   assert.equal(first.messagesIndexed, 1);
   assert.equal(indexedSessionId(db), sessionId);
 
-  fs.appendFileSync(file, jsonl({ ...agyUser('Appended Antigravity message.'), conversation_id: otherId }));
+  const systemMessage = { type: 'SYSTEM_MESSAGE', content: 'Synthetic system context.' };
+  fs.appendFileSync(file, jsonl(
+    { ...agyUser('Appended Antigravity message.'), conversation_id: otherId },
+    systemMessage,
+  ));
   const second = await runIndexers({ db, config });
   assert.deepEqual(second.errors, []);
   assert.equal(second.messagesIndexed, 1);
@@ -223,6 +246,26 @@ test('Antigravity uses the latest declared session ID regardless of refresh timi
   assert.equal(fresh.messagesIndexed, 2);
   assert.equal(indexedSessionId(db), indexedSessionId(freshDb));
   assert.equal(indexedSessionId(db), otherId);
+
+  const range = { session_id: otherId, line_start: 3, line_end: 3 };
+  for (const database of [db, freshDb]) {
+    const expanded = expandSession(database, range);
+    assert.equal(expanded.source, 'disk');
+    assert.deepEqual(expanded.messages, [{ line_no: 3, role: 'system', text: systemMessage.content }]);
+  }
+
+  const offset = fs.readFileSync(file).indexOf(sessionId);
+  assert.ok(offset >= 0);
+  const fd = fs.openSync(file, 'r+');
+  try {
+    const replacementId = '00000000-0000-4000-8000-000000000099';
+    assert.equal(fs.writeSync(fd, replacementId, offset), Buffer.byteLength(sessionId));
+  } finally {
+    fs.closeSync(fd);
+  }
+  const fallback = expandSession(db, range);
+  assert.equal(fallback.source, 'db-fallback');
+  assert.deepEqual(fallback.messages, []);
 });
 
 test('expansion reads OMP tool calls stored alongside string content from disk', async (t) => {

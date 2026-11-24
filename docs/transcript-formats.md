@@ -62,14 +62,13 @@ The adapter prefers a valid `payload.timestamp` and falls back to
 
 ## Antigravity
 
-The default root is `~/.gemini/antigravity-cli/brain`. A conversation's
-canonical transcript is `<conversation-id>/.system_generated/logs/transcript.jsonl`.
-Discovery skips `transcript_full.jsonl` and files under a `chunks` directory
-to avoid duplicate messages. Flat JSONL fixtures are also supported.
+The default root is `~/.gemini/antigravity-cli/brain`. Discovery accepts nested
+transcripts only at `<conversation-id>/.system_generated/logs/transcript.jsonl`.
+It also accepts `.jsonl` files directly under the root, except `transcript_full.jsonl`.
 
 Records can supply `sessionId`, `session_id`, `conversationId`, or
 `conversation_id`. The conversation directory supplies a fallback ID for
-files under `.system_generated/logs`; other files fall back to their stem.
+the canonical transcript. Flat files fall back to their filename stem.
 The adapter reads workspace metadata from `cwd`, `workspace`, or
 `workspace_root`.
 
