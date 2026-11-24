@@ -55,6 +55,22 @@ test('strips comments and trailing commas while preserving quoted content', () =
   assert.throws(() => parseJsonc('[,]'), SyntaxError);
 });
 
+test('accepts a single leading UTF-8 BOM in JSONC config', (t) => {
+  const options = configFixture(t);
+  const userConfigPath = path.join(options.homeDir, 'config.jsonc');
+  const model = 'model\uFEFFname';
+  const jsonc = `\uFEFF{ // config saved with a UTF-8 BOM\n  "embedding": { "model": "${model}", },\n}`;
+  const expected = { embedding: { model } };
+
+  assert.deepEqual(JSON.parse(stripJsonc(jsonc)), expected);
+  assert.deepEqual(parseJsonc(jsonc), expected);
+  assert.equal(stripJsonc('\uFEFF\uFEFF{}'), '\uFEFF{}');
+  assert.equal(stripJsonc(' \uFEFF{}'), ' \uFEFF{}');
+
+  fs.writeFileSync(userConfigPath, jsonc, 'utf8');
+  assert.equal(loadConfig({ ...options, userConfigPath }).embedding.model, model);
+});
+
 test('merges environment, project, user, and default config in precedence order', (t) => {
   const options = configFixture(t);
   const { homeDir, projectRoot } = options;
@@ -149,6 +165,39 @@ test('replaces existing config without leaving a temporary sibling', (t) => {
 
   assert.deepEqual(parseJsonc(fs.readFileSync(configPath, 'utf8')), replacement);
   assert.deepEqual(fs.readdirSync(homeDir), ['config.jsonc']);
+});
+
+test('writes through chained config symlinks to missing and existing targets', (t) => {
+  const { homeDir, projectRoot: dotfilesDir } = configFixture(t);
+  const linkPath = path.join(homeDir, 'config.jsonc');
+  const intermediatePath = path.join(dotfilesDir, 'linked.jsonc');
+  const targetDir = path.join(dotfilesDir, 'settings');
+  const targetPath = path.join(targetDir, 'config.jsonc');
+  try {
+    fs.symlinkSync(path.relative(homeDir, intermediatePath), linkPath, 'file');
+    fs.symlinkSync(targetPath, intermediatePath, 'file');
+  } catch (error) {
+    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+    t.skip('Creating file symlinks requires privileges on this Windows host');
+    return;
+  }
+
+  assert.equal(fs.existsSync(targetDir), false);
+  const initial = { dbPath: 'initial.db' };
+  writeConfig(linkPath, initial);
+  assert.deepEqual(parseJsonc(fs.readFileSync(targetPath, 'utf8')), initial);
+
+  if (process.platform !== 'win32') fs.chmodSync(targetPath, 0o640);
+  const replacement = { dreamer: { enabled: true } };
+  writeConfig(linkPath, replacement);
+  assert.deepEqual(parseJsonc(fs.readFileSync(targetPath, 'utf8')), replacement);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(targetPath).mode & 0o777, 0o640);
+
+  assert.equal(fs.lstatSync(linkPath).isSymbolicLink(), true);
+  assert.equal(fs.lstatSync(intermediatePath).isSymbolicLink(), true);
+  assert.deepEqual(fs.readdirSync(homeDir), ['config.jsonc']);
+  assert.deepEqual(fs.readdirSync(dotfilesDir).sort(), ['linked.jsonc', 'settings']);
+  assert.deepEqual(fs.readdirSync(targetDir), ['config.jsonc']);
 });
 
 test('preserves the mode of an existing private POSIX config', { skip: process.platform === 'win32' }, (t) => {

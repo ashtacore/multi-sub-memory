@@ -45,7 +45,7 @@ export function stripJsonc(text) {
   let previousToken;
   let trailingComma = -1;
 
-  for (let index = 0; index < text.length; index++) {
+  for (let index = text[0] === '\uFEFF' ? 1 : 0; index < text.length; index++) {
     const character = text[index];
     const next = text[index + 1];
 
@@ -148,15 +148,38 @@ export function loadConfig(options = {}) {
   return config;
 }
 
+function resolveConfigDestination(configPath) {
+  if (!fs.lstatSync(configPath, { throwIfNoEntry: false })?.isSymbolicLink()) return configPath;
+
+  try {
+    return fs.realpathSync.native(configPath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+
+  // A dangling link has no real path yet. Follow each link to the missing destination.
+  let destination = configPath;
+  for (let depth = 0; depth < 40; depth++) {
+    const target = fs.readlinkSync(destination);
+    const directory = fs.realpathSync.native(path.dirname(destination));
+    destination = path.resolve(directory, target);
+    if (!fs.lstatSync(destination, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      return destination;
+    }
+  }
+  throw new Error('Too many symbolic links resolving config path ' + configPath);
+}
+
 export function writeConfig(configPath, configData, options = {}) {
   const config = configLayerSchema.parse(configData);
   const resolvedPath = expandHome(configPath, options.homeDir);
-  const directory = path.dirname(resolvedPath);
+  const destination = resolveConfigDestination(resolvedPath);
+  const directory = path.dirname(destination);
   fs.mkdirSync(directory, { recursive: true });
 
   let existingMode;
   try {
-    const stat = fs.statSync(resolvedPath);
+    const stat = fs.statSync(destination);
     if (stat.isFile()) existingMode = stat.mode & 0o777;
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
@@ -173,7 +196,7 @@ export function writeConfig(configPath, configData, options = {}) {
     } finally {
       fs.closeSync(tempFile);
     }
-    fs.renameSync(tempPath, resolvedPath);
+    fs.renameSync(tempPath, destination);
   } catch (error) {
     try {
       fs.unlinkSync(tempPath);
