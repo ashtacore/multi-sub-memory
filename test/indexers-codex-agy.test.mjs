@@ -186,6 +186,28 @@ test('Antigravity indexes the canonical transcript when a diagnostic log shares 
   ]);
 });
 
+test('Antigravity uses filename stems when the logs directory is the session root', async (t) => {
+  const { db, config, dirs } = fixture(t);
+  const logs = path.join(dirs.agy, sessionId, '.system_generated', 'logs');
+  config.indexers.agy.sessionsDir = logs;
+  const message = agyUser('Canonical Antigravity message.');
+  writeTranscript(path.join(logs, 'transcript.jsonl'), message);
+  const diagnostics = writeTranscript(path.join(logs, 'zzz-diagnostics.jsonl'), { text: 'diagnostic' });
+  assert.equal(agyAdapter.parseIncremental(diagnostics).sessionId, 'zzz-diagnostics');
+
+  const indexed = await runIndexers({ db, config });
+  assert.deepEqual(indexed.errors, []);
+  assert.equal(indexed.filesIndexed, 2);
+  const ids = db.prepare('SELECT session_id FROM transcript_files ORDER BY file_path').all();
+  assert.deepEqual(ids.map(({ session_id }) => session_id), ['transcript', 'zzz-diagnostics']);
+
+  const expanded = expandSession(db, { session_id: 'transcript' });
+  assert.equal(expanded.source, 'disk');
+  assert.deepEqual(expanded.messages, [
+    { seq: 0, line_no: 1, role: 'user', text: message.content, timestamp: utc },
+  ]);
+});
+
 test('Antigravity replaces a fallback session ID when the first record completes', async (t) => {
   const { db, config, dirs } = fixture(t);
   const logs = path.join(dirs.agy, 'provisional', '.system_generated', 'logs');
@@ -266,6 +288,20 @@ test('Antigravity uses the latest declared session ID regardless of refresh timi
   const fallback = expandSession(db, range);
   assert.equal(fallback.source, 'db-fallback');
   assert.deepEqual(fallback.messages, []);
+});
+
+test('Claude expansion falls back when the first record declares a different session ID', async (t) => {
+  const { db, config, dirs } = fixture(t);
+  writeTranscript(path.join(dirs.claude, 'claude.jsonl'),
+    { type: 'user', sessionId, message: { content: 'Initial Claude message.' } },
+    { type: 'assistant', sessionId: otherId, message: { content: 'Later Claude message.' } });
+  const indexed = await runIndexers({ db, config });
+  assert.deepEqual(indexed.errors, []);
+  assert.equal(indexed.messagesIndexed, 2);
+
+  const expanded = expandSession(db, { session_id: otherId });
+  assert.equal(expanded.source, 'db-fallback');
+  assert.deepEqual(expanded.messages.map(({ text }) => text), ['Initial Claude message.', 'Later Claude message.']);
 });
 
 test('expansion reads OMP tool calls stored alongside string content from disk', async (t) => {

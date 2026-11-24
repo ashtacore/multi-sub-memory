@@ -14,6 +14,12 @@ export function agySessionId(record) {
   return firstNonBlankString(record?.sessionId, record?.session_id, record?.conversationId, record?.conversation_id);
 }
 
+function isCanonicalTranscript(segments) {
+  const [conversation, generated, logs, file] = segments;
+  return segments.length === 4 && Boolean(conversation) && conversation !== '.' && conversation !== '..'
+    && generated === '.system_generated' && logs === 'logs' && file === 'transcript.jsonl';
+}
+
 function agyRole(record) {
   switch (record.type) {
     case 'USER_INPUT': return 'user';
@@ -53,16 +59,19 @@ export const agyAdapter = {
     return discoverJsonlFiles(root).filter((file) => {
       const segments = path.relative(root, file).split(path.sep);
       if (segments.length === 1) return segments[0] !== 'transcript_full.jsonl';
-      return segments.length === 4 && segments[1] === '.system_generated'
-        && segments[2] === 'logs' && segments[3] === 'transcript.jsonl';
+      return isCanonicalTranscript(segments);
     });
   },
   parseIncremental(filePath, byteOffset = 0, existingMeta = {}) {
-    const logs = path.dirname(filePath);
-    const generated = path.dirname(logs);
-    const conversation = path.basename(logs) === 'logs' && path.basename(generated) === '.system_generated'
-      ? path.basename(path.dirname(generated)) : undefined;
-    const fallbackId = conversation ?? path.basename(filePath, '.jsonl');
+    const root = path.resolve(existingMeta.sessionsDir ? expandHome(existingMeta.sessionsDir) : getDefaultAgySessionsDir());
+    const resolvedFile = path.resolve(filePath);
+    const relative = path.relative(root, resolvedFile);
+    let segments = relative.split(path.sep);
+    if (existingMeta.sessionsDir === undefined && (segments[0] === '..' || path.isAbsolute(relative))) {
+      // Standalone callers can parse canonical transcripts outside the default root.
+      segments = resolvedFile.slice(path.parse(resolvedFile).root.length).split(path.sep).slice(-4);
+    }
+    const fallbackId = isCanonicalTranscript(segments) ? segments[0] : path.basename(filePath, '.jsonl');
     const { lines, ...checkpoint } =
       readIncrementalJsonlLines(filePath, byteOffset, existingMeta.lineCount, existingMeta.checkpointHash);
     let { sessionId, cwd } = existingMeta;

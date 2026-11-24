@@ -96,8 +96,11 @@ session headers for OMP and Codex and conversation IDs for Antigravity), or
 its earliest indexed message differs in role, text, or ordered tool names.
 The tool-name check follows the transcript adapter's indexing rules. Disk
 results can also include sibling tool calls from the original JSONL record.
-The session check trims declared IDs and ignores blank values. Older rows
-without a stored identity still use the session and message checks.
+The session check trims declared IDs and ignores blank values. For Antigravity,
+if the first line declares an earlier ID than the indexed session ID, the tool
+can still read from disk when the committed prefix matches the stored checkpoint
+hash and the other file and message checks pass. Older rows without a stored
+identity still use the session and message checks.
 Matching files report `source: "disk"` and can include newly appended lines.
 The text budget defaults to 16,000 characters and applies
 across all returned message text. A partial final message ends in an ellipsis.

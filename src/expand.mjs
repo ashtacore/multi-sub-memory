@@ -159,8 +159,8 @@ function matchesIndexedTranscript(db, file, fd) {
         const normalized = firstNonBlankString(id);
         return normalized !== undefined && normalized !== indexedId;
       });
-      // A later record can set the indexed session ID. Verify the committed prefix in that case.
-      if (idMismatch && (file.checkpoint_hash == null || !(file.byte_offset > 0)
+      // A later Antigravity record can set the indexed session ID. Verify the committed prefix in that case.
+      if (idMismatch && (file.orchestrator !== 'agy' || file.checkpoint_hash == null || !(file.byte_offset > 0)
         || !matchesCheckpointHash(fd, file.byte_offset, file.checkpoint_hash))) return false;
       if (!anchor) return true;
     }
