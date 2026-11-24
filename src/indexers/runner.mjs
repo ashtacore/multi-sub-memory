@@ -37,6 +37,7 @@ function inTransaction(db, work) {
 function sqlStatements(db) {
   return {
     file: db.prepare('SELECT * FROM transcript_files WHERE file_path = ?'),
+    deleteFile: db.prepare('DELETE FROM transcript_files WHERE id = ?'),
     nextSeq: db.prepare('SELECT COALESCE(MAX(seq) + 1, 0) AS nextSeq FROM transcript_messages WHERE file_id = ?'),
     clearMessages: db.prepare('DELETE FROM transcript_messages WHERE file_id = ?'),
     addFile: db.prepare(`
@@ -169,7 +170,15 @@ export async function runIndexers({
             parsed = await adapter.parseIncremental(filePath, 0, fullMeta);
             if (signal?.aborted || leaseLost) return summary;
           }
-          if (!existing && parsed.recognized === false) {
+          if (parsed.recognized === false && (!existing || reindex)) {
+            if (existing) {
+              const deleted = inTransaction(db, () => {
+                renewIfDue();
+                if (leaseLost) return null;
+                return sql.deleteFile.run(existing.id);
+              });
+              if (deleted === null) return summary;
+            }
             summary.filesSkipped++;
             continue;
           }

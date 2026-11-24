@@ -29,7 +29,9 @@ offset and line count, and file metadata. The runner accepts synchronous and
 asynchronous adapters and passes an optional abort signal in `existingMeta`.
 The built-in adapters report whether they recognized their format. An explicit
 `recognized: false` leaves a new path available for another adapter when roots
-overlap. Adapters using the shared reader pass the previous checkpoint hash
+overlap. If the current owner no longer recognizes a file after a full reparse,
+the runner deletes the old file row and its indexed data so another adapter can
+claim the path. Adapters using the shared reader pass the previous checkpoint hash
 and return the reader’s checkpoint result so the runner can rebuild when
 continuity fails. A message carries a zero-based sequence number, a one-based
 physical line number, a role, optional timestamp, text, and tool names. The
@@ -59,10 +61,10 @@ runner’s built-in registry provides OMP and Claude Code.
   if the file was replaced, or if a changed file is at or below the checkpoint
   length. Delete the prior messages and insert the new ones in one transaction,
   so FTS5 and vector rows follow the rebuild through triggers and cascades.
-- `mem_expand` validates the committed prefix before reading an indexed range
-  from disk. For rows without a checkpoint digest, it compares the first
-  indexed turn and any indexed turns in the requested range. A
-  mismatch returns the indexed text from SQLite.
+- `mem_expand` reads and validates the requested range in one pass. It checks
+  any session ID on the first line and compares the role, full text, and tool
+  names of the earliest indexed turn and the requested indexed turns. A
+  mismatch or missing turn returns the selected messages from SQLite.
 - Normalize valid ISO strings and epoch milliseconds (numbers or digit strings)
   to UTC ISO 8601. Prefer a valid message timestamp, then use the enclosing
   record's timestamp. Claude Code uses the record type when the nested role is
@@ -70,7 +72,7 @@ runner’s built-in registry provides OMP and Claude Code.
 - Commit searchable text and its embedding eligibility before attempting
   embeddings. Each run with an embedding engine retries missing eligible
   vectors for the selected orchestrators, including rows from unchanged files.
-  Migration 2 adds `embed_eligible` and defaults existing rows to `0`.
+  Migration 3 adds `embed_eligible` and defaults existing rows to `0`.
   User and assistant text is eligible when it is 10–16,000 characters after
   trimming. Tool-result turns, messages containing Claude Code `tool_result`
   blocks, and oversized output remain searchable through FTS5. Indexing can

@@ -169,8 +169,15 @@ export const MIGRATIONS = [{
       ALTER TABLE transcript_files ADD COLUMN file_identity TEXT;
       ALTER TABLE transcript_files ADD COLUMN checkpoint_hash TEXT;
       ALTER TABLE transcript_files ADD COLUMN file_size INTEGER;
-      ALTER TABLE transcript_messages ADD COLUMN embed_eligible INTEGER NOT NULL DEFAULT 0;
     `);
+  },
+}, {
+  version: 3,
+  up(db) {
+    // An earlier v2 implementation already added this column.
+    const existing = db.prepare("SELECT 1 FROM pragma_table_info('transcript_messages') WHERE name = 'embed_eligible'").get();
+    if (existing) return;
+    db.exec('ALTER TABLE transcript_messages ADD COLUMN embed_eligible INTEGER NOT NULL DEFAULT 0;');
   },
 }];
 
