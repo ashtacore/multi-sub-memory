@@ -5,7 +5,7 @@ import {
   generateId, invalidateEmbedding, inWriteTransaction, MEMORY_CATEGORIES, storeEmbedding,
 } from '../memory-service.mjs';
 import { resolveProjectKey } from '../project-id.mjs';
-import { createDreamRunner, sanitizeDreamError, validateDreamPlan } from './runners.mjs';
+import { createDreamRedactor, createDreamRunner, sanitizeDreamError, validateDreamPlan } from './runners.mjs';
 import { lastCompletedDream, shouldTriggerAutoDream } from './trigger.mjs';
 
 export { shouldTriggerAutoDream, maybeTriggerAutoDream } from './trigger.mjs';
@@ -185,16 +185,16 @@ function applyOperations(db, { projectKey, runId, memories, prepared, txNow }) {
   `);
   const merge = db.prepare(`
     UPDATE memories SET content = ?, category = ?, importance = ?, status = 'active', superseded_by = NULL,
-      source_orchestrator = 'dreamer', source_session_id = NULL, metadata_json = ?, updated_at = ? WHERE id = ?
+      source_orchestrator = 'dreamer', source_session_id = NULL, metadata_json = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ?
   `);
   const supersede = db.prepare(`
-    UPDATE memories SET status = 'superseded', superseded_by = ?, updated_at = ? WHERE id = ?
+    UPDATE memories SET status = 'superseded', superseded_by = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ?
   `);
   const archive = db.prepare(`
-    UPDATE memories SET status = 'archived', metadata_json = ?, updated_at = ? WHERE id = ?
+    UPDATE memories SET status = 'archived', metadata_json = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ?
   `);
   const update = db.prepare(`
-    UPDATE memories SET content = ?, normalized_hash = ?, category = ?, importance = ?, metadata_json = ?, updated_at = ?
+    UPDATE memories SET content = ?, normalized_hash = ?, category = ?, importance = ?, metadata_json = ?, updated_at = MAX(?, updated_at + 1)
     WHERE id = ?
   `);
   const pendingEmbeddings = [];
@@ -308,6 +308,7 @@ export async function runDream({
     runnerName = output.runner ?? runnerName;
     model = output.model ?? null;
     const plan = validateDreamPlan(output.plan);
+    const summary = createDreamRedactor(env, settings?.http?.apiKeyEnv)(plan.summary);
     if (transcriptCount === 0 && plan.operations.some(({ type }) => type === 'add')) {
       throw new Error('Dream additions require transcript excerpts in the prompt');
     }
@@ -333,7 +334,7 @@ export async function runDream({
         for (const id of memories.keys()) markReviewed.run(txNow, id);
       }
       record(status, {
-        merged: counts.memoriesMerged, archived: counts.memoriesArchived, summary: plan.summary, finishedAt: txNow,
+        merged: counts.memoriesMerged, archived: counts.memoriesArchived, summary, finishedAt: txNow,
         transcriptMessageId: dryRun ? null : transcriptCursor,
       });
       return embeddings;
@@ -345,7 +346,7 @@ export async function runDream({
     }
     return {
       status, runId, projectKey, runner: runnerName, model, dryRun, ...counts,
-      ...(dryRun ? {} : { embeddingsWritten }), summary: plan.summary, operations: plan.operations,
+      ...(dryRun ? {} : { embeddingsWritten }), summary, operations: plan.operations,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

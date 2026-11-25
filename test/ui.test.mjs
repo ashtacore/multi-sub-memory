@@ -1,0 +1,631 @@
+import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { createServer, request as httpRequest } from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import { loadConfig } from '../src/config.mjs';
+import { acquireLease, hashNormalizedContent, MIGRATIONS, openDatabase, releaseLease } from '../src/db.mjs';
+import { archiveMemory, writeMemory, writeNote } from '../src/memory-service.mjs';
+import { resolveProjectKey } from '../src/project-id.mjs';
+import { allowedLoopbackGuards, startDashboardServer } from '../src/ui/server.mjs';
+
+async function fixture(t, { dreamer, env = {}, embeddingEngine } = {}) {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'multi-sub-memory-ui-'));
+  const dbPath = path.join(cwd, 'dashboard.db');
+  const userConfigPath = path.join(cwd, 'config.jsonc');
+  let db;
+  let dashboard;
+  t.after(async () => {
+    try {
+      await dashboard?.close();
+    } finally {
+      db?.close();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+  await writeFile(userConfigPath, JSON.stringify({
+    dbPath, embedding: { enabled: false }, ...(dreamer ? { dreamer } : {}),
+  }));
+  async function restart(dashboardEnv) {
+    await dashboard?.close();
+    db?.close();
+    db = undefined;
+    db = openDatabase(dbPath);
+    dashboard = await startDashboardServer({ cwd, userConfigPath, db, env: dashboardEnv, embeddingEngine, port: 0 });
+    return db;
+  }
+  await restart(env);
+  const { projectKey } = resolveProjectKey(cwd);
+
+  function request(pathname, { method = 'GET', body, rawBody, headers, authorized = false, setHost = true } = {}) {
+    const payload = body === undefined ? rawBody : JSON.stringify(body);
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({
+        host: dashboard.host, port: dashboard.port, path: pathname, method, setHost,
+        headers: {
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }),
+          ...(authorized ? { 'X-MSM-Token': dashboard.csrfToken } : {}),
+          ...headers,
+        },
+      }, async (res) => {
+        try {
+          const chunks = [];
+          for await (const chunk of res) chunks.push(chunk);
+          const text = Buffer.concat(chunks).toString('utf8');
+          const json = res.headers['content-type']?.startsWith('application/json') && text ? JSON.parse(text) : null;
+          resolve({ status: res.statusCode, headers: res.headers, text, json });
+        } catch (error) {
+          reject(error);
+        }
+      });
+      req.on('error', reject);
+      req.end(payload);
+    });
+  }
+
+  function mutate(method, pathname, body) {
+    return request(pathname, { method, body, authorized: true });
+  }
+  return { cwd, db, dbPath, dashboard, userConfigPath, projectKey, request, mutate, restart };
+}
+
+test('dashboard binds to IPv4 loopback and keeps a supplied database open', async (t) => {
+  const { dashboard, db, request } = await fixture(t);
+  assert.deepEqual(dashboard.server.address(), { address: '127.0.0.1', family: 'IPv4', port: dashboard.port });
+  assert.equal(dashboard.url, 'http://127.0.0.1:' + dashboard.port);
+  assert.ok(dashboard.port > 0);
+  assert.match(dashboard.csrfToken, /^[a-f0-9]{64}$/);
+  const page = await request('/');
+  assert.equal(page.status, 200);
+  assert.match(page.headers['content-type'], /^text\/html/);
+  assert.ok(page.text.includes('content="' + dashboard.csrfToken + '"'));
+  assert.ok(!page.text.includes('{{MSM_CSRF_TOKEN}}'));
+  assert.equal((await request('/index.html')).text, page.text);
+  const elementIds = new Set([...page.text.matchAll(/\sid="([^"]+)"/g)].map(([, id]) => id));
+  for (const id of [
+    'project', 'stats', 'error-banner', 'error-message', 'retry', 'toast-region',
+    'view-memories', 'view-notes', 'view-dreamer',
+    'memories-heading', 'mem-search', 'mem-count', 'mem-scope', 'mem-category', 'mem-status', 'memory-list',
+    'notes-heading', 'note-list', 'notes-load-more',
+    'dream-trigger', 'dream-dryrun', 'dream-hint', 'dream-result', 'dream-status', 'dream-config', 'dream-history',
+    'edit-memory-dialog', 'edit-note-dialog', 'confirm-dialog', 'confirm-title', 'confirm-description',
+  ]) {
+    assert.ok(elementIds.has(id), `Served dashboard HTML is missing id="${id}"`);
+  }
+  assert.match((await request('/app.js')).headers['content-type'], /^text\/javascript/);
+  assert.match((await request('/styles.css')).headers['content-type'], /^text\/css/);
+  assert.equal(page.headers['cache-control'], 'no-store');
+  assert.equal(page.headers['x-content-type-options'], 'nosniff');
+  assert.equal(page.headers['referrer-policy'], 'no-referrer');
+  assert.match(page.headers['content-security-policy'], /frame-ancestors 'none'/);
+  assert.doesNotMatch(page.headers['content-security-policy'], /unsafe-inline/);
+  assert.equal((await request('/api/overview')).headers['cache-control'], 'no-store');
+
+  await dashboard.close();
+  assert.equal(dashboard.server.listening, false);
+  assert.equal(db.prepare('SELECT 1 AS value').get().value, 1);
+});
+
+test('dashboard accepts bare loopback hosts and origins only on the default HTTP port', () => {
+  const bare = ['127.0.0.1', 'localhost', '[::1]'];
+  for (const port of [80, 3847]) {
+    const expectedHosts = bare.map((name) => name + ':' + port);
+    if (port === 80) expectedHosts.push(...bare);
+    const { hosts, origins } = allowedLoopbackGuards(port);
+    assert.deepEqual(hosts, new Set(expectedHosts));
+    assert.deepEqual(origins, new Set(expectedHosts.map((name) => 'http://' + name)));
+  }
+});
+
+test('dashboard rejects invalid hosts, cross-site API reads and writes, and missing CSRF tokens', async (t) => {
+  const { dashboard, request } = await fixture(t);
+  for (const pathname of ['/', '/api/overview']) {
+    for (const host of ['outside.invalid:' + dashboard.port, '127.0.0.1', 'localhost:1', undefined]) {
+      const response = await request(pathname, { setHost: false, headers: host ? { Host: host } : {} });
+      assert.equal(response.status, 403);
+      assert.deepEqual(response.json, { error: 'Forbidden host' });
+    }
+  }
+  for (const name of ['LOCALHOST', '[::1]']) {
+    const host = name + ':' + dashboard.port;
+    const response = await request('/api/overview', { headers: { Host: host, Origin: 'http://' + host.toLowerCase() } });
+    assert.equal(response.status, 200);
+  }
+  for (const headers of [
+    { Origin: 'https://outside.invalid' },
+    { Origin: dashboard.url + '/' },
+    { 'Sec-Fetch-Site': 'cross-site' },
+    { 'Sec-Fetch-Site': 'same-site' },
+  ]) {
+    assert.equal((await request('/api/overview', { headers })).status, 403);
+    assert.equal((await request('/api/dreamer/run', { method: 'POST', authorized: true, headers })).status, 403);
+  }
+  for (const [method, pathname] of [
+    ['POST', '/api/dreamer/run'], ['PATCH', '/api/memories/x'], ['DELETE', '/api/notes/x'], ['PUT', '/index.html'],
+  ]) {
+    for (const token of [undefined, 'bad', 'f'.repeat(64)]) {
+      const response = await request(pathname, { method, headers: token ? { 'X-MSM-Token': token } : {} });
+      assert.equal(response.status, 403);
+      assert.deepEqual(response.json, { error: 'Invalid or missing CSRF token' });
+    }
+  }
+  for (const pathname of ['/../server.mjs', '/%2e%2e/server.mjs', '/%5cserver.mjs', '/%00.js']) {
+    assert.ok([403, 404].includes((await request(pathname)).status), pathname);
+  }
+});
+
+test('dashboard parses only bounded JSON objects for record mutations', async (t) => {
+  const { request, mutate } = await fixture(t);
+  const endpoint = '/api/memories/example';
+  assert.equal((await request(endpoint, { method: 'PATCH', authorized: true, rawBody: '{' })).status, 400);
+  assert.equal((await mutate('PATCH', endpoint, [])).status, 400);
+  assert.equal((await mutate('PATCH', endpoint, { content: 'x'.repeat(256 * 1024) })).status, 413);
+  assert.equal((await request(endpoint, {
+    method: 'PATCH', authorized: true, headers: { 'Transfer-Encoding': 'chunked' }, rawBody: 'x'.repeat(256 * 1024 + 1),
+  })).status, 413);
+});
+
+test('overview combines project and global status counts without returning local paths', async (t) => {
+  const { cwd, db, projectKey, request } = await fixture(t);
+  await writeMemory(db, { cwd, content: 'Local entry' });
+  await writeMemory(db, { scope: 'global', content: 'Global entry' });
+  writeNote(db, { cwd, content: 'Pending note', status: 'pending' });
+  db.prepare("INSERT INTO notes (id, project_key, status, content, created_at, updated_at) VALUES ('global-note', 'global', 'dismissed', 'Fixture note', 1, 1)").run();
+  const file = db.prepare(`
+    INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, mtime_ms, last_indexed_at)
+    VALUES (?, 'omp', 'fixture', 'transcripts-only', 1, 1)
+  `).run(path.join(cwd, 'fixture.jsonl'));
+  db.prepare("INSERT INTO transcript_messages (file_id, seq, role, text, line_no) VALUES (?, 0, 'user', 'Fixture', 1)")
+    .run(file.lastInsertRowid);
+  db.prepare("INSERT INTO dream_runs (id, project_key, runner, status, started_at) VALUES ('fixture', 'dreamer-only', 'http', 'dry-run', 1)").run();
+  const response = await request('/api/overview');
+  assert.equal(response.status, 200);
+  const data = response.json;
+  assert.equal(data.default_project_key, projectKey);
+  assert.deepEqual(data.db, { ok: true, schema_version: MIGRATIONS.at(-1).version, journal_mode: 'wal' });
+  assert.equal(data.embedding.enabled, false);
+  const projects = new Map(data.projects.map((item) => [item.project_key, item]));
+  assert.equal(projects.size, 3);
+  assert.equal(projects.get(projectKey).notes.pending, 1);
+  assert.equal(projects.get('dreamer-only').memories.total, 0);
+  assert.deepEqual(projects.get('transcripts-only').transcripts, { files: 1, messages: 1 });
+  assert.deepEqual(data.global.memories, { active: 1, archived: 0, superseded: 0, total: 1 });
+  assert.deepEqual(data.totals.memories, { active: 2, archived: 0, superseded: 0, total: 2 });
+  assert.deepEqual(data.totals.notes, { active: 0, pending: 1, dismissed: 1, total: 2 });
+  assert.equal(response.text.includes('fixture.jsonl'), false);
+  assert.equal(response.text.includes('dashboard.db'), false);
+});
+
+test('memories edit, archive, restore, rank filtered results, and delete associated search data', async (t) => {
+  const { cwd, db, projectKey, request, mutate } = await fixture(t);
+  const { memory } = await writeMemory(db, {
+    cwd, content: 'Fixture turbine original', source_orchestrator: 'omp', source_session_id: 'session-fixture',
+    metadata: { origin: 'fixture' },
+  });
+  await writeMemory(db, { cwd, content: 'Fixture duplicate' });
+  await writeMemory(db, { scope: 'global', content: 'Fixture turbine global', category: 'ARCHITECTURE' });
+  const endpoint = '/api/memories/' + memory.id;
+  const search = '/api/memories?q=turbine&scope=project&project_key=' + encodeURIComponent(projectKey);
+  const vectors = db.prepare("INSERT INTO memory_embeddings (memory_id, model_id, dims, vector, updated_at) VALUES (?, 'fixture', 1, ?, 1)");
+  vectors.run(memory.id, Buffer.from([0, 0, 128, 63]));
+  const countVectors = db.prepare('SELECT COUNT(*) AS count FROM memory_embeddings WHERE memory_id = ?');
+
+  const list = await request('/api/memories');
+  assert.equal(list.json.mode, 'list');
+  assert.equal(list.json.memories.length, 3);
+  assert.equal((await request(search)).json.mode, 'fts-only');
+  assert.deepEqual((await request(search)).json.memories.map(({ id }) => id), [memory.id]);
+  for (const body of [{ content: ' ' }, { importance: 5.5 }, { category: 'invalid' }, { status: 'invalid' }]) {
+    assert.equal((await mutate('PATCH', endpoint, body)).status, 400);
+  }
+  assert.equal((await mutate('PATCH', endpoint, { content: '  FIXTURE   duplicate  ' })).status, 409);
+  const edited = await mutate('PATCH', endpoint, {
+    content: 'Fixture turbine edited', category: 'ARCHITECTURE', importance: 5,
+  });
+  assert.equal(edited.status, 200);
+  assert.equal(edited.json.memory.normalized_hash, hashNormalizedContent('Fixture turbine edited'));
+  assert.equal(edited.json.memory.importance, 5);
+  assert.equal(edited.json.memory.source_session_id, 'session-fixture');
+  assert.deepEqual(JSON.parse(edited.json.memory.metadata_json), { origin: 'fixture' });
+  assert.equal(countVectors.get(memory.id).count, 0);
+
+  assert.equal((await mutate('PATCH', endpoint, { status: 'archived' })).json.memory.status, 'archived');
+  assert.equal((await request(search)).json.memories.length, 0);
+  const archived = await request(search + '&status=archived&category=ARCHITECTURE&limit=1');
+  assert.deepEqual(archived.json.memories.map(({ id }) => id), [memory.id]);
+  assert.equal((await request(search + '&status=all&category=GENERAL')).json.memories.length, 0);
+  assert.equal((await request('/api/memories?q=turbine&scope=global')).json.memories[0].project_key, 'global');
+  assert.equal((await mutate('PATCH', endpoint, { status: 'active' })).json.memory.status, 'active');
+  vectors.run(memory.id, Buffer.from([0, 0, 128, 63]));
+
+  const removed = await mutate('DELETE', endpoint);
+  assert.deepEqual(removed.json, { deleted: true, id: memory.id });
+  assert.equal(countVectors.get(memory.id).count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM memories_fts WHERE memories_fts MATCH 'edited'").get().count, 0);
+  assert.equal((await request(search)).json.memories.length, 0);
+  assert.equal((await mutate('DELETE', endpoint)).status, 404);
+  assert.equal((await mutate('PATCH', endpoint, { status: 'active' })).status, 404);
+});
+
+test('dashboard leaves embeddings lazy and keeps memory edits when re-embedding fails', async (t) => {
+  const attempts = [];
+  const embeddingEngine = {
+    getStatus: () => ({ enabled: true, model: 'fixture-model', available: false }),
+    async embed(text) {
+      attempts.push(text);
+      if (text === 'Unembeddable edit') throw new Error('Fixture embedding failure');
+      return new Float32Array([1, 0]);
+    },
+  };
+  const { cwd, db, request, mutate } = await fixture(t, { embeddingEngine });
+  const { memory } = await writeMemory(db, { cwd, content: 'Original memory' });
+  assert.equal((await request('/api/overview')).json.embedding.status, 'uninitialized');
+  assert.deepEqual(attempts, []);
+  const endpoint = '/api/memories/' + memory.id;
+  const embedded = await mutate('PATCH', endpoint, { content: 'Embeddable edit' });
+  assert.equal(embedded.status, 200);
+  const vector = db.prepare('SELECT model_id, dims FROM memory_embeddings WHERE memory_id = ?');
+  assert.deepEqual({ ...vector.get(memory.id) }, { model_id: 'fixture-model', dims: 2 });
+  const failedEmbedding = await mutate('PATCH', endpoint, { content: 'Unembeddable edit' });
+  assert.equal(failedEmbedding.status, 200);
+  assert.equal(failedEmbedding.json.memory.content, 'Unembeddable edit');
+  assert.equal(vector.get(memory.id), undefined);
+  assert.deepEqual(attempts, ['Embeddable edit', 'Unembeddable edit']);
+});
+
+test('record PATCHes reject stale revisions and preserve fields omitted by partial updates', async (t) => {
+  const { cwd, db, mutate } = await fixture(t);
+  const { memory } = await writeMemory(db, { cwd, content: 'Memory before edits', category: 'WORKFLOW' });
+  const note = writeNote(db, { cwd, content: 'Note before edits', surface_condition: 'on start' });
+  const staleMessage = { error: 'Record was modified by another writer; refresh and try again.' };
+
+  for (const [table, record, status, change] of [
+    ['memories', memory, 'archived', { importance: 5 }],
+    ['notes', note, 'dismissed', { surface_condition: null }],
+  ]) {
+    const endpoint = '/api/' + table + '/' + record.id;
+    const read = () => ({ ...db.prepare('SELECT * FROM ' + table + ' WHERE id = ?').get(record.id) });
+    const expected_updated_at = String(record.updated_at);
+    const invalid = await mutate('PATCH', endpoint, { ...change, expected_updated_at: record.updated_at });
+    assert.equal(invalid.status, 400, invalid.text);
+    assert.equal((await mutate('PATCH', endpoint, { ...change, expected_updated_at: ' ' })).status, 400);
+    const quickAction = await mutate('PATCH', endpoint, { expected_updated_at, status });
+    assert.equal(quickAction.status, 200, quickAction.text);
+    const afterStatus = read();
+    assert.equal(afterStatus.status, status);
+    assert.ok(afterStatus.updated_at > record.updated_at);
+
+    const stale = await mutate('PATCH', endpoint, { ...change, expected_updated_at });
+    assert.equal(stale.status, 409, stale.text);
+    assert.deepEqual(stale.json, staleMessage);
+    assert.deepEqual(read(), afterStatus);
+
+    const applied = await mutate('PATCH', endpoint, { ...change, expected_updated_at: String(afterStatus.updated_at) });
+    assert.equal(applied.status, 200, applied.text);
+    const afterEdit = read();
+    assert.deepEqual(afterEdit, { ...afterStatus, ...change, updated_at: afterEdit.updated_at });
+    assert.ok(afterEdit.updated_at > afterStatus.updated_at);
+    assert.equal((await mutate('PATCH', endpoint, change)).status, 200);
+    assert.equal(read().status, status);
+  }
+});
+
+test('memory PATCH rejects explicit superseding and supports editing and restoring superseded memories', async (t) => {
+  const { cwd, db, mutate } = await fixture(t);
+  const { memory } = await writeMemory(db, { cwd, content: 'Original fixture memory' });
+  const { memory: successor } = await writeMemory(db, { cwd, content: 'Replacement fixture memory' });
+  const endpoint = '/api/memories/' + memory.id;
+  const read = () => db.prepare('SELECT * FROM memories WHERE id = ?').get(memory.id);
+  const before = read();
+  assert.equal(before.status, 'active');
+
+  const rejected = await mutate('PATCH', endpoint, { status: 'superseded' });
+  assert.equal(rejected.status, 400, rejected.text);
+  assert.deepEqual(rejected.json, { error: 'Memories cannot be marked superseded manually.' });
+  assert.deepEqual(read(), before);
+
+  archiveMemory(db, { id: memory.id, superseded_by: successor.id });
+  const edited = await mutate('PATCH', endpoint, { importance: 5 });
+  assert.equal(edited.status, 200, edited.text);
+  assert.equal(edited.json.memory.importance, 5);
+  assert.equal(edited.json.memory.status, 'superseded');
+  assert.equal(edited.json.memory.superseded_by, successor.id);
+
+  const restored = await mutate('PATCH', endpoint, { status: 'active' });
+  assert.equal(restored.status, 200, restored.text);
+  assert.equal(read().status, 'active');
+  assert.equal(read().superseded_by, null);
+});
+
+test('notes filter, edit, dismiss, restore and delete', async (t) => {
+  const { cwd, db, projectKey, request, mutate } = await fixture(t);
+  const note = writeNote(db, { cwd, content: 'Original note', status: 'pending', surface_condition: 'on start' });
+  const endpoint = '/api/notes/' + note.id;
+  const listing = '/api/notes?project_key=' + encodeURIComponent(projectKey);
+  assert.equal((await request(listing + '&status=active')).json.notes.length, 0);
+  assert.equal((await request(listing + '&status=pending')).json.notes[0].surface_condition, 'on start');
+  for (const patch of [{ surface_condition: 1 }, { content: '' }, { status: 'archived' }]) {
+    assert.equal((await mutate('PATCH', endpoint, patch)).status, 400);
+  }
+  const edited = await mutate('PATCH', endpoint, { content: 'Edited note', surface_condition: null, status: 'dismissed' });
+  assert.equal(edited.json.note.content, 'Edited note');
+  assert.equal(edited.json.note.surface_condition, null);
+  assert.equal((await request(listing + '&status=dismissed')).json.notes[0].id, note.id);
+  assert.equal((await mutate('PATCH', endpoint, { status: 'active' })).json.note.status, 'active');
+  assert.deepEqual((await mutate('DELETE', endpoint)).json, { deleted: true, id: note.id });
+  assert.equal((await request(listing + '&status=all')).json.notes.length, 0);
+  assert.equal((await mutate('PATCH', endpoint, { status: 'active' })).status, 404);
+  assert.equal((await mutate('DELETE', endpoint)).status, 404);
+});
+
+test('note cursors page through tied timestamps and reject malformed boundaries', async (t) => {
+  const { db, projectKey, request } = await fixture(t);
+  const insert = db.prepare(`
+    INSERT INTO notes (id, project_key, status, content, created_at, updated_at)
+    VALUES (?, ?, ?, 'Note fixture', 1, ?)
+  `);
+  const ids = Array.from({ length: 105 }, (_, i) => 'fixture-' + String(i).padStart(3, '0'));
+  for (const [i, id] of ids.entries()) insert.run(id, projectKey, 'active', i < 12 ? 1 : 2);
+  insert.run('other-project', 'other', 'active', 2);
+  insert.run('pending-note', projectKey, 'pending', 2);
+  const listing = '/api/notes?project_key=' + encodeURIComponent(projectKey) + '&status=active';
+  for (const size of [100, 17]) {
+    const url = listing + (size === 100 ? '' : '&limit=' + size);
+    const actual = [];
+    let cursor = null;
+    for (let page = 0; page < Math.ceil(ids.length / size); page++) {
+      const response = await request(url + (cursor ? '&cursor=' + cursor : ''));
+      assert.equal(response.status, 200, response.text);
+      assert.equal(response.json.notes.length, Math.min(size, ids.length - actual.length));
+      actual.push(...response.json.notes.map(({ id }) => id));
+      cursor = response.json.next_cursor;
+      if (actual.length < ids.length) assert.match(cursor, /^[A-Za-z0-9_-]+$/);
+    }
+    assert.equal(cursor, null);
+    assert.deepEqual(actual, ids.toReversed());
+  }
+
+  for (const cursor of ['', 'not!base64', Buffer.from('["2","fixture-001"]').toString('base64url'),
+    Buffer.from('[2,""]').toString('base64url')]) {
+    const response = await request(listing + '&cursor=' + encodeURIComponent(cursor));
+    assert.equal(response.status, 400, response.text);
+    assert.deepEqual(response.json, { error: 'Invalid cursor' });
+  }
+});
+
+test('dashboard CLI dry run uses restricted arguments in an empty temporary directory', async (t) => {
+  const { cwd, db, dbPath, projectKey, userConfigPath, request, mutate } = await fixture(t);
+  const { memory } = await writeMemory(db, { cwd, content: 'Keep this fixture memory' });
+  const script = path.join(cwd, 'cli-fixture.mjs');
+  await writeFile(script, `
+    import { readdirSync } from 'node:fs';
+    console.log(JSON.stringify({
+      summary: JSON.stringify({ cwd: process.cwd(), files: readdirSync('.'), args: process.argv.slice(2, -1) }),
+      operations: [{ type: 'archive', id: ${JSON.stringify(memory.id)}, reason: 'Fixture proposal' }],
+    }));
+  `);
+  await writeFile(userConfigPath, JSON.stringify({
+    dbPath,
+    dreamer: { enabled: true, mode: 'cli', cli: {
+      orchestrator: 'codex', command: process.execPath,
+      args: [script, '--cd', cwd, '--sandbox', 'danger-full-access', '--enable', 'shell_tool'],
+    } },
+  }));
+  const info = await request('/api/dreamer');
+  assert.equal(info.status, 200, info.text);
+  assert.equal(info.json.config.authorized, true);
+  const read = () => db.prepare('SELECT * FROM memories ORDER BY id').all();
+  const before = read();
+  const response = await mutate('POST', '/api/dreamer/run', {
+    project_key: projectKey, dry_run: true, expected_config_fingerprint: info.json.config.config_fingerprint,
+  });
+  assert.equal(response.status, 200, response.text);
+  assert.equal(response.json.status, 'dry-run');
+  assert.equal(response.json.memoriesArchived, 1);
+  const invocation = JSON.parse(response.json.summary);
+  assert.notEqual(invocation.cwd, await realpath(cwd));
+  assert.equal(await realpath(path.dirname(invocation.cwd)), await realpath(os.tmpdir()));
+  assert.match(path.basename(invocation.cwd), /^msm-dream-/);
+  assert.deepEqual(invocation.files, []);
+  assert.deepEqual(invocation.args, [
+    '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config',
+    '--ignore-rules', '-c', 'mcp_servers={}', '-c', 'features.shell_tool=false',
+  ]);
+  await assert.rejects(access(invocation.cwd), { code: 'ENOENT' });
+  assert.deepEqual(read(), before);
+  assert.equal(db.prepare('SELECT status FROM dream_runs WHERE id = ?').get(response.json.runId).status, 'dry-run');
+});
+
+test('Dreamer reports disabled and validates manual run input', async (t) => {
+  const { projectKey, request, mutate } = await fixture(t);
+  assert.equal((await request('/api/dreamer')).json.config.enabled, false);
+  const endpoint = '/api/dreamer/run';
+  for (const body of [{}, { project_key: 'global' }, { project_key: '' }, { project_key: projectKey, dry_run: 'true' }]) {
+    assert.equal((await mutate('POST', endpoint, body)).status, 400);
+  }
+  const result = await mutate('POST', endpoint, { project_key: projectKey, dry_run: true });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.json, { projectKey, skipped: true, reason: 'disabled' });
+});
+
+test('Dreamer browses other workspaces and runs only for the launch workspace with current settings', async (t) => {
+  let runnerCalls = 0;
+  const runner = createServer((req, res) => {
+    runnerCalls++;
+    req.resume();
+    res.writeHead(204).end();
+  });
+  t.after(() => new Promise((resolve, reject) => runner.close((error) => error ? reject(error) : resolve())));
+  runner.listen(0, '127.0.0.1');
+  await once(runner, 'listening');
+  const dreamer = {
+    enabled: true, mode: 'http',
+    http: { baseUrl: 'http://127.0.0.1:' + runner.address().port, model: 'fixture-model' },
+  };
+  const { cwd, db, projectKey, userConfigPath, request, mutate } = await fixture(t, { dreamer });
+  const otherCwd = path.join(cwd, 'other-workspace');
+  await mkdir(otherCwd);
+  await writeFile(path.join(otherCwd, '.multi-sub-memory.jsonc'), JSON.stringify({ dreamer: { enabled: false } }));
+  const { projectKey: otherProjectKey } = resolveProjectKey(otherCwd);
+  assert.notEqual(otherProjectKey, projectKey);
+  assert.equal(loadConfig({ cwd: otherCwd, userConfigPath, env: {} }).dreamer.enabled, false);
+
+  const info = await request('/api/dreamer');
+  assert.equal(info.status, 200);
+  assert.equal(info.json.runnable_project_key, projectKey);
+  assert.equal(info.json.config.enabled, true);
+  const otherHistory = await request('/api/dreamer?project_key=' + encodeURIComponent(otherProjectKey));
+  assert.equal(otherHistory.status, 200);
+  assert.equal(otherHistory.json.runnable_project_key, projectKey);
+  for (const dry_run of [false, true]) {
+    const response = await mutate('POST', '/api/dreamer/run', { project_key: otherProjectKey, dry_run });
+    assert.equal(response.status, 400);
+    assert.deepEqual(response.json, { error: 'Dreamer can only run for the workspace this dashboard was launched in' });
+  }
+
+  await writeFile(path.join(cwd, '.multi-sub-memory.jsonc'), JSON.stringify({ dreamer: { enabled: false } }));
+  const disabledInfo = await request('/api/dreamer');
+  assert.equal(disabledInfo.status, 200, disabledInfo.text);
+  assert.equal(disabledInfo.json.config.enabled, false);
+  assert.notEqual(disabledInfo.json.config.config_fingerprint, info.json.config.config_fingerprint);
+  const disabled = await mutate('POST', '/api/dreamer/run', { project_key: projectKey, dry_run: true });
+  assert.equal(disabled.status, 200);
+  assert.deepEqual(disabled.json, { projectKey, skipped: true, reason: 'disabled' });
+  assert.equal(runnerCalls, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM dream_runs').get().count, 0);
+});
+
+test('Dreamer uses fresh authorization, redacts secrets, and records a dry run without applying it', async (t) => {
+  const secret = 'example-test-credential-for-dashboard';
+  const env = { OPENAI_API_KEY: secret };
+  let reply;
+  const received = [];
+  const runner = createServer(async (req, res) => {
+    for await (const chunk of req) void chunk;
+    received.push({ url: req.url, authorization: req.headers.authorization });
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply) } }] }));
+  });
+  t.after(() => new Promise((resolve, reject) => runner.close((error) => error ? reject(error) : resolve())));
+  runner.listen(0, '127.0.0.1');
+  await once(runner, 'listening');
+  const endpointHost = '127.0.0.1:' + runner.address().port;
+  const dreamer = {
+    enabled: true, mode: 'http',
+    http: { baseUrl: 'http://' + endpointHost + '/v1?credential=' + secret, model: 'fixture-model', apiKeyEnv: 'OPENAI_API_KEY' },
+  };
+  const originalDreamer = { ...dreamer, http: { ...dreamer.http, baseUrl: 'https://previous-runner.invalid/v1' } };
+  const { cwd, db, dbPath, projectKey, userConfigPath, request, mutate, restart } = await fixture(t, {
+    dreamer: originalDreamer, env,
+  });
+  const { memory } = await writeMemory(db, { cwd, content: 'Review this fixture memory' });
+  const signedUrl = 'https://bucket.example.com/obj?X-Amz-Algorithm=AWS4-HMAC-SHA256'
+    + '&X-Amz-Signature=deadbeef123456&X-Amz-Credential=fixture-credential';
+  reply = {
+    summary: 'Confirmed ' + secret + ' at https://plan-user@fixture.invalid?access_token=plan-token&label=public ' + signedUrl
+      + " GET '/obj?X-Amz-Signature=fixture-signature' //plan-user:plan-pass@bucket.example.com/obj?token=fixture-token"
+      + ' GET `/obj?X-Amz-Signature=fixture-backtick-signature`'
+      + ' See /var/log/dreamer //comment',
+    operations: [{ type: 'archive', id: memory.id, reason: 'Review ' + secret }],
+  };
+  const expectedSummary = 'Confirmed [redacted] at https://[REDACTED]@fixture.invalid?access_token=[REDACTED]&label=[REDACTED]'
+    + ' https://bucket.example.com/obj?X-Amz-Algorithm=[REDACTED]&X-Amz-Signature=[REDACTED]&X-Amz-Credential=[REDACTED]'
+    + " GET '/obj?X-Amz-Signature=[REDACTED]' //[REDACTED]@bucket.example.com/obj?token=[REDACTED]"
+    + ' GET `/obj?X-Amz-Signature=[REDACTED]`'
+    + ' See /var/log/dreamer //comment';
+  const original = await request('/api/dreamer');
+  assert.equal(original.status, 200, original.text);
+  assert.equal(original.json.config.runner.endpoint_host, 'previous-runner.invalid');
+  assert.match(original.json.config.config_fingerprint, /^[a-f0-9]{64}$/);
+  await writeFile(userConfigPath, JSON.stringify({ dbPath, dreamer }));
+
+  const lease = 'dream:' + projectKey;
+  const leasedAt = Date.now();
+  assert.equal(acquireLease(db, lease, 'fixture-owner', 60_000, leasedAt), true);
+  acquireLease(db, 'dream:expired', 'fixture-owner', 1, leasedAt - 100);
+  acquireLease(db, 'index:fixture', 'fixture-owner', 60_000, leasedAt);
+  const endpoint = '/api/dreamer/run';
+  const body = { project_key: projectKey, dry_run: true };
+  const info = await request('/api/dreamer');
+  assert.equal(info.status, 200);
+  assert.notEqual(info.json.config.config_fingerprint, original.json.config.config_fingerprint);
+  assert.equal(info.json.config.config_fingerprint, (await request('/api/dreamer')).json.config.config_fingerprint);
+  assert.deepEqual(info.json.active_leases, [{
+    lease_key: lease, project_key: projectKey, owner: 'fixture-owner', acquired_at: leasedAt, expires_at: leasedAt + 60_000,
+  }]);
+  assert.deepEqual(info.json.config.runner, {
+    type: 'http', model: 'fixture-model', endpoint_host: endpointHost, executable: null, api_key_configured: true,
+  });
+  assert.ok(!info.text.includes(secret));
+  assert.ok(!info.text.includes('OPENAI_API_KEY'));
+  assert.ok(!info.text.includes('?credential='));
+  assert.equal((await mutate('POST', endpoint, body)).json.reason, 'lease-held');
+  releaseLease(db, lease, 'fixture-owner');
+  const invalidFingerprint = await mutate('POST', endpoint, { ...body, expected_config_fingerprint: true });
+  assert.equal(invalidFingerprint.status, 400, invalidFingerprint.text);
+  const stale = await mutate('POST', endpoint, { ...body, expected_config_fingerprint: original.json.config.config_fingerprint });
+  assert.equal(stale.status, 409, stale.text);
+  assert.deepEqual(stale.json, { error: 'Dreamer configuration changed; refresh before running.' });
+  assert.equal(received.length, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM dream_runs').get().count, 0);
+
+  await writeFile(path.join(cwd, '.multi-sub-memory.jsonc'), JSON.stringify({ dreamer }));
+  await writeFile(userConfigPath, '{}');
+  const unauthorized = await request('/api/dreamer');
+  assert.equal(unauthorized.status, 200, unauthorized.text);
+  assert.equal(unauthorized.json.config.authorized, false);
+  assert.notEqual(unauthorized.json.config.config_fingerprint, info.json.config.config_fingerprint);
+  const revoked = await mutate('POST', endpoint, { ...body, expected_config_fingerprint: info.json.config.config_fingerprint });
+  assert.equal(revoked.status, 409, revoked.text);
+  const rejected = await mutate('POST', endpoint, body);
+  assert.equal(rejected.status, 500);
+  assert.ok(!rejected.text.includes(secret));
+  assert.equal(received.length, 0);
+  await writeFile(userConfigPath, JSON.stringify({ dbPath, dreamer }));
+
+  const result = await mutate('POST', endpoint, { ...body, expected_config_fingerprint: info.json.config.config_fingerprint });
+  assert.equal(result.status, 200, result.text);
+  assert.equal(result.json.status, 'dry-run');
+  assert.equal(result.json.memoriesArchived, 1);
+  assert.equal(result.json.summary, expectedSummary);
+  assert.ok(!result.text.includes(secret));
+  assert.equal(received.length, 1);
+  assert.equal(new URL(received[0].url, 'http://' + endpointHost).pathname, '/v1/chat/completions');
+  assert.equal(received[0].authorization, 'Bearer ' + secret);
+  assert.equal(db.prepare('SELECT status FROM memories WHERE id = ?').get(memory.id).status, 'active');
+  const legacyUrl = 'https://old-user:old-pass@example.invalid/v1?format=json&AcCeSs_ToKeN=rotated-legacy-token'
+    + '&%61pi_key=rotated-api-key&session_id=rotated-session#result';
+  const legacySignedUrl = 'https://legacy.example.com/obj?X-Goog-Signature=old-signature&%ZZ=opaque-value#object';
+  const legacyText = 'Bearer old-bearer-value, ' + legacyUrl + ', ' + legacySignedUrl + ', '
+    + 'sk-legacy-test-token, api_key=old-assignment-value, Authorization: Basic dXNlcjpzZWNyZXQ=, '
+    + 'Basic dGVzdDpmaXh0dXJl, Token old-token-value, Authorization: Custom old-custom-value '
+    + 'GET /obj?X-Amz-Signature=old-target-signature //old-user:old-pass@legacy.example.com/obj?X-Amz-Signature=old-rel-sig'
+    + ' GET `/obj?X-Amz-Signature=old-backtick-signature`';
+  db.prepare(`
+    INSERT INTO dream_runs (id, project_key, runner, status, started_at, summary, error)
+    VALUES ('legacy', ?, 'http', 'failed', 1, ?, ?)
+  `).run(projectKey, legacyText, legacyText);
+  const reopenedDb = await restart({ OPENAI_API_KEY: 'rotated-example-test-credential' });
+  const storedRun = reopenedDb.prepare('SELECT * FROM dream_runs WHERE id = ?').get(result.json.runId);
+  assert.ok(!JSON.stringify(storedRun).includes(secret));
+  assert.equal(storedRun.summary, expectedSummary);
+  const history = await request('/api/dreamer?project_key=' + encodeURIComponent(projectKey));
+  assert.equal(history.status, 200);
+  assert.ok(!history.text.includes(secret));
+  assert.equal(history.json.active_leases.length, 0);
+  const dryRun = history.json.runs.find((run) => run.id === result.json.runId);
+  assert.equal(dryRun.status, 'dry-run');
+  assert.equal(dryRun.summary, storedRun.summary);
+  assert.ok(history.json.runs.some(({ id, status }) => id !== 'legacy' && status === 'failed'));
+  const legacy = history.json.runs.find(({ id }) => id === 'legacy');
+  const sanitized = 'Bearer [redacted], https://[REDACTED]@example.invalid/v1?format=[REDACTED]&AcCeSs_ToKeN=[REDACTED]'
+    + '&%61pi_key=[REDACTED]&session_id=[REDACTED]#result, '
+    + 'https://legacy.example.com/obj?X-Goog-Signature=[REDACTED]&%ZZ=[REDACTED]#object, [redacted], api_key=[redacted], '
+    + 'Authorization: [redacted], Basic [redacted], Token [redacted], Authorization: [redacted] '
+    + 'GET /obj?X-Amz-Signature=[REDACTED] //[REDACTED]@legacy.example.com/obj?X-Amz-Signature=[REDACTED]'
+    + ' GET `/obj?X-Amz-Signature=[REDACTED]`';
+  assert.equal(legacy.summary, sanitized);
+  assert.equal(legacy.error, sanitized);
+});

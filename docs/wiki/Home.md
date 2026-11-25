@@ -12,3 +12,4 @@ Use this wiki for durable project knowledge. [GitHub Issues](https://github.com/
 | [Indexers](Indexers.md) | Incremental transcript indexing for OMP, Claude Code, Codex, and Antigravity, plus background refresh |
 | [Dreamer](Dreamer.md) | Memory consolidation, runner configuration, and automatic cadence |
 | [Importers](Importers.md) | Read-only migration from Magic Context, OMP mnemopi, and Markdown checklists |
+| [Dashboard](Dashboard.md) | Local browser UI, REST routes, and request security |

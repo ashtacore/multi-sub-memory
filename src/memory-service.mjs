@@ -16,6 +16,18 @@ export const NOTE_STATUSES = Object.freeze(['active', 'pending', 'dismissed']);
 export const DEFAULT_LIST_LIMIT = 50;
 export const MAX_LIST_LIMIT = 200;
 
+export class StaleRecordError extends Error {
+  constructor() {
+    super('Record was modified by another writer; refresh and try again.');
+  }
+}
+
+function checkRevision(row, expectedUpdatedAt) {
+  if (expectedUpdatedAt !== undefined && String(row.updated_at) !== expectedUpdatedAt) {
+    throw new StaleRecordError();
+  }
+}
+
 const PROJECT_KEY_TTL_MS = 5000;
 const PROJECT_KEY_CACHE_LIMIT = 64;
 const projectKeyCache = new Map();
@@ -161,7 +173,7 @@ export async function writeMemory(db, input, context = {}) {
     const updated = db.prepare(`
       UPDATE memories SET content = ?, category = ?, importance = ?, status = 'active',
         superseded_by = NULL, source_orchestrator = ?, source_session_id = ?,
-        metadata_json = ?, updated_at = ?
+        metadata_json = ?, updated_at = MAX(?, updated_at + 1)
       WHERE id = ? RETURNING *
     `).get(
       reactivated ? content : existing.content, input.category ?? existing.category,
@@ -195,6 +207,7 @@ export async function updateMemory(db, input, context = {}) {
   try {
     result = inWriteTransaction(db, () => {
       const existing = memoryRow(db, input.id);
+      checkRevision(existing, context.expectedUpdatedAt);
       const scope = input.scope ?? existing.scope;
       const projectKey = scope === existing.scope ? existing.project_key : targetProjectKey;
       const status = input.status ?? existing.status;
@@ -204,18 +217,18 @@ export async function updateMemory(db, input, context = {}) {
       const changedContent = content !== undefined && content !== existing.content;
       const row = db.prepare(`
         UPDATE memories SET project_key = ?, scope = ?, content = ?, normalized_hash = ?,
-          category = ?, importance = ?, status = ?, superseded_by = ?, metadata_json = ?, updated_at = ?
+          category = ?, importance = ?, status = ?, superseded_by = ?, metadata_json = ?, updated_at = MAX(?, updated_at + 1)
         WHERE id = ? RETURNING *
       `).get(
         projectKey, scope, content ?? existing.content,
         changedContent ? hashNormalizedContent(content) : existing.normalized_hash,
         input.category ?? existing.category, input.importance ?? existing.importance, status,
-        status === 'superseded' ? existing.superseded_by : null,
+        input.status === undefined || status === 'superseded' ? existing.superseded_by : null,
         input.metadata === undefined ? existing.metadata_json : JSON.stringify(input.metadata),
         Date.now(), input.id,
       );
       if (changedContent) invalidateEmbedding(db, input.id);
-      return { memory: formatMemory(row), changedContent };
+      return { memory: context.rawRow ? row : formatMemory(row), changedContent };
     });
   } catch (error) {
     if (error.errcode === 2067 || error.code === 'SQLITE_CONSTRAINT_UNIQUE'
@@ -224,7 +237,7 @@ export async function updateMemory(db, input, context = {}) {
     }
     throw error;
   }
-  if (result.changedContent) void storeEmbedding(db, result.memory, context.embeddingEngine);
+  if (result.changedContent) void storeEmbedding(db, result.memory, context.embeddingEngine, context.embeddingModel);
   return result.memory;
 }
 
@@ -237,7 +250,7 @@ export function archiveMemory(db, input) {
       if (!successor) throw new Error(`Memory not found for superseded_by: ${supersededBy}`);
     }
     const row = db.prepare(`
-      UPDATE memories SET status = ?, superseded_by = ?, updated_at = ? WHERE id = ? RETURNING *
+      UPDATE memories SET status = ?, superseded_by = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ? RETURNING *
     `).get(supersededBy === null ? 'archived' : 'superseded', supersededBy, Date.now(), input.id);
     return formatMemory(requireRow(row, 'Memory', input.id));
   });
@@ -322,17 +335,24 @@ export function readNotes(db, input = {}, context = {}) {
   });
 }
 
-export function updateNote(db, input) {
+export function updateNote(db, input, { expectedUpdatedAt } = {}) {
   const content = input.content === undefined ? null : requireContent(input.content);
-  const row = db.prepare(`
-    UPDATE notes SET content = COALESCE(?, content), status = COALESCE(?, status),
-      surface_condition = CASE WHEN ? THEN ? ELSE surface_condition END, updated_at = ?
-    WHERE id = ? RETURNING *
-  `).get(
-    content, input.status ?? null, Number(input.surface_condition !== undefined),
-    input.surface_condition ?? null, Date.now(), input.id,
-  );
-  return requireRow(row, 'Note', input.id);
+  function update() {
+    if (expectedUpdatedAt !== undefined) {
+      const existing = db.prepare('SELECT updated_at FROM notes WHERE id = ?').get(input.id);
+      checkRevision(requireRow(existing, 'Note', input.id), expectedUpdatedAt);
+    }
+    const row = db.prepare(`
+      UPDATE notes SET content = COALESCE(?, content), status = COALESCE(?, status),
+        surface_condition = CASE WHEN ? THEN ? ELSE surface_condition END, updated_at = MAX(?, updated_at + 1)
+      WHERE id = ? RETURNING *
+    `).get(
+      content, input.status ?? null, Number(input.surface_condition !== undefined),
+      input.surface_condition ?? null, Date.now(), input.id,
+    );
+    return requireRow(row, 'Note', input.id);
+  }
+  return expectedUpdatedAt === undefined ? update() : inWriteTransaction(db, update);
 }
 
 export function dismissNote(db, id) {

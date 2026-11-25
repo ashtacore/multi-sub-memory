@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="msm-csrf-token" content="{{MSM_CSRF_TOKEN}}">
+  <title>multi-sub-memory dashboard</title>
+  <link rel="icon" href="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="wrap header-layout">
+      <div>
+        <p class="product">multi-sub-memory</p>
+        <h1 data-testid="app-title">Memory dashboard</h1>
+        <div class="health" aria-label="System health">
+          <span class="badge" data-testid="health-db">Checking database…</span>
+          <span class="badge" data-testid="health-embedding">Checking embeddings…</span>
+        </div>
+      </div>
+      <label class="workspace">Project
+        <select id="project" data-testid="project-select">
+          <option value="all">All Projects</option>
+          <option value="global">Global</option>
+        </select>
+      </label>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="stats" id="stats" data-testid="stats" aria-label="Storage statistics" aria-live="polite"></section>
+    <nav class="navigation" aria-label="Dashboard views">
+      <button type="button" data-view="memories" data-testid="nav-memories" aria-pressed="true" aria-controls="view-memories">Memories</button>
+      <button type="button" data-view="notes" data-testid="nav-notes" aria-pressed="false" aria-controls="view-notes">Notes</button>
+      <button type="button" data-view="dreamer" data-testid="nav-dreamer" aria-pressed="false" aria-controls="view-dreamer">Dreamer</button>
+    </nav>
+    <div class="banner error" data-testid="error-banner" id="error-banner" hidden>
+      <span id="error-message" role="alert"></span>
+      <button type="button" id="retry">Retry</button>
+    </div>
+
+    <section class="panel" id="view-memories" data-testid="view-memories" aria-labelledby="memories-heading">
+      <div class="panel-heading">
+        <h2 id="memories-heading" tabindex="-1">Memories</h2>
+        <span class="muted" data-testid="mem-count" id="mem-count" role="status"></span>
+      </div>
+      <div class="filters">
+        <label class="search">Search
+          <input id="mem-search" data-testid="mem-search" type="search" placeholder="Search memory content">
+        </label>
+        <label>Scope
+          <select id="mem-scope" data-testid="mem-scope">
+            <option value="all">All scopes</option>
+            <option value="project">Project</option>
+            <option value="global">Global</option>
+          </select>
+        </label>
+        <label>Category
+          <select id="mem-category" data-testid="mem-category"><option value="all">All categories</option></select>
+        </label>
+        <label>Status
+          <select id="mem-status" data-testid="mem-status">
+            <option value="active">Active</option>
+            <option value="archived">Archived</option>
+            <option value="superseded">Superseded</option>
+            <option value="all">All statuses</option>
+          </select>
+        </label>
+      </div>
+      <div id="memory-list" class="cards"></div>
+    </section>
+
+    <section class="panel" id="view-notes" data-testid="view-notes" aria-labelledby="notes-heading" hidden>
+      <div class="panel-heading"><h2 id="notes-heading" tabindex="-1">Notes</h2></div>
+      <div id="note-statuses" class="subnav" role="group" aria-label="Note status">
+        <button type="button" aria-pressed="true" data-status="active" data-testid="notes-status-active">Active</button>
+        <button type="button" aria-pressed="false" data-status="pending" data-testid="notes-status-pending">Pending</button>
+        <button type="button" aria-pressed="false" data-status="dismissed" data-testid="notes-status-dismissed">Dismissed</button>
+      </div>
+      <div id="note-list" class="cards"><p class="muted" role="status">Loading notes…</p></div>
+      <button type="button" id="notes-load-more" aria-controls="note-list" hidden>Load more</button>
+    </section>
+
+    <section class="panel" id="view-dreamer" data-testid="view-dreamer" aria-labelledby="dreamer-heading" hidden>
+      <div class="panel-heading"><h2 id="dreamer-heading" tabindex="-1">Dreamer</h2></div>
+      <div class="dream-summary">
+        <section class="card" data-testid="dream-status"><h3>Run status</h3><div id="dream-status" aria-live="polite">Checking leases…</div></section>
+        <section class="card" data-testid="dream-config"><h3>Configuration</h3><div id="dream-config">Loading configuration…</div></section>
+      </div>
+      <div class="dream-controls">
+        <div class="actions">
+          <button type="button" class="primary" id="dream-trigger" data-testid="dream-trigger" aria-describedby="dream-hint" disabled>Trigger Dream</button>
+          <button type="button" id="dream-dryrun" data-testid="dream-dryrun" aria-describedby="dream-hint" disabled>Dry Run</button>
+        </div>
+        <p class="muted" id="dream-hint" data-testid="dream-hint" role="status">Loading Dreamer status…</p>
+      </div>
+      <p class="banner" id="dream-result" data-testid="dream-result" role="status" hidden></p>
+      <h3 class="history-heading">Run history</h3>
+      <div id="dream-history" data-testid="dream-history"></div>
+    </section>
+  </main>
+
+  <dialog id="edit-memory-dialog" data-testid="edit-memory-dialog" aria-labelledby="edit-memory-title">
+    <form>
+      <h2 id="edit-memory-title">Edit memory</h2>
+      <label>Content <textarea name="content" rows="6" required autofocus></textarea></label>
+      <label>Category <select name="category"></select></label>
+      <label>Importance <input name="importance" type="number" min="1" max="5" step="1" required></label>
+      <label>Status <select name="status">
+        <option value="active">Active</option>
+        <option value="archived">Archived</option>
+      </select></label>
+      <p class="banner error" role="alert" hidden></p>
+      <div class="actions"><button type="button" data-cancel>Cancel</button><button class="primary">Save</button></div>
+    </form>
+  </dialog>
+  <dialog id="edit-note-dialog" data-testid="edit-note-dialog" aria-labelledby="edit-note-title">
+    <form>
+      <h2 id="edit-note-title">Edit note</h2>
+      <label>Content <textarea name="content" rows="6" required autofocus></textarea></label>
+      <label>Surface condition <input name="surface_condition" type="text"></label>
+      <label>Status <select name="status">
+        <option value="active">Active</option>
+        <option value="pending">Pending</option>
+        <option value="dismissed">Dismissed</option>
+      </select></label>
+      <p class="banner error" role="alert" hidden></p>
+      <div class="actions"><button type="button" data-cancel>Cancel</button><button class="primary">Save</button></div>
+    </form>
+  </dialog>
+  <dialog id="confirm-dialog" data-testid="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description">
+    <form>
+      <h2 id="confirm-title">Confirm deletion</h2>
+      <p id="confirm-description"></p>
+      <p class="banner error" role="alert" hidden></p>
+      <div class="actions"><button type="button" data-cancel autofocus>Cancel</button><button class="danger">Delete</button></div>
+    </form>
+  </dialog>
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+</body>
+</html>

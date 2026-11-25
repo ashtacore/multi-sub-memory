@@ -4,12 +4,13 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { INDEXER_ORCHESTRATORS } from '../src/indexers/types.mjs';
 
-const plannedCommands = ['ui'];
+const plannedCommands = [];
 const indexOrchestrators = [...INDEXER_ORCHESTRATORS, 'all'];
 const dreamUsage = 'Dream usage: multi-sub-memory dream [--project <cwd>] [--dry-run] [--json]';
 const importUsage = 'Usage: multi-sub-memory import --from <magic-context|mnemopi|notes|all> '
   + '[--dry-run] [--include-archived] [--project-map <path>] [--magic-context-db <path>] '
   + '[--mnemopi-dir <path>] [--notes-dir <path>] [--report <path>] [--json] [--cwd <path>]';
+const uiUsage = 'Usage: multi-sub-memory ui [--port <number>] [--open] [--cwd <path>] [--help]';
 const args = process.argv.slice(2);
 const command = args[0] ?? 'serve';
 
@@ -183,12 +184,51 @@ async function importLegacy(args) {
   }
 }
 
+async function dashboard(args) {
+  const { values, tokens } = parseArgs({
+    args,
+    options: {
+      port: { type: 'string' }, cwd: { type: 'string' }, open: { type: 'boolean' },
+      help: { type: 'boolean', short: 'h' },
+    },
+    tokens: true,
+  });
+  const names = new Set();
+  for (const { name } of tokens) {
+    if (names.has(name)) throw new Error(`--${name} may only be specified once`);
+    names.add(name);
+  }
+  if (values.cwd !== undefined && !values.cwd.trim()) throw new Error('--cwd requires a path');
+  const port = values.port === undefined ? undefined : Number(values.port);
+  if (values.port !== undefined && (!/^\d+$/.test(values.port) || port > 65535)) {
+    throw new Error('--port must be an integer from 0 to 65535');
+  }
+  if (values.help) {
+    console.log(uiUsage);
+    return;
+  }
+
+  const { startDashboardServer, openBrowser } = await import('../src/ui/server.mjs');
+  const { url, close } = await startDashboardServer({ cwd: values.cwd, port });
+  const shutdown = () => {
+    void close().catch(() => {
+      console.error('Dashboard shutdown failed.');
+      process.exitCode = 1;
+    });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  console.log(`Dashboard running at ${url}`);
+  if (values.open) await openBrowser(url).catch(() => console.error('Could not open the default browser.'));
+}
+
 if (['--help', '-h', 'help'].includes(command)) {
   console.log('Usage: multi-sub-memory [command] [--cwd <path>]');
-  console.log(`Commands: serve, setup, doctor, index, dream, import, ${plannedCommands.join(', ')}`);
+  console.log('Commands: serve, setup, doctor, index, dream, import, ui');
   console.log(`Index usage: multi-sub-memory index [--orchestrator <${indexOrchestrators.join('|')}>] [--json] [--cwd <path>]`);
   console.log(dreamUsage);
   console.log(importUsage);
+  console.log(uiUsage);
 } else if (command === 'setup') {
   const { runSetup } = await import('../src/cli/setup.mjs');
   process.exitCode = await runSetup(args.slice(1));
@@ -204,10 +244,10 @@ if (['--help', '-h', 'help'].includes(command)) {
     console.error(error.message);
     process.exitCode = 1;
   }
-} else if (command === 'index' || command === 'dream' || command === 'import') {
+} else if (['index', 'dream', 'import', 'ui'].includes(command)) {
   try {
-    const run = { index: indexTranscripts, dream, import: importLegacy }[command];
-    await run(args.slice(1));
+    const runCommand = { index: indexTranscripts, dream, import: importLegacy, ui: dashboard }[command];
+    await runCommand(args.slice(1));
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

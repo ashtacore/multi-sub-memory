@@ -125,16 +125,38 @@ function windowsArgLength(arg) {
   return 2 * arg.length + 3; // Surrounding quotes and a separator (or terminator).
 }
 
+function redactUrl(url) {
+  const safe = url.replace(/^((?:[a-z][a-z\d+.-]*:)?\/\/)[^/?#]*@/i, '$1[REDACTED]@');
+  const query = safe.indexOf('?');
+  const fragment = safe.indexOf('#');
+  if (query < 0 || (fragment >= 0 && fragment < query)) return safe;
+  const end = fragment < 0 ? safe.length : fragment;
+  const params = safe.slice(query + 1, end).replace(/(^|&)([^&=]*=)[^&]*/g, '$1$2[REDACTED]');
+  return safe.slice(0, query + 1) + params + safe.slice(end);
+}
+
+export function createDreamRedactor(env = process.env, apiKeyEnv) {
+  const secrets = Object.entries(env)
+    .filter(([name, value]) => typeof value === 'string' && value
+      && (name === apiKeyEnv || /(?:token|secret|password|api[_-]?key|credential|auth[_-]?key)/i.test(name)))
+    .map(([, value]) => value)
+    .sort((a, b) => b.length - a.length);
+  return (text) => {
+    text = text.replace(/\b[a-z][a-z\d+.-]*:\/\/[^\s<>"`]+|(?<![a-z\d+.-]:)\/\/[^\s<>"`]+|(?<=^|[\s"'`(\[<=,:;])\/[^\s<>"`?]*\?[^\s<>"`]+/gi, (url, offset) => {
+      if (text[offset - 1] === "'" && url.endsWith("'")) return redactUrl(url.slice(0, -1)) + "'";
+      return redactUrl(url);
+    });
+    for (const secret of secrets) text = text.replaceAll(secret, '[redacted]');
+    return text
+      .replace(/\b(Authorization["']?[ \t]*:[ \t]*["']?)[\w.-]+[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"',;]+)/gi, '$1[redacted]')
+      .replace(/\b(Bearer|Basic|Token)\s+[^\s,;]+/gi, '$1 [redacted]')
+      .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, '[redacted]')
+      .replace(/(?<![A-Za-z0-9?&])(api[_-]?key["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s"'&,;]+)/gi, '$1[redacted]');
+  };
+}
+
 export function sanitizeDreamError(message, env = process.env, apiKeyEnv) {
-  let safe = String(message);
-  for (const [name, value] of Object.entries(env)) {
-    if (value && (name === apiKeyEnv || /(?:token|secret|password|api_?key|credential|auth_?key)/i.test(name))) {
-      safe = safe.replaceAll(value, '[redacted]');
-    }
-  }
-  return safe
-    .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
-    .replace(/\b(https?:\/\/)[^\s/]+:[^\s/@]+@/gi, '$1[redacted]@')
+  return createDreamRedactor(env, apiKeyEnv)(String(message))
     .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
     .replace(/\s+/g, ' ').trim().slice(0, 500);
 }
