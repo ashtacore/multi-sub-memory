@@ -12,7 +12,7 @@ import { acquireLease, hashNormalizedContent, openDatabase, releaseLease } from 
 import { maybeTriggerAutoDream, runDream, shouldTriggerAutoDream } from '../src/dreamer/engine.mjs';
 import { createCliLlmRunner, createDreamRunner, createHttpLlmRunner, extractJsonPlan } from '../src/dreamer/runners.mjs';
 import { runIndexers } from '../src/indexers/runner.mjs';
-import { addNoteComment, getNote, listNoteComments, recordAccess, updateNote, updateNoteComment, writeMemory } from '../src/memory-service.mjs';
+import { addNoteComment, getNote, listNoteComments, listTags, memoryTags, recordAccess, updateNote, updateNoteComment, upsertTagDefinition, writeMemory } from '../src/memory-service.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
 import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
@@ -1246,4 +1246,64 @@ test('Dreamer rejects a comment summary planned before a human topic edit', asyn
   assert.equal(getNote(db, id).content, revisedContent);
   assert.deepEqual(chain.comments(), original);
   assert.equal(runs().at(-1).status, 'failed');
+});
+
+test('Dreamer proposes and applies scoped tag merges and description refinements', async (t) => {
+  const { db, dream, memory } = fixture(t);
+  addMemory(db, 'a');
+  addMemory(db, 'b', { status: 'archived' });
+  addMemory(db, 'g', { project: 'global', scope: 'global' });
+  addMemory(db, 'other', { project: 'another-project' });
+  for (const tag of ['alias', 'canonical', 'one', 'two', 'three']) upsertTagDefinition(db, projectKey, tag);
+  upsertTagDefinition(db, 'global', 'alias', 'Global description');
+  upsertTagDefinition(db, 'another-project', 'alias', 'Other project description');
+  const addTag = db.prepare('INSERT INTO memory_tags VALUES (?, ?)');
+  for (const tag of ['alias', 'canonical', 'one', 'two', 'three']) addTag.run('a', tag);
+  for (const id of ['b', 'g', 'other']) addTag.run(id, 'alias');
+  const descriptions = listTags(db, projectKey);
+
+  const tag_operations = [
+    { type: 'merge', from_tag: 'alias', to_tag: 'canonical', description: 'Canonical subject' },
+    { type: 'describe', tag: 'one', description: 'A narrower subject' },
+  ];
+  const runner = ({ userPrompt }) => {
+    const { tag_dictionary, memories } = JSON.parse(userPrompt);
+    assert.deepEqual(tag_dictionary.find(({ tag }) => tag === 'alias'), { tag: 'alias', description: '', count: 2 });
+    assert.deepEqual(memories[0].tags, ['alias', 'canonical', 'one', 'three', 'two']);
+    return { plan: { ...emptyPlan, tag_operations } };
+  };
+  assert.deepEqual((await dream(runner, { dryRun: true })).tag_operations, tag_operations);
+  assert.deepEqual(listTags(db, projectKey), descriptions);
+  assert.deepEqual(memoryTags(db, 'b'), ['alias']);
+  assert.equal(memory('a').updated_at, 1);
+
+  const missing = [{ type: 'merge', from_tag: 'alias', to_tag: 'other' }];
+  for (const dryRun of [true, false]) {
+    await assert.rejects(dream(() => ({ plan: { ...emptyPlan, tag_operations: missing } }), { dryRun }), /unavailable/);
+  }
+  const live = await dream(runner);
+  assert.equal(live.status, 'completed');
+  assert.equal(JSON.parse(memory('a').metadata_json).dream_run_id, live.runId);
+  assert.deepEqual(memoryTags(db, 'a'), ['canonical', 'one', 'three', 'two']);
+  assert.deepEqual(memoryTags(db, 'b'), ['canonical']);
+  assert.ok(memory('a').updated_at > 1);
+  assert.equal(listTags(db, projectKey).find(({ tag }) => tag === 'alias'), undefined);
+  assert.equal(listTags(db, projectKey).find(({ tag }) => tag === 'canonical').description, 'Canonical subject');
+  assert.equal(listTags(db, projectKey).find(({ tag }) => tag === 'one').description, 'A narrower subject');
+  assert.deepEqual(memoryTags(db, 'g'), ['alias']);
+  assert.deepEqual(memoryTags(db, 'other'), ['alias']);
+  assert.equal(listTags(db, 'global')[0].description, 'Global description');
+});
+
+test('Dreamer reuses target tags and fills remaining slots from merged memories', async (t) => {
+  const { db, dream } = fixture(t);
+  addMemory(db, 'a');
+  addMemory(db, 'b');
+  for (const tag of ['a', 'b', 'c', 'd', 'e', 'z']) upsertTagDefinition(db, projectKey, tag);
+  const addTag = db.prepare('INSERT INTO memory_tags VALUES (?, ?)');
+  for (const tag of ['b', 'c', 'd', 'z']) addTag.run('a', tag);
+  for (const tag of ['a', 'b', 'e']) addTag.run('b', tag);
+  await dream(() => resultFor([{ type: 'merge', source_ids: ['a', 'b'], content: 'a' }]));
+  assert.deepEqual(memoryTags(db, 'a'), ['a', 'b', 'c', 'd', 'z']);
+  assert.deepEqual(memoryTags(db, 'b'), ['a', 'b', 'e']);
 });

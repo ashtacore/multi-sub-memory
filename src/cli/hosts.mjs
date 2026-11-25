@@ -1,16 +1,19 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { expandHome, writeTextAtomically } from '../config.mjs';
+import { readMemoryGuide } from '../memory-guide.mjs';
 
 export const HOSTS = {
-  omp: { config: '~/.omp/agent/mcp.json', format: 'json', transcriptDirs: ['~/.omp/agent/sessions'] },
-  claude: { config: '~/.claude.json', format: 'json', transcriptDirs: ['~/.claude/projects'] },
-  codex: { config: '~/.codex/config.toml', format: 'toml', transcriptDirs: ['~/.codex/sessions'] },
+  omp: { config: '~/.omp/agent/mcp.json', format: 'json', skills: '~/.omp/agent/skills', transcriptDirs: ['~/.omp/agent/sessions'] },
+  claude: { config: '~/.claude.json', format: 'json', skills: '~/.claude/skills', transcriptDirs: ['~/.claude/projects'] },
+  codex: { config: '~/.codex/config.toml', format: 'toml', skills: '~/.agents/skills', transcriptDirs: ['~/.codex/sessions'] },
   agy: {
     config: '~/.gemini/antigravity/mcp_config.json',
     format: 'json',
+    skills: '~/.gemini/config/skills',
     transcriptDirs: ['~/.gemini/antigravity/brain'],
   },
 };
@@ -391,6 +394,40 @@ export function hookConfigPaths(host, { homeDir = os.homedir(), cwd = process.cw
     return [settings, settings + '.bak'];
   }
   throw new Error('Unsupported startup hook host ' + host);
+}
+
+const skillMarker = /\n<!-- Managed by multi-sub-memory setup \(sha256:([a-f0-9]{64})\) -->\n$/;
+
+export function hostSkillPath(host, { homeDir = os.homedir() } = {}) {
+  return path.resolve(expandHome(HOSTS[host].skills, homeDir), server, 'SKILL.md');
+}
+
+function skillDigest(source) {
+  return createHash('sha256').update(source).digest('hex');
+}
+
+export function prepareSkillChange(host, context, install) {
+  const configPath = hostSkillPath(host, context);
+  if (install) checkParentDirectory(configPath);
+  const stat = expectRegularFile(configPath);
+  const source = readHostConfig(configPath);
+  const marker = source?.match(skillMarker);
+  const managed = marker && skillDigest(source.slice(0, marker.index)) === marker[1];
+  if (source !== undefined && !managed) return () => ({ configPath, preserved: true });
+
+  let updated;
+  if (install) {
+    const guide = readMemoryGuide();
+    updated = guide + '\n<!-- Managed by multi-sub-memory setup (sha256:' + skillDigest(guide) + ') -->\n';
+  }
+  return () => {
+    if (updated === source) return { configPath, changed: false };
+    expectRegularFile(configPath);
+    if (readHostConfig(configPath) !== source) throw new Error('Skill changed during setup. Run setup again.');
+    if (install) writeTextAtomically(configPath, updated, stat && (stat.mode & 0o777));
+    else fs.unlinkSync(configPath);
+    return { configPath, changed: true };
+  };
 }
 
 function expectRegularFile(file) {

@@ -14,7 +14,7 @@
   "bin": {
     "multi-sub-memory": "./bin/cli.mjs"
   },
-  "files": ["bin/", "src/", "hooks/", "docs/host-instructions/", "LICENSE", "README.md"],
+  "files": ["bin/", "src/", "hooks/", "docs/host-instructions/", "skills/", "LICENSE", "README.md"],
   "scripts": {
     "check": "node scripts/check.mjs",
     "test": "node --test --test-concurrency=4 \"test/**/*.test.mjs\""

@@ -22,8 +22,11 @@ default browser. Stop the server with Ctrl+C.
   the owner and, when needed, the host. Local Git projects use the directory
   name and add parent segments for collisions. Expand a memory's provenance to
   see its project path when available, its project key, and source metadata.
-- **Memories** supports project, scope, category, and status filters with
-  hybrid or full-text search. Sort the list by importance, creation time,
+- **Memories** supports project, scope, category, status, and tag filters
+  with hybrid or full-text search. Cards show their assigned tags. The tag
+  field suggests names from the selected project's dictionary or the global
+  dictionary when browsing Global. Edit tags as a comma-separated list of up
+  to five distinct names. Clear the field to remove the assignments. Sort the list by importance, creation time,
   or update time in either direction. Search results use relevance and
   clearing the query restores the previous list sort. Use **Project / Scope**
   in the editor to move a memory to another project, promote it to Global,
@@ -61,8 +64,9 @@ default browser. Stop the server with Ctrl+C.
   change to the launch workspace's repository identity.
   Both run modes use the restricted CLI presets and an empty temporary working
   directory for CLI runners. A dry run can send data to the authorized runner
-  and records the proposal without changing memories or comments. The result
-  for a proposed comment compaction shows the source IDs and summary.
+  and records the proposal without changing memories, comments, or tags.
+  The result shows proposed tag changes and the source IDs and summary for
+  proposed comment compactions.
   [Dreamer configuration and trust](Dreamer.md)
 
 ## HTTP API
@@ -74,8 +78,9 @@ Use `global` for global rows alone.
 | Method and path | Parameters and effects |
 |---|---|
 | `GET /api/overview` | Project and global counts, totals, default project key, embedding status, and database health |
-| `GET /api/memories` | `project_key`, `scope` (project, global, or all), `category`, `status` (active by default, archived, superseded, or all), `q`, `limit`, `sort` (`importance`, `created_at`, or `updated_at`), and `order` (`asc` or `desc`). Filters constrain search before relevance ranking. Rows include `project_name` and a nullable `project_root`. |
-| `PATCH /api/memories/:id` | Any of `content`, `category`, `importance` (1–5), `status` (active or archived), `scope` (project or global), or `project_key` (a known project key or `global`), plus optional `expected_updated_at`. Omit `status` to keep the existing status. An explicit superseded status or unknown destination returns 400. A duplicate in the destination project and scope returns 409. |
+| `GET /api/memories` | `project_key`, `scope` (project, global, or all), `category`, `status` (active by default, archived, superseded, or all), `q`, `tag`, `limit`, `sort` (`importance`, `created_at`, or `updated_at`), and `order` (`asc` or `desc`). Filters constrain search before relevance ranking. Rows include sorted `tags`, `project_name`, and a nullable `project_root`. |
+| `GET /api/tags` | Requires `project_key` for a single repository or `global`. Returns `tags` with each name, description, and assignment count across all memory statuses. |
+| `PATCH /api/memories/:id` | Any of `content`, `category`, `importance` (1–5), `status` (active or archived), `scope` (project or global), `project_key` (a known project key or `global`), or `tags` (array replacing assignments), plus optional `expected_updated_at`. Omit `status` to keep the existing status. An explicit superseded status or unknown destination returns 400. A duplicate in the destination project and scope returns 409. |
 | `DELETE /api/memories/:id` | Permanently removes the memory and its search data |
 | `GET /api/notes` | `project_key`, `status` (active, pending, dismissed, or all by default), `limit`, `sort` (`updated_at` or `created_at`), `order` (`asc` or `desc`), and optional `cursor` |
 | `PATCH /api/notes/:id` | Updates `content`, `status`, or `surface_condition` (string or null). A status change requires a nonblank `comment`. Accepts optional `expected_updated_at`. |

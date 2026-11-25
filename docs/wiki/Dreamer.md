@@ -70,8 +70,11 @@ instructions to 8 KiB in UTF-8. Dreamer skips whole chains that exceed the
 remaining space and continues considering smaller chains. Each eligible topic
 has at least five standalone progress comments. The plan can reference the
 memories, topics, and comments included in the prompt.
-The response must be a strict JSON object with a summary and an operations
-array. Optional Markdown fences around the JSON are accepted.
+The prompt includes project tag names, descriptions, and assignment counts
+when they fit the runner's budget. Counts include active and historical
+memories. Reviewed memories also carry their tags. The response must be a
+strict JSON object with a summary and an operations array. It may include a
+separate `tag_operations` array. Optional Markdown fences are accepted.
 
 | Operation | Effect |
 |---|---|
@@ -80,6 +83,14 @@ array. Optional Markdown fences around the JSON are accepted.
 | `update` | Changes content, category, importance, or a combination of those fields. A hash collision with another memory fails the run. |
 | `add` | Requires transcript evidence in the prompt and inserts a durable project memory if the normalized content does not already exist in the project scope. |
 | `compact_note_comments` | Replaces selected progress comments with a concise summary. The result has at most three progress comments including the summary, and can consist of one summary. Transition comments are preserved. |
+
+Tag operations use names included in the prompt. A tag `merge` specifies
+`from_tag` and `to_tag`, and may set the destination's description. It
+rewrites every assignment in the project, deduplicates overlapping
+assignments, advances affected memory revisions, and removes the source
+definition. A `describe` operation specifies `tag` and `description`.
+Dry runs validate and report the operations without changing definitions
+or assignments.
 
 ## Design rules and why
 
@@ -100,6 +111,9 @@ array. Optional Markdown fences around the JSON are accepted.
 - Dreamer adds provenance to existing metadata on updates, archives, and
   reused merge targets. It keeps arrays, scalar values, and explicit JSON `null`
   under `user_metadata`. Absent metadata receives only provenance.
+- A memory merge keeps the target's existing tags and fills the remaining
+  slots with distinct source tags in alphabetical order. Superseded rows
+  retain their assignments for historical browsing.
 - A merge sums the sources' access counts and keeps their latest access
   timestamp, or a null timestamp if none was recorded. The transaction reads
   current access metadata and includes a reused target exactly once. Accesses

@@ -23,6 +23,16 @@ const defaults = {
   },
 };
 
+export const TAG_PATTERN = /^[a-z0-9][a-z0-9-]{0,47}$/;
+const tagFields = z.strictObject({
+  strict: z.boolean(),
+  definitions: z.record(z.string().regex(TAG_PATTERN), z.string()),
+});
+const tagsSchema = tagFields.extend({
+  strict: tagFields.shape.strict.default(false),
+  definitions: tagFields.shape.definitions.default({}),
+});
+
 const embeddingSchema = z.object({ model: z.string().min(1), enabled: z.boolean() }).strict();
 const bootstrapSchema = z.object({ tokenBudget: z.number().int().positive() }).strict();
 const nonEmptyString = z.string().min(1);
@@ -78,6 +88,7 @@ const configFields = z.object({
   embedding: embeddingSchema,
   bootstrap: bootstrapSchema,
   dreamer: dreamerSchema,
+  tags: tagsSchema.prefault({}),
   indexers: indexersSchema,
 }).strict();
 
@@ -99,6 +110,7 @@ const configLayerSchema = configFields.extend({
     cadence: cadenceFields.partial(),
   }).partial(),
   indexers: indexersSchema.partial(),
+  tags: tagFields.partial(),
 }).partial();
 
 const projectLayerSchema = configLayerSchema.extend({
@@ -232,6 +244,19 @@ export function bootstrapTokenBudget(config, projectKey) {
     : config?.bootstrap?.tokenBudget ?? defaults.bootstrap.tokenBudget;
 }
 
+function mergeTags(user, projectKey) {
+  const project = user.projects?.[projectKey]?.tags;
+  return {
+    strict: project?.strict ?? user.tags?.strict ?? false,
+    definitions: (projectKey === 'global' ? user.tags?.definitions : project?.definitions) ?? {},
+  };
+}
+
+export function tagSettings(config, projectKey) {
+  const user = configSources.get(config) ?? (config?.projects ? config : undefined);
+  return user ? mergeTags(user, projectKey) : config?.tags ?? mergeTags({}, projectKey);
+}
+
 export function loadConfig(options = {}) {
   return resolveEffectiveConfig(options, false).config;
 }
@@ -262,6 +287,7 @@ function resolveEffectiveConfig(options, includeProject) {
     embedding: { ...defaults.embedding, ...user.embedding, ...layer.embedding, ...overrides.embedding },
     bootstrap: { ...defaults.bootstrap, ...user.bootstrap, ...layer.bootstrap },
     dreamer: mergeDreamer(user.dreamer, layer.dreamer),
+    tags: mergeTags(user, project?.projectKey ?? 'global'),
     indexers,
   });
   config.dbPath = expandHome(config.dbPath, homeDir);

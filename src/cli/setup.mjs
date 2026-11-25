@@ -8,7 +8,8 @@ import {
 import { createEmbeddingEngine } from '../embeddings.mjs';
 import {
   CLI_PRESETS, DREAMER_EXECUTABLE_GUIDANCE, HOOK_HOSTS, HOSTS, detectHost, findExecutable, hookConfigPaths,
-  hostConfigPath, hostSnippet, prepareHookInstall, prepareHookUninstall, prepareHostRegistration,
+  hostConfigPath, hostSkillPath, hostSnippet, prepareHookInstall, prepareHookUninstall, prepareHostRegistration,
+  prepareSkillChange,
 } from './hosts.mjs';
 import { cliContext, configErrorMessage, parseOptions, transformersAvailable } from './options.mjs';
 
@@ -26,6 +27,9 @@ const help = [
   '  --host <omp|claude|codex|agy|all|none>  Repeat or use a comma-separated list',
   '  --hooks <omp|claude|all>         Install startup hooks. Repeat or use a comma-separated list',
   '  --uninstall-hooks <omp|claude|all>  Remove startup hooks. Repeat or use a comma-separated list',
+  '  --skills                         Install the memory guide for selected MCP hosts',
+  '  --install-skills <omp|claude|codex|agy|all>   Install skills only when used on its own',
+  '  --uninstall-skills <omp|claude|codex|agy|all> Remove managed skills',
   '  --omp-extensions-dir <path> --claude-settings <path>',
   '  --dreamer-mode <disabled|http|cli>',
   '  --http-base-url <url> --http-model <model> --http-api-key-env <name>',
@@ -51,10 +55,10 @@ function selectedHosts(value) {
   return hosts[0] === 'none' ? [] : hosts;
 }
 
-function selectedHookHosts(values, flag) {
+function selectedActionHosts(values, flag, supportedHosts = HOOK_HOSTS) {
   const hosts = values?.flatMap((value) => value.split(',').map((host) => host.trim())) ?? [];
-  for (const host of hosts) choices(host, [...HOOK_HOSTS, 'all'], flag);
-  return hosts.includes('all') ? HOOK_HOSTS : [...new Set(hosts)];
+  for (const host of hosts) choices(host, [...supportedHosts, 'all'], flag);
+  return hosts.includes('all') ? supportedHosts : [...new Set(hosts)];
 }
 
 async function dreamerConfig(current, values, ask) {
@@ -131,7 +135,7 @@ function removalDatabasePaths(context) {
     .map((value) => effectiveDatabaseFilePath(value, context)).filter((file) => file !== undefined);
 }
 
-function checkPaths(dbPaths, context, hosts, hookHosts = [], settingsPath) {
+function checkPaths(dbPaths, context, hosts, hookHosts = [], settingsPath, skillHosts = []) {
   if (settingsPath && pathKey(resolveConfigDestination(context.userConfigPath)) !== pathKey(settingsPath)) {
     throw new Error(settingsChanged);
   }
@@ -143,6 +147,7 @@ function checkPaths(dbPaths, context, hosts, hookHosts = [], settingsPath) {
     ...hostPaths,
     ...hostPaths.map((file) => file + '.bak'),
     ...hookHosts.flatMap((host) => hookConfigPaths(host, context)),
+    ...skillHosts.map((host) => hostSkillPath(host, context)),
   ];
   const keys = paths.map((file) => pathKey(resolveConfigDestination(file)));
   const dbDestinations = dbPaths.map((file) => resolveConfigDestination(file));
@@ -158,9 +163,9 @@ function checkPaths(dbPaths, context, hosts, hookHosts = [], settingsPath) {
       keys.push(...new Set([lockPath + suffix, lockDest + suffix].map((file) => pathKey(resolveConfigDestination(file)))));
     }
   }
-  if (new Set(keys).size !== keys.length || (hookHosts.length && keys.some((file) =>
+  if (new Set(keys).size !== keys.length || ((hookHosts.length || skillHosts.length) && keys.some((file) =>
     keys.some((other) => other !== file && other.startsWith(file + path.sep))))) {
-    throw new Error('Choose distinct paths for the database, settings, host configs, hooks, and backups');
+    throw new Error('Choose distinct paths for the database, settings, host configs, hooks, backups, and skills');
   }
 }
 
@@ -172,6 +177,16 @@ function applyHookActions(actions, print) {
       : (changed ? 'Removed startup hook' : 'No managed startup hook found');
     print(result + ' for ' + host + ' at ' + configPath);
     if (backupPath) print('Backup: ' + backupPath);
+  }
+}
+
+function applySkillActions(actions, print) {
+  for (const { host, install, apply } of actions) {
+    const { configPath, changed, preserved } = apply();
+    const result = preserved ? 'Preserved existing skill'
+      : install ? (changed ? 'Installed memory guide' : 'Memory guide already installed')
+        : (changed ? 'Removed memory guide' : 'No managed memory guide found');
+    print(result + ' for ' + host + ' at ' + configPath);
   }
 }
 
@@ -214,6 +229,9 @@ export async function runSetup(argv = [], options = {}) {
       host: { type: 'string', multiple: true },
       hooks: { type: 'string', multiple: true },
       'uninstall-hooks': { type: 'string', multiple: true },
+      skills: { type: 'boolean' },
+      'install-skills': { type: 'string', multiple: true },
+      'uninstall-skills': { type: 'string', multiple: true },
       'omp-extensions-dir': { type: 'string' },
       'claude-settings': { type: 'string' },
       'no-embeddings': { type: 'boolean' },
@@ -223,21 +241,38 @@ export async function runSetup(argv = [], options = {}) {
       print(help);
       return 0;
     }
-    const installHosts = selectedHookHosts(values.hooks, '--hooks');
-    const uninstallHosts = selectedHookHosts(values['uninstall-hooks'], '--uninstall-hooks');
+    const installHosts = selectedActionHosts(values.hooks, '--hooks');
+    const uninstallHosts = selectedActionHosts(values['uninstall-hooks'], '--uninstall-hooks');
     if (installHosts.some((host) => uninstallHosts.includes(host))) {
       throw new Error('A host cannot appear in both --hooks and --uninstall-hooks');
     }
     const context = cliContext(values, options);
     const hookHosts = [...installHosts, ...uninstallHosts];
+    const skillInstalls = selectedActionHosts(values['install-skills'], '--install-skills', Object.keys(HOSTS));
+    const skillUninstalls = selectedActionHosts(values['uninstall-skills'], '--uninstall-skills', Object.keys(HOSTS));
+    const selectedSkillHosts = (hosts = []) => {
+      const install = [...new Set([...skillInstalls, ...(values.skills ? hosts : [])])];
+      if (install.some((host) => skillUninstalls.includes(host))) {
+        throw new Error('A host cannot be selected for both skill install and uninstall');
+      }
+      return install;
+    };
+    const prepareSkills = (install) => [
+      ...install.map((host) => ({ host, install: true, apply: prepareSkillChange(host, context, true) })),
+      ...skillUninstalls.map((host) => ({ host, install: false, apply: prepareSkillChange(host, context, false) })),
+    ];
     const prepareHooks = () => [
       ...installHosts.map((host) => ({ host, install: true, apply: prepareHookInstall(host, context) })),
       ...uninstallHosts.map((host) => ({ host, install: false, apply: prepareHookUninstall(host, context) })),
     ];
-    if (uninstallHosts.length && !installHosts.length && values.db === undefined && !values.host
+    if ((uninstallHosts.length || skillInstalls.length || skillUninstalls.length)
+      && !installHosts.length && !values.skills && values.db === undefined && !values.host
       && values['no-embeddings'] === undefined && !hasDreamerOptions(values)) {
-      checkPaths(removalDatabasePaths(context), context, [], hookHosts);
+      const install = selectedSkillHosts();
+      checkPaths(removalDatabasePaths(context), context, [], hookHosts, undefined, [...install, ...skillUninstalls]);
+      const skillActions = prepareSkills(install);
       applyHookActions(prepareHooks(), print);
+      applySkillActions(skillActions, print);
       return 0;
     }
     const { cwd, env, resolvePath, userConfigPath } = context;
@@ -300,7 +335,9 @@ export async function runSetup(argv = [], options = {}) {
       const file = effectiveDatabaseFilePath(project.dbPath, context);
       if (file !== undefined) dbPaths.push(file);
     }
-    checkPaths(dbPaths, context, hosts, hookHosts, settingsPath);
+    const installSkills = selectedSkillHosts(hosts);
+    checkPaths(dbPaths, context, hosts, hookHosts, settingsPath, [...installSkills, ...skillUninstalls]);
+    const skillActions = prepareSkills(installSkills);
     const registration = hosts.map((host) => {
       try {
         return prepareHostRegistration(host, context);
@@ -345,6 +382,7 @@ export async function runSetup(argv = [], options = {}) {
       if (backupPath) print('Backup: ' + backupPath);
     }
     applyHookActions(hookActions, print);
+    applySkillActions(skillActions, print);
     for (const host of Object.keys(HOSTS).filter((host) => !hosts.includes(host))) {
       print('\nManual MCP configuration for ' + host + ':\n' + hostSnippet(host));
     }

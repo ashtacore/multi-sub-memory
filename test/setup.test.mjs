@@ -896,3 +896,52 @@ test('hook-only Claude uninstall protects absent database files and sidecars fro
     });
   }
 });
+
+test('skill-only setup installs, upgrades, and removes guides while preserving edits and unmanaged skills', async (t) => {
+  const { options, errors, output } = fixture(t);
+  const paths = Object.fromEntries(Object.entries({
+    codex: ['.agents', 'skills'],
+    claude: ['.claude', 'skills'],
+    omp: ['.omp', 'agent', 'skills'],
+    agy: ['.gemini', 'config', 'skills'],
+  }).map(([host, parts]) => [host, path.join(options.homeDir, ...parts, 'multi-sub-memory', 'SKILL.md')]));
+  const userSkill = 'User-authored guide\n';
+  fs.mkdirSync(path.dirname(paths.claude), { recursive: true });
+  fs.writeFileSync(paths.claude, userSkill);
+  assert.equal(await runSetup(['--install-skills', 'all'], options), 0, errors());
+  const installed = fs.readFileSync(paths.codex, 'utf8');
+  assert.match(installed, /^---\r?\nname: multi-sub-memory/);
+  assert.match(installed, /<!-- Managed by multi-sub-memory setup \(sha256:[a-f0-9]{64}\) -->/);
+  assert.equal(fs.readFileSync(paths.agy, 'utf8'), installed);
+  assert.equal(fs.readFileSync(paths.omp, 'utf8'), installed);
+  assert.equal(fs.readFileSync(paths.claude, 'utf8'), userSkill);
+
+  const edited = installed.replace('# Memory guide', '# My memory guide');
+  fs.writeFileSync(paths.codex, edited);
+  const { createHash } = await import('node:crypto');
+  const older = '---\nname: multi-sub-memory\ndescription: Older guide\n---\n';
+  const digest = createHash('sha256').update(older).digest('hex');
+  fs.writeFileSync(paths.omp, older + '\n<!-- Managed by multi-sub-memory setup (sha256:' + digest + ') -->\n');
+  assert.equal(await runSetup(['--install-skills', 'all'], options), 0, errors());
+  assert.equal(fs.readFileSync(paths.codex, 'utf8'), edited);
+  assert.equal(fs.readFileSync(paths.omp, 'utf8'), installed);
+  assert.match(output(), /Preserved existing skill for codex/);
+
+  const sibling = path.join(path.dirname(paths.agy), 'personal.md');
+  fs.writeFileSync(sibling, 'Keep this file');
+  assert.equal(await runSetup(['--uninstall-skills', 'all'], options), 0, errors());
+  assert.equal(fs.readFileSync(paths.codex, 'utf8'), edited);
+  assert.equal(fs.readFileSync(paths.claude, 'utf8'), userSkill);
+  assert.equal(fs.readFileSync(sibling, 'utf8'), 'Keep this file');
+  assert.equal(fs.existsSync(paths.agy), false);
+  assert.equal(fs.existsSync(paths.omp), false);
+  assert.equal(fs.existsSync(expandHome(DEFAULT_DB_PATH, options.homeDir)), false);
+  assert.equal(fs.existsSync(expandHome(DEFAULT_CONFIG_PATH, options.homeDir)), false);
+});
+
+test('setup --skills installs the guide for the selected MCP hosts', async (t) => {
+  const { options, errors } = fixture(t);
+  assert.equal(await runSetup(['--yes', '--host', 'codex', '--skills', '--no-embeddings'], options), 0, errors());
+  assert.equal(fs.existsSync(path.join(options.homeDir, '.agents', 'skills', 'multi-sub-memory', 'SKILL.md')), true);
+  assert.equal(fs.existsSync(path.join(options.homeDir, '.claude', 'skills')), false);
+});

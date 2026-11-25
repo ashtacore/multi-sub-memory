@@ -42,6 +42,13 @@ a topic cascades to all its comments. The notes full-text index covers
 the topic content, surface condition, and project key.
 [Note tools](MCP-Core.md#note-topics-and-comments)
 
+Migration 9 adds `tag_dictionary`, keyed by project and tag, and
+`memory_tags`, keyed by memory ID and tag. An index by tag and memory ID
+supports filtering. Existing memories keep their categories and start with
+empty tag lists. Deleting a memory cascades to its assignments. Dictionary
+entries can remain available with a usage count of zero.
+[Memory tags](MCP-Core.md#memory-tags)
+
 ## Design rules and why
 
 - Embedding rows require an explicit parent ID. The `transcript_embeddings` table uses `WITHOUT ROWID` so SQLite rejects a missing message ID instead of generating one.

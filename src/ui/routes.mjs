@@ -6,7 +6,8 @@ import {
   GLOBAL_PROJECT_KEY, MAX_LIST_LIMIT, MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
   MissingProjectDestinationError,
   NOTE_COMMENT_PREVIEW_LENGTH, NoteValidationError, SameNoteStatusError, StaleRecordError, addNoteComment,
-  decodeNoteCursor, deleteNote, deleteNoteComment, encodeNoteCursor, listNoteComments,
+  decodeNoteCursor, deleteNote, deleteNoteComment, encodeNoteCursor, listNoteComments, listTags,
+  memoryTags, normalizeTag, TagValidationError,
   updateMemory, updateNote, updateNoteComment,
 } from '../memory-service.mjs';
 import { formatProjectLabels } from '../project-id.mjs';
@@ -69,6 +70,7 @@ const importance = (value) => Number.isInteger(value) && value >= 1 && value <= 
 const memoryRules = {
   content: nonblank, category: oneOf(MEMORY_CATEGORIES), importance, status: oneOf(MEMORY_STATUSES),
   scope: oneOf(MEMORY_SCOPES), project_key: (value) => nonblank(value) && value.trim() === value,
+  tags: (value) => Array.isArray(value) && value.every((tag) => typeof tag === 'string'),
   expected_updated_at: nonblank,
 };
 const noteRules = {
@@ -245,28 +247,41 @@ async function memories({ db, defaultProjectKey, defaultProjectRoot, embeddingEn
     category: category === all ? undefined : category,
     status: status === all ? undefined : status,
   };
+  let tag;
+  if (params.has('tag')) {
+    try {
+      tag = normalizeTag(params.get('tag'));
+    } catch (error) {
+      throw new RequestError(400, error.message);
+    }
+  }
   const { where, values } = rowFilter(fields);
   const limit = listLimit(params);
   const query = params.get('q')?.trim();
   const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot);
+  const format = (row) => attachMemoryProject({ ...row, tags: memoryTags(db, row.id) }, catalog);
   if (!query) {
     const orderBy = sort === 'importance'
       ? `importance ${direction}, updated_at DESC, id ASC`
       : `${sort} ${direction}, id ${direction}`;
-    const rows = db.prepare('SELECT * FROM memories' + where + ' ORDER BY ' + orderBy + ' LIMIT ?').all(...values, limit);
+    const tagFilter = tag === undefined ? '' :
+      (where ? ' AND ' : ' WHERE ') + 'id IN (SELECT memory_id FROM memory_tags WHERE tag = ?)';
+    if (tag !== undefined) values.push(tag);
+    const rows = db.prepare('SELECT * FROM memories' + where + tagFilter + ' ORDER BY ' + orderBy + ' LIMIT ?')
+      .all(...values, limit);
     return {
       mode: 'list',
-      memories: rows.map((row) => attachMemoryProject(row, catalog)),
+      memories: rows.map(format),
     };
   }
   const { mode, results } = await hybridSearch(db, {
-    query, sources: ['memory'], scope: 'all_projects', projectKey, cwd, defaultCwd: cwd, embeddingEngine, limit,
+    query, sources: ['memory'], scope: 'all_projects', projectKey, cwd, defaultCwd: cwd, embeddingEngine, limit, tag,
     memoryFilters: { projectKey, scope: fields.scope, category: fields.category, status: fields.status },
   });
   const find = db.prepare('SELECT * FROM memories WHERE id = ?');
   return {
     mode,
-    memories: results.map(({ id }) => find.get(id)).filter(Boolean).map((row) => attachMemoryProject(row, catalog)),
+    memories: results.map(({ id }) => find.get(id)).filter(Boolean).map(format),
   };
 }
 
@@ -352,7 +367,7 @@ async function noteComments({ db }, req, params, noteId, commentId) {
   }
 }
 
-async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot, embeddingEngine }, req, table, id, params) {
+async function changeRecord({ db, config, tagConfig = config, defaultProjectKey, defaultProjectRoot, embeddingEngine }, req, table, id, params) {
   if (req.method === 'DELETE') {
     if (table === 'notes') {
       try {
@@ -391,7 +406,7 @@ async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot,
   try {
     if (table === 'memories') {
       const memory = await updateMemory(db, { ...body, id }, {
-        defaultProject, embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt,
+        config: tagConfig, defaultProject, embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt,
       });
       const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, [memory.project_key]);
       return { memory: attachMemoryProject(memory, catalog) };
@@ -401,6 +416,7 @@ async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot,
     if (error instanceof MissingProjectDestinationError) throw new RequestError(400, error.message);
     if (table === 'notes') throw noteRequestError(error);
     if (error instanceof StaleRecordError) throw new RequestError(409, error.message);
+    if (error instanceof TagValidationError) throw new RequestError(400, error.message);
     if (error.message.startsWith('Memory not found:')) throw new RequestError(404, 'Memory not found');
     if (error.message.startsWith('Memory update conflicts with existing content')) {
       throw new RequestError(409, 'A memory with this content already exists in the project and scope');
@@ -525,6 +541,11 @@ export function createApi(context) {
   return async function api(req, pathname, params) {
     if (req.method === 'GET') {
       if (pathname === '/api/overview') return overview(context);
+      if (pathname === '/api/tags') {
+        const projectKey = projectFilter(params);
+        if (!projectKey?.trim()) throw new RequestError(400, 'Select a project or the global scope.');
+        return { tags: listTags(context.db, projectKey, context.tagConfig ?? context.config) };
+      }
       if (pathname === '/api/memories') return memories(context, params);
       if (pathname === '/api/notes') return notes(context, params);
       if (pathname === '/api/dreamer') return dreamer(context, params);

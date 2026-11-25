@@ -32,6 +32,7 @@ test('loads defaults and expands only the current home marker', (t) => {
     embedding: { model: 'BAAI/bge-base-en-v1.5', enabled: true },
     bootstrap: { tokenBudget: 2500 },
     dreamer: defaultDreamer,
+    tags: { strict: false, definitions: {} },
     indexers: defaultIndexers,
   });
   assert.equal(expandHome('~', homeDir), homeDir);
@@ -81,6 +82,7 @@ test('merges global and repository YAML settings before applying environment ove
     embedding: { model: 'project-model', enabled: false },
     bootstrap: { tokenBudget: 1200 },
     dreamer: defaultDreamer,
+    tags: { strict: false, definitions: {} },
     indexers: {
       ...defaultIndexers, backgroundRefresh: true, refreshIntervalMs: 30_000,
       omp: { sessionsDir: path.join(homeDir, 'user-omp') }, claude: { sessionsDir: path.join(homeDir, 'project-claude') },
@@ -101,6 +103,7 @@ test('merges global and repository YAML settings before applying environment ove
     embedding: { model: 'env-model', enabled: false },
     bootstrap: { tokenBudget: 1800 },
     dreamer: defaultDreamer,
+    tags: { strict: false, definitions: {} },
     indexers: defaultIndexers,
   });
   env.MULTI_SUB_MEMORY_NO_EMBEDDINGS = 'no';
@@ -117,6 +120,9 @@ test('rejects invalid values and unknown keys in individual config layers', (t) 
     { bootstrap: { tokenBudget: 1.5 } },
     { embedding: { unknown: true } },
     { unexpected: true },
+    { tags: { strict: 'yes' } },
+    { tags: { definitions: { 'Bad Tag': 'invalid' } } },
+    { tags: { definitions: { good: false } } },
     { projects: { 'dir:legacy': {} } },
     { projects: { 'github.com/example/repo': { forkMode: 'fork' } } },
     { projects: { 'github.com/example/repo': { bootstrap: { unknown: true } } } },

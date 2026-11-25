@@ -271,6 +271,27 @@ export const MIGRATIONS = [{
       END;
     `);
   },
+}, {
+  version: 9,
+  up(db) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS tag_dictionary (
+        project_key TEXT NOT NULL,
+        tag TEXT NOT NULL CHECK (length(tag) BETWEEN 1 AND 48
+          AND tag GLOB '[a-z0-9]*' AND tag NOT GLOB '*[^a-z0-9-]*'),
+        description TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (project_key, tag)
+      );
+      CREATE TABLE IF NOT EXISTS memory_tags (
+        memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+        tag TEXT NOT NULL,
+        PRIMARY KEY (memory_id, tag)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags (tag, memory_id);
+    `);
+  },
 }];
 
 const busyWait = new Int32Array(new SharedArrayBuffer(4));

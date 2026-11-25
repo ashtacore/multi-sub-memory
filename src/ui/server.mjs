@@ -127,7 +127,7 @@ export async function startDashboardServer(options = {}) {
     ? createEmbeddingEngine({ embedding: config.embedding, env }) : options.embeddingEngine;
   const ownsDb = !options.db;
   const db = options.db ?? openDatabase(config.dbPath);
-  const api = createApi({ db, config, cwd, defaultProjectKey, defaultProjectRoot, embeddingEngine, env, configOptions });
+  const api = createApi({ db, config, tagConfig: baseConfig, cwd, defaultProjectKey, defaultProjectRoot, embeddingEngine, env, configOptions });
   const inFlight = new Set();
   let hosts;
   let origins;
