@@ -111,6 +111,18 @@ test('merges global and repository YAML settings before applying environment ove
   assert.equal(loadConfig({ ...options, env, userConfigPath }).bootstrap.tokenBudget, 1200);
 });
 
+test('rejects empty kebab-case segments and overlong tag definitions in either scope', (t) => {
+  const options = configFixture(t);
+  const userConfigPath = path.join(options.homeDir, 'tag-validation.yaml');
+  for (const tag of ['release--plan', 'release-', 'a'.repeat(49)]) {
+    const tags = { definitions: { [tag]: 'Fixture' } };
+    for (const settings of [{ tags }, { projects: { 'github.com/example/repo': { tags } } }]) {
+      fs.writeFileSync(userConfigPath, JSON.stringify(settings));
+      assert.throws(() => loadConfig({ ...options, userConfigPath }), /Invalid config at/);
+    }
+  }
+});
+
 test('rejects invalid values and unknown keys in individual config layers', (t) => {
   const options = configFixture(t);
   const userConfigPath = path.join(options.homeDir, 'invalid.yaml');

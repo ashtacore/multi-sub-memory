@@ -95,7 +95,8 @@ export class TagValidationError extends Error {}
 export function normalizeTag(value) {
   const tag = typeof value === 'string' ? value.trim().toLowerCase().replace(/[\s_]+/g, '-') : '';
   if (!TAG_PATTERN.test(tag)) {
-    throw new TagValidationError('Invalid tag ' + JSON.stringify(value) + '. Use 1-48 lowercase letters, digits, or hyphens, starting with a letter or digit.');
+    throw new TagValidationError('Invalid tag ' + JSON.stringify(value) +
+      '. Use 1-48 characters in lowercase alphanumeric groups separated by single hyphens.');
   }
   return tag;
 }
@@ -406,7 +407,7 @@ export async function updateMemory(db, input, context = {}) {
       );
       if (changedContent) invalidateEmbedding(db, input.id);
       if (tags !== undefined || projectKey !== existing.project_key) {
-        setMemoryTags(db, row, tags ?? memoryTags(db, row.id), context.config, descriptions);
+        setMemoryTags(db, row, tags ?? normalizeTags(memoryTags(db, row.id)), context.config, descriptions);
       }
       const accessed = trackMutationAccess(db, 'memories', row, context.trackAccess);
       const memory = context.rawRow ? { ...accessed, tags: memoryTags(db, row.id) } : formatMemory(db, accessed);

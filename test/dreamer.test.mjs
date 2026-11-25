@@ -1248,6 +1248,45 @@ test('Dreamer rejects a comment summary planned before a human topic edit', asyn
   assert.equal(runs().at(-1).status, 'failed');
 });
 
+test('CLI Dreamer reviews an unreviewed memory within the prompt budget despite a large tag dictionary', async (t) => {
+  const { db, dream, memory } = fixture(t);
+  const { calls, spawnImpl } = spawnFixture();
+  const runner = createCliLlmRunner({ orchestrator: 'codex', spawnImpl });
+  const { limit, measure } = runner.promptBudget;
+  const content = 'm'.repeat(1_600);
+  addMemory(db, 'pending', { content });
+  for (let index = 0; index < Math.ceil(limit / 512); index++) {
+    upsertTagDefinition(db, projectKey, 'tag-' + index, 'd'.repeat(512));
+  }
+
+  const result = await dream(runner, { now: () => 100 });
+  const prompt = calls[0][1].at(-1);
+  const { memories, tag_dictionary } = JSON.parse(prompt.slice(prompt.indexOf('\n\n') + 2));
+  assert.ok(measure(prompt) <= limit);
+  assert.deepEqual(memories.map(({ id, content }) => ({ id, content })), [{ id: 'pending', content }]);
+  assert.ok(tag_dictionary.length > 0 && tag_dictionary.length < listTags(db, projectKey).length);
+  assert.equal(result.memoriesReviewed, 1);
+  assert.equal(memory('pending').last_dreamed_at, 100);
+});
+
+test('Dreamer rejects tag operations with empty kebab-case segments or overlong names', async (t) => {
+  const { db, dream } = fixture(t);
+  upsertTagDefinition(db, projectKey, 'release-plan');
+  for (const tag of ['release--plan', 'release-', 'a'.repeat(49)]) {
+    for (const operation of [
+      { type: 'describe', tag, description: 'Fixture' },
+      { type: 'merge', from_tag: tag, to_tag: 'release-plan' },
+      { type: 'merge', from_tag: 'release-plan', to_tag: tag },
+    ]) {
+      await assert.rejects(
+        dream(() => ({ plan: { ...emptyPlan, tag_operations: [operation] } })),
+        /Dream plan failed validation: tag_operations\.0\./,
+      );
+    }
+  }
+  assert.deepEqual(listTags(db, projectKey).map(({ tag }) => tag), ['release-plan']);
+});
+
 test('Dreamer proposes and applies scoped tag merges and description refinements', async (t) => {
   const { db, dream, memory } = fixture(t);
   addMemory(db, 'a');

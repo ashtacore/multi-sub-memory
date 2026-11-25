@@ -890,6 +890,11 @@ test('MCP normalizes tags and filters lists and searches without mixing dictiona
 
   await expectError('mem_memory', { action: 'update', id: saved.id, tags: ['a', 'b', 'c', 'd', 'e', 'f'] }, /at most 5/);
   await expectError('mem_memory', { action: 'update', id: saved.id, tags: ['-bad'] }, /Invalid tag/);
+  for (const tag of ['release--plan', 'release-', 'a'.repeat(49)]) {
+    await expectError('mem_memory', { action: 'write', content: 'Invalid tag fixture', tags: [tag] }, /Invalid tag/);
+    await expectError('mem_memory', { action: 'update', id: saved.id, tags: [tag] }, /Invalid tag/);
+  }
+  assert.deepEqual(listTags(db, saved.project_key).map(({ tag }) => tag), saved.tags);
   assert.deepEqual((await memory('write', { content: saved.content })).memory.tags, saved.tags);
   assert.deepEqual((await memory('update', { id: saved.id, tags: [] })).tags, []);
 

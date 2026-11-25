@@ -63,16 +63,15 @@ budgets 24,000 UTF-16 code units for the executable, arguments, and worst-case
 quoting. On POSIX, the prompt
 argument is limited to 96 KiB in UTF-8. Dreamer fits whole memories in priority
 order, skipping oversized entries and continuing through later candidates up
-to the review cap. It then fits recent transcript excerpts in the remaining
-space. It uses remaining prompt space for eligible project note topics and
-their progress comments. HTTP mode limits the note section and its compaction
-instructions to 8 KiB in UTF-8. Dreamer skips whole chains that exceed the
-remaining space and continues considering smaller chains. Each eligible topic
-has at least five standalone progress comments. The plan can reference the
-memories, topics, and comments included in the prompt.
-The prompt includes project tag names, descriptions, and assignment counts
-when they fit the runner's budget. Counts include active and historical
-memories. Reviewed memories also carry their tags. The response must be a
+to the review cap. It then fits recent transcript excerpts. Dreamer uses
+the remaining budget for the tag dictionary, memory tag assignments, and
+eligible project note topics with their progress comments. HTTP mode limits
+the note section and its compaction instructions to 8 KiB in UTF-8. Dreamer
+skips whole chains that exceed the available space and considers smaller
+chains. Each eligible topic has at least five standalone progress comments.
+The plan can reference the memories, topics, and comments included in the prompt.
+Dictionary entries include project tag names, descriptions, and assignment
+counts across active and historical memories. The response must be a
 strict JSON object with a summary and an operations array. It may include a
 separate `tag_operations` array. Optional Markdown fences are accepted.
 

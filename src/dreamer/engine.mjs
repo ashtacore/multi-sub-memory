@@ -108,20 +108,29 @@ function buildPrompt(db, rows, topics, transcripts, dictionary, promptBudget, ru
     }
     return { selected, json };
   }
+  const encodeMemory = ({ id, content, category, importance }) => ({ id, content, category, importance });
   const minMemoryLength = measure('{"id":"","content":"","category":"","importance":1}');
+  const memories = selectEntries(rows, encodeMemory, MAX_REVIEWED_MEMORIES, minMemoryLength);
+  const excerpts = selectEntries(transcripts, ({ role, timestamp, text }) => ({ role, timestamp, text }));
+
+  // Optional tag context uses the space left after selecting review items.
   let tags = { selected: [], json: [] };
   if (dictionary.length) {
     const overhead = measure(TAG_PROMPT) + measure(',"tag_dictionary":[]');
     remaining -= overhead;
     tags = selectEntries(dictionary, (entry) => entry);
     if (!tags.json.length) remaining += overhead;
+    for (const [index, row] of memories.selected.entries()) {
+      if (remaining < measure(',"tags":["a"]')) break;
+      const assigned = memoryTags(db, row.id);
+      if (!assigned.length) continue;
+      const encoded = JSON.stringify({ ...encodeMemory(row), tags: assigned });
+      const additionalLength = measure(encoded) - measure(memories.json[index]);
+      if (additionalLength > remaining) continue;
+      remaining -= additionalLength;
+      memories.json[index] = encoded;
+    }
   }
-  const encodeMemory = ({ id, content, category, importance }) => {
-    const assigned = tags.json.length ? memoryTags(db, id) : [];
-    return { id, content, category, importance, ...(assigned.length ? { tags: assigned } : {}) };
-  };
-  const memories = selectEntries(rows, encodeMemory, MAX_REVIEWED_MEMORIES, minMemoryLength);
-  const excerpts = selectEntries(transcripts, ({ role, timestamp, text }) => ({ role, timestamp, text }));
   remaining = Math.min(remaining, noteLimit) - measure(NOTE_COMPACTION_PROMPT) - measure(',"notes":[]');
   const notes = selectEntries(topics, ({ id, content, comments }) => ({
     id, content, comments: comments.map(({ id, body }) => ({ id, body })),

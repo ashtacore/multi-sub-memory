@@ -23,7 +23,7 @@ const defaults = {
   },
 };
 
-export const TAG_PATTERN = /^[a-z0-9][a-z0-9-]{0,47}$/;
+export const TAG_PATTERN = /^(?=.{1,48}$)[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const tagFields = z.strictObject({
   strict: z.boolean(),
   definitions: z.record(z.string().regex(TAG_PATTERN), z.string()),

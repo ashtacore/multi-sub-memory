@@ -61,9 +61,9 @@ set. Bootstrap returns the summary as plain text.
 
 Each memory has one category and a sorted array of up to five optional tags.
 Writes and updates trim tags, lowercase them, and replace runs of whitespace
-and underscores with a hyphen before deduplication. A tag starts with a
-letter or digit and uses up to 48 ASCII lowercase letters, digits, and
-hyphens. Send `tags` to replace the current assignment or `tags: []` to
+and underscores with a hyphen before deduplication. A tag uses up to 48
+characters in nonempty groups of ASCII lowercase letters and digits,
+separated by single hyphens. Send `tags` to replace the current assignment or `tags: []` to
 clear it. Omitting tags preserves existing assignments on updates and
 deduplicated writes.
 
