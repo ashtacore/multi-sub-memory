@@ -57,15 +57,25 @@ function noteComments(record, path, { onSaved, onError, open }) {
     const tags = from_status
       ? [badge(`${categoryText(from_status)} → ${categoryText(to_status)}`, toneFor(to_status)), badge('Read only')]
       : [];
-    const edit = !from_status ? [button('Edit comment', 'note-comment-edit', (trigger) => {
-      editComment(trigger, { body }, (values) => api(path + '/' + encodeURIComponent(id), {
-        method: 'PATCH', body: { ...values, expected_updated_at: String(updated_at) },
-      }), () => onSaved('Comment saved.'), onError);
-    })] : [];
-    for (const control of edit) control.dataset.commentId = id;
+    const controls = [];
+    if (!from_status) {
+      const commentPath = path + '/' + encodeURIComponent(id);
+      const revision = { expected_updated_at: String(updated_at) };
+      const edit = button('Edit comment', 'note-comment-edit', (trigger) => {
+        editComment(trigger, { body }, (values) => api(commentPath, {
+          method: 'PATCH', body: { ...values, ...revision },
+        }), () => onSaved('Comment saved.'), onError);
+      });
+      const remove = button('Delete comment', 'note-comment-delete', (trigger) => {
+        confirmDelete(trigger, 'comment', () => api(commentPath, { method: 'DELETE', params: revision }),
+          () => onSaved('Comment deleted.'), { onConflict: onError });
+      }, 'danger-subtle');
+      edit.dataset.commentId = remove.dataset.commentId = id;
+      controls.push(node('div', { className: 'actions' }, edit, remove));
+    }
     return node('li', { className: 'comment' },
       node('div', { className: 'tags' }, ...tags, date),
-      node('p', { text: body, className: 'record-content' }), ...edit);
+      node('p', { text: body, className: 'record-content' }), ...controls);
   }
 
   async function load() {
@@ -203,8 +213,10 @@ export function renderRecords(list, records, kind, {
       (isMemory ? 'Memory' : 'Note') + ' ' + (restoring ? 'restored' : nextStatus) + '.',
     );
     const remove = button('Delete', prefix + '-delete', (trigger) => {
-      confirmDelete(trigger, kind, () => api(path, { method: 'DELETE' }),
-        () => onSaved(isMemory ? 'Memory deleted.' : 'Note deleted.'), record.comment_count);
+      const params = isMemory ? undefined : { expected_updated_at: String(record.updated_at) };
+      confirmDelete(trigger, kind, () => api(path, { method: 'DELETE', params }),
+        () => onSaved(isMemory ? 'Memory deleted.' : 'Note deleted.'),
+        { commentCount: record.comment_count, onConflict: isMemory ? undefined : onError });
     }, 'danger-subtle');
     const card = node('article', { className: 'card record', testId: kind + '-card' },
       node('div', { className: 'tags' }, ...tags),

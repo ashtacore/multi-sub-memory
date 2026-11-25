@@ -88,7 +88,6 @@ input::placeholder { color: #969aaf; }
 .comment-panel > :empty, .comment-panel > :has(> button[hidden]) { display: none; }
 .comment-chain { padding: 0; list-style: none; }
 .comment { padding: .65rem; border: 1px solid var(--line); border-radius: .45rem; }
-.comment > button { justify-self: start; }
 .badge {
   display: inline-block;
   max-width: 100%;

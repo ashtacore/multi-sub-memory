@@ -90,10 +90,11 @@ array. Optional Markdown fences around the JSON are accepted.
 - Each memory ID can appear only once across the plan and must belong to the
   active project memories sent to the runner. A merge also checks whether a
   deduplicated target conflicts with another operation.
-- Note compaction checks the progress comment IDs and revisions in the write
-  transaction. A changed chain fails the plan so a later run can review the
-  current discussion. The summary comment records its run ID and source
-  comment IDs in `compacted_from_json` and advances the topic's update time.
+- Note compaction checks the reviewed topic revision and the progress comment
+  IDs and revisions in the write transaction. A changed topic or chain fails
+  the plan so a later run can review the current discussion. The summary
+  comment records its run ID and source comment IDs in `compacted_from_json`
+  and advances the topic's update time.
 - Dreamer adds provenance to existing metadata on updates, archives, and
   reused merge targets. It keeps arrays, scalar values, and explicit JSON `null`
   under `user_metadata`. Absent metadata receives only provenance.

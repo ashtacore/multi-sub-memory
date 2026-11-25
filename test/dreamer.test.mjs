@@ -1191,3 +1191,24 @@ test('Dreamer rejects transition sources and rolls back compaction when comment 
   assert.ok(comments.every(({ compacted_from_json }) => compacted_from_json === null));
   assert.equal(runs().at(-1).status, 'failed');
 });
+
+test('Dreamer rejects a comment summary planned before a human topic edit', async (t) => {
+  const { db, dream, runs } = fixture(t);
+  const id = 'edited-topic';
+  const chain = noteChain(db, id, 5);
+  const original = chain.comments();
+  const revisedContent = 'Human rewrite during planning';
+  await assert.rejects(dream(({ userPrompt }) => {
+    const [topic] = JSON.parse(userPrompt).notes;
+    assert.equal(topic.id, id);
+    assert.equal(topic.content, 'Note topic');
+    updateNote(db, { id, content: revisedContent });
+    return resultFor([{
+      type: 'compact_note_comments', note_id: id,
+      source_comment_ids: chain.progress.map(({ id }) => id), summary: 'Summary of the prior topic',
+    }]);
+  }), /reviewed note topic changed/);
+  assert.equal(getNote(db, id).content, revisedContent);
+  assert.deepEqual(chain.comments(), original);
+  assert.equal(runs().at(-1).status, 'failed');
+});

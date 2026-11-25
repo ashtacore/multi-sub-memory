@@ -123,10 +123,10 @@ export function transitionNote(trigger, label, save, onSaved, onConflict) {
 export const editComment = bindDialog('edit-comment-dialog');
 const confirm = bindDialog('confirm-dialog');
 
-export function confirmDelete(trigger, kind, remove, onDeleted, commentCount) {
+export function confirmDelete(trigger, kind, remove, onDeleted, { commentCount, onConflict } = {}) {
   byId('confirm-title').textContent = 'Delete ' + kind + '?';
   const target = commentCount === undefined ? kind
     : `note and its ${commentCount} ${commentCount === 1 ? 'comment' : 'comments'}`;
   byId('confirm-description').textContent = 'This permanently deletes the ' + target + ' from the database.';
-  confirm(trigger, null, remove, onDeleted);
+  confirm(trigger, null, remove, onDeleted, onConflict);
 }

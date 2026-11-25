@@ -526,28 +526,55 @@ export function dismissNote(db, input, options) {
   return updateNote(db, { ...input, status: 'dismissed' }, options);
 }
 
+export function deleteNote(db, { id, expectedUpdatedAt }) {
+  return inWriteTransaction(db, () => {
+    checkRevision(getNote(db, id), expectedUpdatedAt);
+    db.prepare('DELETE FROM notes WHERE id = ?').run(id);
+    return { deleted: true, id };
+  });
+}
+
+function advanceNoteRevision(db, id, now) {
+  return db.prepare(`
+    UPDATE notes SET updated_at = MAX(?, updated_at + 1) WHERE id = ? RETURNING *
+  `).get(now, id);
+}
+
 export function addNoteComment(db, input, { expectedUpdatedAt, trackAccess } = {}) {
   return inWriteTransaction(db, () => {
     checkRevision(getNote(db, input.id), expectedUpdatedAt);
     const now = Date.now();
     const comment = insertNoteComment(db, input, { body: requireComment(input.body), now });
-    const note = db.prepare(`
-      UPDATE notes SET updated_at = MAX(?, updated_at + 1) WHERE id = ? RETURNING *
-    `).get(now, input.id);
+    const note = advanceNoteRevision(db, input.id, now);
     return { note: trackMutationAccess(db, 'notes', note, trackAccess), comment };
   });
 }
 
+function checkEditableNoteComment(db, noteId, id, expectedUpdatedAt) {
+  const existing = requireRow(db.prepare(`
+    SELECT from_status, to_status, updated_at FROM note_comments WHERE note_id = ? AND id = ?
+  `).get(noteId, id), 'Note comment', id);
+  if (existing.from_status !== null || existing.to_status !== null) {
+    throw new NoteValidationError('Status-transition comments are immutable');
+  }
+  checkRevision(existing, expectedUpdatedAt);
+}
+
 export function updateNoteComment(db, { note_id, id, body }, { expectedUpdatedAt } = {}) {
   return inWriteTransaction(db, () => {
-    const existing = requireRow(db.prepare('SELECT * FROM note_comments WHERE note_id = ? AND id = ?')
-      .get(note_id, id), 'Note comment', id);
-    if (existing.from_status !== null || existing.to_status !== null) {
-      throw new NoteValidationError('Status-transition comments are immutable');
-    }
-    checkRevision(existing, expectedUpdatedAt);
+    checkEditableNoteComment(db, note_id, id, expectedUpdatedAt);
     return db.prepare(`
-      UPDATE note_comments SET body = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ? RETURNING *
-    `).get(requireComment(body), Date.now(), id);
+      UPDATE note_comments SET body = ?, updated_at = MAX(?, updated_at + 1)
+      WHERE note_id = ? AND id = ? RETURNING *
+    `).get(requireComment(body), Date.now(), note_id, id);
+  });
+}
+
+export function deleteNoteComment(db, { noteId, id, expectedUpdatedAt }) {
+  return inWriteTransaction(db, () => {
+    checkEditableNoteComment(db, noteId, id, expectedUpdatedAt);
+    db.prepare('DELETE FROM note_comments WHERE note_id = ? AND id = ?').run(noteId, id);
+    advanceNoteRevision(db, noteId, Date.now());
+    return { deleted: true, id };
   });
 }

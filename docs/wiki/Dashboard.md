@@ -35,10 +35,12 @@ default browser. Stop the server with Ctrl+C.
 - **Notes** shows active, pending, and dismissed topics. Edit the text or
   surface condition independently, or provide a transition comment when
   activating, dismissing, restoring, or changing the status in the editor.
-  Expand **Comments** to read the latest entries, load older comments, or add
-  and edit progress comments. Status-change comments show a transition badge
-  and are read-only. The delete confirmation shows how many comments the topic
-  deletion removes. Sort by creation or update time and use **Load more** to
+  Expand **Comments** to read the latest entries, load older comments, or add,
+  edit, and delete progress comments. Status-change comments show a read-only
+  transition badge. The note delete confirmation shows how many comments the
+  deletion removes. If the note revision changes before deletion, the dashboard
+  refreshes the list so you can check the current count and confirm again.
+  Sort by creation or update time and use **Load more** to
   continue through the topic list.
 - Memory and note edits save only the changed fields. Saving an unchanged
   edit closes the dialog. Edits and quick status actions check the displayed
@@ -77,10 +79,11 @@ Use `global` for global rows alone.
 | `DELETE /api/memories/:id` | Permanently removes the memory and its search data |
 | `GET /api/notes` | `project_key`, `status` (active, pending, dismissed, or all by default), `limit`, `sort` (`updated_at` or `created_at`), `order` (`asc` or `desc`), and optional `cursor` |
 | `PATCH /api/notes/:id` | Updates `content`, `status`, or `surface_condition` (string or null). A status change requires a nonblank `comment`. Accepts optional `expected_updated_at`. |
-| `DELETE /api/notes/:id` | Permanently removes the topic, its comments, and its search data. |
+| `DELETE /api/notes/:id` | Permanently removes the topic, its comments, and its search data. Accepts an optional topic `expected_updated_at` query parameter. |
 | `GET /api/notes/:id/comments` | Returns `comments` and `next_cursor`. Accepts `limit` and `cursor`. Orders by descending creation time and ID. |
 | `POST /api/notes/:id/comments` | Appends a progress comment with nonblank `body` and optional topic `expected_updated_at`. Returns `note` and `comment`. |
 | `PATCH /api/notes/:id/comments/:commentId` | Updates a progress comment's `body` with optional comment `expected_updated_at`. Editing a transition comment returns 400. |
+| `DELETE /api/notes/:id/comments/:commentId` | Removes a progress comment and advances the topic revision. Accepts an optional comment `expected_updated_at` query parameter. Deleting a transition comment returns 400. |
 | `GET /api/dreamer` | Active leases, fresh sanitized configuration with `config_fingerprint` and runner authorization, `runnable_project_key` for the launch workspace, and up to 50 runs. History supports `project_key`, `status`, `sort` (`started_at`, `finished_at`, or `duration`), and `order` (`asc` or `desc`). |
 | `POST /api/dreamer/run` | Requires the launch workspace's `project_key`. Accepts optional boolean `dry_run` and string `expected_config_fingerprint`. A fingerprint mismatch returns 409 before contacting the runner. Returns the run result or a skip reason. |
 

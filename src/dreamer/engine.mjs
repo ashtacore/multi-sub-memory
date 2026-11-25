@@ -72,12 +72,12 @@ function standaloneComments(db, noteId) {
 
 function* noteCommentCandidates(db, projectKey) {
   const topics = db.prepare(`
-    SELECT n.id, n.content FROM notes AS n WHERE n.project_key = ? AND (
+    SELECT n.id, n.content, n.updated_at FROM notes AS n WHERE n.project_key = ? AND (
       SELECT COUNT(*) FROM note_comments WHERE note_id = n.id AND from_status IS NULL AND to_status IS NULL
     ) >= 5 ORDER BY n.updated_at DESC, n.id
   `);
-  for (const { id, content } of topics.iterate(projectKey)) {
-    yield { id, content, comments: standaloneComments(db, id) };
+  for (const topic of topics.iterate(projectKey)) {
+    yield { ...topic, comments: standaloneComments(db, topic.id) };
   }
 }
 
@@ -113,7 +113,7 @@ function buildPrompt(rows, topics, transcripts, promptBudget, runnerName) {
   const noteJson = notes.json.length ? ',"notes":[' + notes.json.join(',') + ']' : '';
   return {
     memories: new Map(memories.selected.map((row) => [row.id, row])),
-    notes: new Map(notes.selected.map(({ id, comments }) => [id, comments])),
+    notes: new Map(notes.selected.map((topic) => [topic.id, topic])),
     transcriptCount: excerpts.selected.length,
     maxIncludedTranscriptId: excerpts.selected[0]?.id, // Candidates are ordered by descending message ID.
     systemPrompt: SYSTEM_PROMPT + (noteJson ? NOTE_COMPACTION_PROMPT : ''),
@@ -160,9 +160,10 @@ function validateReferences(operations, memories) {
 function validateCompactions(operations, notes) {
   const seen = new Set();
   for (const { note_id, source_comment_ids } of operations) {
-    const comments = notes.get(note_id);
-    if (!comments || seen.has(note_id)) throw new Error('Dream compaction references an unreviewed or repeated note');
+    const topic = notes.get(note_id);
+    if (!topic || seen.has(note_id)) throw new Error('Dream compaction references an unreviewed or repeated note');
     seen.add(note_id);
+    const { comments } = topic;
     const reviewed = new Set(comments.map(({ id }) => id));
     if (source_comment_ids.some((id) => !reviewed.has(id))) {
       throw new Error('Dream compaction references an unreviewed progress comment');
@@ -175,11 +176,14 @@ function validateCompactions(operations, notes) {
 
 function compactNoteComments(db, { projectKey, runId, notes, operations, txNow, dryRun }) {
   for (const { note_id, source_comment_ids, summary } of operations) {
-    const topic = db.prepare('SELECT 1 FROM notes WHERE id = ? AND project_key = ?').get(note_id, projectKey);
-    const current = standaloneComments(db, note_id);
+    const topic = db.prepare('SELECT updated_at FROM notes WHERE id = ? AND project_key = ?').get(note_id, projectKey);
     const reviewed = notes.get(note_id);
+    if (topic?.updated_at !== reviewed.updated_at) {
+      throw new Error('A reviewed note topic changed while Dreamer was planning');
+    }
+    const current = standaloneComments(db, note_id);
     const byId = new Map(current.map((row) => [row.id, row]));
-    if (!topic || current.length !== reviewed.length || reviewed.some(({ id, updated_at, body }) => {
+    if (current.length !== reviewed.comments.length || reviewed.comments.some(({ id, updated_at, body }) => {
       const row = byId.get(id);
       return row?.updated_at !== updated_at || row.body !== body;
     })) {
