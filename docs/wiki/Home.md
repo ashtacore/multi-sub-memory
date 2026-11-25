@@ -7,3 +7,4 @@ Use this wiki for durable project knowledge. [GitHub Issues](https://github.com/
 | [Decisions](Decisions.md) | Accepted project-wide decisions, rationale, and ADR template |
 | [Storage and embeddings](Storage-and-Embeddings.md) | SQLite schema, full-text indexes, leases, and local vector embeddings |
 | [MCP core](MCP-Core.md) | Stdio lifecycle, memories and handoff notes, and session bootstrap summaries |
+| [Indexers](Indexers.md) | Incremental transcript indexing, OMP and Claude Code adapters, and background refresh |

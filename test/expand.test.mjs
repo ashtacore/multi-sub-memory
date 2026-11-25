@@ -60,7 +60,7 @@ test('expansion reads original JSONL text using intersecting indexed sequence an
   ]);
   const fileId = indexedFile(db, filePath);
   indexedMessage(db, fileId, 5, 1, 'Original  request  ', '["fixture"]', 'user');
-  indexedMessage(db, fileId, 13, 2, 'First block\nSecond  block');
+  indexedMessage(db, fileId, 13, 2, 'First block\nSecond  block', 'inspect, summarize , read, lookup');
   indexedMessage(db, fileId, 21, 4, 'Trailing record', null, 'user');
 
   const result = expandSession(db, { session_id: ' session ', start_seq: 5, end_seq: 20 });
@@ -85,6 +85,36 @@ test('expansion reads original JSONL text using intersecting indexed sequence an
   });
   assert.deepEqual(intersection.messages, [result.messages[1]]);
   assert.deepEqual(expandSession(db, { session_id: 'session', start_seq: 5, end_seq: 5, line_start: 2 }).messages, []);
+});
+
+test('expansion keeps a truncated raw prefix after validating a later indexed anchor', (t) => {
+  const { db, directory } = fixture(t);
+  const filePath = path.join(directory, 'transcript.jsonl');
+  const raw = 'raw-unparsed-prefix-text';
+  const anchor = { role: 'user', text: 'First indexed user turn' };
+  writeLines(filePath, [raw, anchor]);
+  const fileId = indexedFile(db, filePath);
+  indexedMessage(db, fileId, 0, 2, anchor.text, null, anchor.role);
+
+  const truncatedBudget = JSON.stringify({ line_no: 1, role: 'raw', text: 'raw-unp…' }).length;
+  const options = { session_id: 'session', line_start: 1, line_end: 1, max_chars: truncatedBudget };
+  const result = expandSession(db, options);
+  assert.equal(result.source, 'disk');
+  assert.equal(result.truncated, true);
+  assert.deepEqual(result.messages, [{ line_no: 1, role: 'raw', text: 'raw-unp…' }]);
+
+  const exactBudget = JSON.stringify({ line_no: 1, role: 'raw', text: raw }).length;
+  const exact = expandSession(db, { ...options, max_chars: exactBudget });
+  assert.equal(exact.source, 'disk');
+  assert.equal(exact.truncated, false);
+  assert.deepEqual(exact.messages, [{ line_no: 1, role: 'raw', text: raw }]);
+
+  for (const lines of [[raw, { ...anchor, text: 'Changed user turn' }], [raw]]) {
+    writeLines(filePath, lines);
+    const fallback = expandSession(db, options);
+    assert.equal(fallback.source, 'db-fallback');
+    assert.deepEqual(fallback.messages, []);
+  }
 });
 
 test('unindexed sequence ranges count non-empty lines from zero', (t) => {
@@ -206,6 +236,39 @@ test('OMP tool-call-only turns count toward the expansion budget on disk and in 
       assert.deepEqual(result.messages, messages);
     }
   }
+});
+
+test('expansion falls back when a requested tool-only turn names a different tool', (t) => {
+  const { db, directory } = fixture(t);
+  const filePath = path.join(directory, 'omp.jsonl');
+  const anchor = { role: 'user', text: 'Unchanged request' };
+  const toolTurn = (name) => ({
+    type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', name }] },
+  });
+  writeLines(filePath, [anchor, toolTurn('inspect')]);
+  const fileId = indexedFile(db, filePath, { orchestrator: 'omp', byteOffset: fs.statSync(filePath).size });
+  indexedMessage(db, fileId, 0, 1, anchor.text, null, 'user');
+  indexedMessage(db, fileId, 1, 2, '', '["inspect"]');
+  const options = { session_id: 'session', start_seq: 1, end_seq: 1 };
+  assert.equal(expandSession(db, options).source, 'disk');
+
+  writeLines(filePath, [anchor, toolTurn('replace')]);
+  const result = expandSession(db, options);
+  assert.equal(result.source, 'db-fallback');
+  assert.deepEqual(result.messages, [{ seq: 1, line_no: 2, role: 'assistant', timestamp, text: '', tool_names: ['inspect'] }]);
+});
+
+test('expansion discards collected disk turns when EOF arrives before a requested indexed row', (t) => {
+  const { db, directory } = fixture(t);
+  const filePath = path.join(directory, 'transcript.jsonl');
+  writeLines(filePath, [{ role: 'user', text: 'Present turn' }]);
+  const fileId = indexedFile(db, filePath);
+  indexedMessage(db, fileId, 0, 1, 'Present turn', null, 'user');
+  indexedMessage(db, fileId, 1, 2, 'Missing turn');
+
+  const result = expandSession(db, { session_id: 'session', end_seq: 1 });
+  assert.equal(result.source, 'db-fallback');
+  assert.deepEqual(result.messages.map(({ text }) => text), ['Present turn', 'Missing turn']);
 });
 
 test('expansion rejects unknown sessions and invalid input ranges', (t) => {

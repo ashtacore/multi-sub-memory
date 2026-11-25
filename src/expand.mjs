@@ -1,8 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { extractMessageContent, normalizeTranscriptRole, transcriptFileIdentity } from './indexers/types.mjs';
 
 export const DEFAULT_EXPAND_MAX_CHARS = 16000;
+const CHUNK_BYTES = 64 * 1024;
 
 function validateInteger(name, value, minimum) {
   if (!Number.isInteger(value) || value < minimum) {
@@ -36,7 +38,7 @@ function statIndexedPath(resolved) {
   }
 }
 
-function openIndexedFile(db, file) {
+function openIndexedFile(file) {
   const { file_path: filePath, byte_offset } = file;
   if (typeof filePath !== 'string' || !filePath.trim() || filePath.includes('\0')
     || !path.isAbsolute(filePath) || filePath.split(/[\\/]/).includes('..')) {
@@ -66,8 +68,8 @@ function openIndexedFile(db, file) {
     if (current.dev !== opened.dev || current.ino !== opened.ino) {
       throw new Error('Indexed transcript changed while opening');
     }
+    if (file.file_identity != null && file.file_identity !== transcriptFileIdentity(opened)) return null;
     if (byte_offset > 0 && opened.size < BigInt(byte_offset)) return null;
-    if (!matchesIndexedTranscript(db, file, fd)) return null;
     keepOpen = true;
     return fd;
   } finally {
@@ -76,7 +78,7 @@ function openIndexedFile(db, file) {
 }
 
 function* readLines(fd) {
-  const buffer = Buffer.allocUnsafe(64 * 1024);
+  const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
   const decoder = new StringDecoder('utf8');
   let pending = '';
   let position = 0;
@@ -126,32 +128,7 @@ function parseRecord(line) {
   }
 }
 
-function matchesIndexedTranscript(db, file, fd) {
-  const anchor = db.prepare(`
-    SELECT line_no, role, text FROM transcript_messages WHERE file_id = ? ORDER BY line_no ASC LIMIT 1
-  `).get(file.id);
-  let lineNo = 0;
-  for (const line of readLines(fd)) {
-    lineNo++;
-    if (lineNo === 1) {
-      const record = parseRecord(line);
-      const sessionIds = [
-        record?.session_id, record?.sessionId, record?.message?.session_id, record?.message?.sessionId,
-        record?.type === 'session' ? record.id : undefined,
-      ];
-      if (sessionIds.some((id) => typeof id === 'string' && id !== file.session_id)) return false;
-      if (!anchor) return true;
-    }
-    if (lineNo === anchor.line_no) {
-      const { role, text } = parseLine(line);
-      return role === anchor.role && text === anchor.text;
-    }
-  }
-  return !anchor;
-}
-
-function parseLine(line) {
-  const record = parseRecord(line);
+function parseLine(line, record = parseRecord(line)) {
   if (!record) return { role: 'raw', text: line };
 
   const message = record.message ?? record;
@@ -160,54 +137,117 @@ function parseLine(line) {
   if (message !== record) tools.push(...normalizeToolNames(message.tool_names));
   const calls = message.tool_calls ?? record.tool_calls;
   if (Array.isArray(calls)) tools.push(...calls.map(toolName));
-  const textBlocks = [];
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (typeof block?.text === 'string') textBlocks.push(block.text);
-      if (['tool_use', 'tool_call', 'function_call', 'toolCall'].includes(block?.type)) tools.push(toolName(block));
-    }
-  }
+  const { text, toolNames } = extractMessageContent(content);
+  tools.push(...toolNames);
   const names = [...new Set(normalizeToolNames(tools))];
   const timestamp = message.timestamp ?? record.timestamp;
   return {
-    role: message.role ?? record.role ?? record.type ?? 'raw',
+    role: normalizeTranscriptRole(message.role) ?? normalizeTranscriptRole(record.role)
+      ?? normalizeTranscriptRole(record.type) ?? 'raw',
     ...(timestamp == null ? {} : { timestamp }),
     text: typeof message.text === 'string' ? message.text
       : typeof record.text === 'string' ? record.text
-      : typeof content === 'string' ? content : textBlocks.join('\n'),
+      : text,
     ...(names.length ? { tool_names: names } : {}),
   };
 }
 
-function* diskMessages(db, fileId, fd, options) {
+function arraysEqual(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function matchesMessage(parsed, expected) {
+  return parsed.role === expected.role && parsed.text === expected.text
+    && arraysEqual(parsed.tool_names ?? [], normalizeToolNames(expected.tool_names));
+}
+
+function appendMessage(result, message, maxChars) {
+  const remaining = maxChars - result.total_chars;
+  const cost = JSON.stringify(message).length;
+  if (cost > remaining) {
+    result.truncated = true;
+    const partial = remaining > 0 && message.text.length > 0 ? truncateMessage(message, remaining) : null;
+    if (partial) {
+      result.messages.push(partial);
+      result.total_chars += JSON.stringify(partial).length;
+    }
+    return;
+  }
+  result.messages.push(message);
+  result.total_chars += cost;
+}
+
+function rowCursor(iterator) {
+  let next;
+  return {
+    peek() {
+      return (next ??= iterator.next()).value;
+    },
+    advance() {
+      next = undefined;
+    },
+    close() {
+      iterator.return?.();
+    },
+  };
+}
+
+function diskMessages(db, file, fd, options, maxChars) {
   const { start_seq, end_seq, line_start = 1, line_end = Infinity } = options;
   const hasSeqRange = start_seq !== undefined || end_seq !== undefined;
-  const hasIndexedRows = db.prepare('SELECT 1 FROM transcript_messages WHERE file_id = ? LIMIT 1').get(fileId);
-  const lineToSeq = new Map();
-  let maxTargetLineNo = line_end;
-  if (hasIndexedRows) {
-    const { where, params } = messageRange(fileId, options);
-    if (hasSeqRange) maxTargetLineNo = 0;
-    const rows = db.prepare(`
-      SELECT line_no, seq FROM transcript_messages WHERE ${where} ORDER BY seq DESC
-    `).iterate(...params);
-    for (const { line_no, seq } of rows) {
-      lineToSeq.set(line_no, seq);
-      if (hasSeqRange) maxTargetLineNo = Math.max(maxTargetLineNo, line_no);
-    }
-  }
-  if (maxTargetLineNo === 0) return;
+  const anchor = db.prepare(`
+    SELECT line_no, role, text, tool_names FROM transcript_messages WHERE file_id = ? ORDER BY line_no ASC LIMIT 1
+  `).get(file.id);
+  const { where, params } = messageRange(file.id, options);
+  const requested = anchor ? rowCursor(db.prepare(`
+    SELECT line_no, seq, role, text, tool_names FROM transcript_messages WHERE ${where} ORDER BY line_no ASC, seq ASC
+  `).iterate(...params)) : null;
 
+  const result = { messages: [], total_chars: 0, truncated: false };
+  let anchorValidated = !anchor;
   let nonEmptySeq = 0;
   let line_no = 0;
 
-  for (const line of readLines(fd)) {
-    line_no++;
-    const seq = hasIndexedRows ? lineToSeq.get(line_no) : line.trim() ? nonEmptySeq++ : undefined;
-    if (line_no >= line_start && (!hasSeqRange || (seq !== undefined && seq >= (start_seq ?? 0)))) {
-      yield { ...(seq === undefined ? {} : { seq }), line_no, ...parseLine(line) };
+  try {
+    for (const line of readLines(fd)) {
+      line_no++;
+      const record = line_no === 1 ? parseRecord(line) : undefined;
+      if (line_no === 1) {
+        const sessionIds = [record?.session_id, record?.sessionId, record?.message?.session_id, record?.message?.sessionId,
+          record?.type === 'session' ? record.id : undefined];
+        if (sessionIds.some((id) => typeof id === 'string' && id !== file.session_id)) return null;
+      }
+      const atAnchor = line_no === anchor?.line_no;
+      const outputComplete = result.truncated || line_no > line_end;
+      if (outputComplete && !atAnchor) continue;
+      const atRequested = !outputComplete && line_no === requested?.peek()?.line_no;
+      let seq = !anchor && line.trim() ? nonEmptySeq++ : undefined;
+      const include = !outputComplete && line_no >= line_start
+        && (!hasSeqRange || (anchor ? atRequested : seq !== undefined && seq >= (start_seq ?? 0)));
+      if (atAnchor || atRequested || include) {
+        const parsed = parseLine(line, record);
+        if (atAnchor) {
+          if (!matchesMessage(parsed, anchor)) return null;
+          anchorValidated = true;
+          if (outputComplete) break;
+        }
+        while (line_no === requested?.peek()?.line_no) {
+          const expected = requested.peek();
+          if (!matchesMessage(parsed, expected)) return null;
+          seq ??= expected.seq;
+          requested.advance();
+        }
+        if (include) {
+          appendMessage(result, { ...(seq === undefined ? {} : { seq }), line_no, ...parsed }, maxChars);
+        }
+      }
+      if (anchorValidated && (result.truncated || line_no >= line_end
+        || (anchor && hasSeqRange && !requested.peek()))) break;
+      if (!anchor && end_seq !== undefined && seq === end_seq) break;
     }
-    if (line_no >= maxTargetLineNo || (!hasIndexedRows && seq === end_seq && end_seq !== undefined)) break;
+    return anchorValidated && (result.truncated || !requested?.peek()) ? result : null;
+  } finally {
+    requested?.close();
   }
 }
 
@@ -267,35 +307,29 @@ export function expandSession(db, options = {}) {
   validateRange('line_start', line_start, 'line_end', line_end, 1);
   validateInteger('max_chars', max_chars, 1);
 
-  const files = 'SELECT id, session_id, orchestrator, project_key, file_path, byte_offset FROM transcript_files';
+  const files = `SELECT id, session_id, orchestrator, project_key, file_path, byte_offset, file_identity
+    FROM transcript_files`;
   const file = file_id === undefined
     ? db.prepare(`${files} WHERE session_id = ? ORDER BY last_indexed_at DESC, id DESC LIMIT 1`).get(session_id.trim())
     : db.prepare(`${files} WHERE id = ? AND session_id = ?`).get(file_id, session_id.trim());
   if (!file) throw new Error(`Session not found: ${session_id.trim()}`);
 
-  const fd = openIndexedFile(db, file);
-  const messages = [];
-  let total_chars = 0;
-  let truncated = false;
-  try {
-    const candidates = fd === null ? indexedMessages(db, file.id, options) : diskMessages(db, file.id, fd, options);
-    for (const message of candidates) {
-      const remaining = max_chars - total_chars;
-      const cost = JSON.stringify(message).length;
-      if (cost > remaining) {
-        truncated = true;
-        const partial = remaining > 0 && message.text.length > 0 ? truncateMessage(message, remaining) : null;
-        if (partial) {
-          messages.push(partial);
-          total_chars += JSON.stringify(partial).length;
-        }
-        break;
-      }
-      messages.push(message);
-      total_chars += cost;
+  const fd = openIndexedFile(file);
+  let result;
+  if (fd !== null) {
+    try {
+      result = diskMessages(db, file, fd, options, max_chars);
+    } finally {
+      fs.closeSync(fd);
     }
-  } finally {
-    if (fd !== null) fs.closeSync(fd);
+  }
+  const source = result ? 'disk' : 'db-fallback';
+  if (!result) {
+    result = { messages: [], total_chars: 0, truncated: false };
+    for (const message of indexedMessages(db, file.id, options)) {
+      appendMessage(result, message, max_chars);
+      if (result.truncated) break;
+    }
   }
 
   return {
@@ -303,9 +337,7 @@ export function expandSession(db, options = {}) {
     file_id: file.id,
     orchestrator: file.orchestrator,
     project_key: file.project_key,
-    source: fd === null ? 'db-fallback' : 'disk',
-    truncated,
-    total_chars,
-    messages,
+    source,
+    ...result,
   };
 }

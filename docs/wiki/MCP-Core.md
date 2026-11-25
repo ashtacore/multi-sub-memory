@@ -1,4 +1,4 @@
-# MCP core
+﻿# MCP core
 
 Run `multi-sub-memory` or `multi-sub-memory serve` as a stdio MCP server. Set
 `--cwd <path>` to choose the server's default workspace. Clients can override
@@ -9,6 +9,9 @@ The server loads configuration and opens the shared SQLite database at startup.
 It closes the MCP transport and its own database connection when stdin ends or
 closes, the transport closes, or it receives SIGINT or SIGTERM. It leaves a
 caller-supplied database connection open.
+
+Enable automatic transcript refresh with `indexers.backgroundRefresh`. See
+[Indexers](Indexers.md) for session discovery, CLI indexing, and configuration.
 
 ## Tools
 
@@ -57,7 +60,8 @@ accepts `omp`, `claude`, `codex`, and `agy`. Use `since` with an ISO 8601
 date or timestamp to include records from that instant onward. Date-only values
 start at midnight UTC. Memories and notes use their update time. Transcript
 messages use their own timestamp when valid and the file's last index time
-otherwise.
+otherwise. OMP and Claude Code indexing accepts ISO timestamps and epoch
+milliseconds from transcripts and stores valid values as UTC ISO 8601.
 
 FTS5 treats user input as quoted search terms and ranks candidates with BM25.
 Search attempts query embedding only when the engine can attempt inference and a
@@ -68,7 +72,7 @@ cosine similarity. The two lists use the same search filters.
 Reciprocal rank fusion sums `1 / (60 + rank)` for each list a result appears in,
 using ranks that start at one. The response reports `hybrid` when at least one
 usable vector candidate contributes to fusion and `fts-only` otherwise.
-Search defaults to 10 results and clamps the requested limit to 1–50. Each
+Search defaults to 10 results and clamps the requested limit to 1â€“50. Each
 result has a preview of at most 400 characters. Transcript hits include
 `session_id`, `file_id`, and `seq`. Pass the file ID with the session ID and
 use `seq` for both range endpoints to expand that exact hit.

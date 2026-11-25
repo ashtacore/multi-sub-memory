@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
+import { INDEXER_ORCHESTRATORS } from './indexers/types.mjs';
 import { resolveProjectKey } from './project-id.mjs';
 
 const defaults = {
@@ -10,23 +11,39 @@ const defaults = {
   embedding: { model: 'BAAI/bge-base-en-v1.5', enabled: true },
   bootstrap: { tokenBudget: 2500 },
   dreamer: { enabled: false },
+  indexers: {
+    enabled: true, backgroundRefresh: false, refreshIntervalMs: 60_000,
+    omp: {}, claude: {}, codex: {}, agy: {},
+  },
 };
 
 const embeddingSchema = z.object({ model: z.string().min(1), enabled: z.boolean() }).strict();
 const bootstrapSchema = z.object({ tokenBudget: z.number().int().positive() }).strict();
 const dreamerSchema = z.object({ enabled: z.boolean() }).strict();
+const adapterSchema = z.object({ sessionsDir: z.string().min(1).optional() }).strict();
+const indexersSchema = z.object({
+  enabled: z.boolean(),
+  backgroundRefresh: z.boolean(),
+  refreshIntervalMs: z.number().int().positive().max(2 ** 31 - 1),
+  omp: adapterSchema,
+  claude: adapterSchema,
+  codex: adapterSchema,
+  agy: adapterSchema,
+}).strict();
 
 export const ConfigSchema = z.object({
   dbPath: z.string().min(1),
   embedding: embeddingSchema,
   bootstrap: bootstrapSchema,
   dreamer: dreamerSchema,
+  indexers: indexersSchema,
 }).strict();
 
 const configLayerSchema = ConfigSchema.extend({
   embedding: embeddingSchema.partial(),
   bootstrap: bootstrapSchema.partial(),
   dreamer: dreamerSchema.partial(),
+  indexers: indexersSchema.partial(),
 }).partial();
 
 export function expandHome(inputPath, homeDir = os.homedir()) {
@@ -137,12 +154,22 @@ export function loadConfig(options = {}) {
   const user = readConfigLayer(userConfigPath);
   const project = readConfigLayer(projectConfigPath);
   const overrides = environmentLayer(env);
+  const indexers = { ...defaults.indexers, ...user.indexers, ...project.indexers };
+  const projectSelectsDatabase = project.dbPath !== undefined && overrides.dbPath === undefined;
+  indexers.backgroundRefresh = user.indexers?.backgroundRefresh === true
+    && project.indexers?.backgroundRefresh !== false && !projectSelectsDatabase;
+  for (const orchestrator of INDEXER_ORCHESTRATORS) {
+    const adapter = { ...defaults.indexers[orchestrator], ...user.indexers?.[orchestrator], ...project.indexers?.[orchestrator] };
+    if (adapter.sessionsDir !== undefined) adapter.sessionsDir = expandHome(adapter.sessionsDir, homeDir);
+    indexers[orchestrator] = adapter;
+  }
 
   const config = ConfigSchema.parse({
     dbPath: overrides.dbPath ?? project.dbPath ?? user.dbPath ?? defaults.dbPath,
     embedding: { ...defaults.embedding, ...user.embedding, ...project.embedding, ...overrides.embedding },
     bootstrap: { ...defaults.bootstrap, ...user.bootstrap, ...project.bootstrap },
     dreamer: { ...defaults.dreamer, ...user.dreamer, ...project.dreamer },
+    indexers,
   });
   config.dbPath = expandHome(config.dbPath, homeDir);
   return config;

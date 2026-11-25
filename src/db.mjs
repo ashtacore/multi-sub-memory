@@ -161,6 +161,32 @@ export const MIGRATIONS = [{
       );
     `);
   },
+}, {
+  version: 2,
+  up(db) {
+    db.exec(`
+      ALTER TABLE transcript_files ADD COLUMN line_count INTEGER;
+      ALTER TABLE transcript_files ADD COLUMN file_identity TEXT;
+      ALTER TABLE transcript_files ADD COLUMN checkpoint_hash TEXT;
+      ALTER TABLE transcript_files ADD COLUMN file_size INTEGER;
+    `);
+  },
+}, {
+  version: 3,
+  up(db) {
+    // An earlier v2 implementation already added this column.
+    const existing = db.prepare("SELECT 1 FROM pragma_table_info('transcript_messages') WHERE name = 'embed_eligible'").get();
+    if (existing) return;
+    db.exec('ALTER TABLE transcript_messages ADD COLUMN embed_eligible INTEGER NOT NULL DEFAULT 0;');
+  },
+}, {
+  version: 4,
+  up(db) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_transcript_messages_file_line_seq
+        ON transcript_messages (file_id, line_no, seq);
+    `);
+  },
 }];
 
 const busyWait = new Int32Array(new SharedArrayBuffer(4));

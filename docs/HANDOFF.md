@@ -1,15 +1,16 @@
-Last updated: 2026-11-24 14:02 UTC
+Last updated: 2026-11-23 22:15 UTC
 
 ## Current state
 
-- [PR #15](https://github.com/ashtacore/multi-sub-memory/pull/15) implements the search and expansion tools for [Issue #4](https://github.com/ashtacore/multi-sub-memory/issues/4) on `feat/4-search-expand` (stacked on `feat/3-mcp-core`).
-- Addressed all peer-review findings with regression tests: OMP session header rotation checks, serialized JSON-length `max_chars` budgets including metadata/tool names, and skipping query embedding / reporting `fts-only` when no usable stored vectors match active filters and known model/dimensions. Updated the [MCP core guide](wiki/MCP-Core.md). Verified with `node --test --test-concurrency=4 "test/**/*.test.mjs"` (102 passed, 7 skipped, 0 failed).
+- **[Issue #5](https://github.com/ashtacore/multi-sub-memory/issues/5) is complete locally on `feat/5-indexers-omp-claude`.** Implemented the incremental transcript indexing framework (`src/indexers/types.mjs`, `src/indexers/runner.mjs`), OMP and Claude Code JSONL adapters (`src/indexers/omp.mjs`, `src/indexers/claude.mjs`), SQLite migration v2 (`file_size`, `file_identity`, `checkpoint_hash`, `line_count`), `indexers` config schema, `multi-sub-memory index` CLI subcommand, optional fail-open MCP background refresh, sanitized fixture tests, and [Indexers](wiki/Indexers.md) wiki docs.
+- Verified with `npm test` (103 passed, 0 failed, 4 skipped on Windows symlink tests; Node `v26.13.1`) and `npm pack --dry-run` (17 files packed cleanly), and independently reviewed (**PASS**).
+- Built on top of Phase 1 (`#2`, `#3`, `#4`, base `80555c8`). No remote push, PR creation, or GitHub tracker mutations have been performed.
 
 ## Next actions
 
-1. Complete owner review and merge approval for Phase 1 PRs (`#2`, `#3`, `#4` / PR #15).
-2. Start the ready Phase 2 through Phase 5 lanes once Phase 1 is integrated.
+1. Request explicit approval before pushing `feat/5-indexers-omp-claude`, creating PRs, or updating GitHub Project #5 statuses.
+2. Proceed with [Issue #6](https://github.com/ashtacore/multi-sub-memory/issues/6) (Codex & Antigravity adapters) plugging into the `src/indexers/` adapter contract and registry.
 
 ## Blockers
 
-- Live ONNX download and inference remain outside offline fixture coverage. On Windows, file symlink coverage requires Developer Mode or elevation. Junction coverage is separate.
+- None. Live ONNX model download/inference remains unverified in offline unit tests (`npm ci --omit=optional`; embedding and hybrid search tests use local fixture engines). File-level symlink tests skip on Windows when Developer Mode or elevation is unavailable.
