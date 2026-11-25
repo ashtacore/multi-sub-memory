@@ -1,6 +1,6 @@
 # Storage and embeddings
 
-`src/db.mjs` opens the shared SQLite database through Node's `DatabaseSync`. Write connections create missing parent directories for ordinary paths, enable write-ahead logging (WAL) for file databases, and use `synchronous = NORMAL`. WAL allows readers to keep their snapshots while a writer commits. Both connection types enforce foreign keys and use a five-second busy timeout. A read-only connection opens an existing database with SQLite's read-only flag and skips directory creation and migrations.
+`src/db.mjs` opens the shared SQLite database through Node's `DatabaseSync`. Write connections create missing parent directories for ordinary paths, enable write-ahead logging (WAL) for file databases, and use `synchronous = NORMAL`. WAL allows readers to keep their snapshots while a writer commits. Both connection types enforce foreign keys and default to a five-second busy timeout. Callers can set a positive integer `busyTimeoutMs` for their connection. A read-only connection opens an existing database with SQLite's read-only flag and skips directory creation and migrations.
 
 ## Schema and migrations
 

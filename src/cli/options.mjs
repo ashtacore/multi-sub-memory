@@ -33,7 +33,10 @@ export function cliContext(values, options) {
   for (const host of Object.keys(HOSTS)) {
     if (values[host + '-config'] !== undefined) hostConfigPaths[host] = values[host + '-config'];
   }
-  return { env, cwd, homeDir, userConfigPath, projectConfigPath, resolvePath, hostConfigPaths };
+  const ompExtensionsDir = values['omp-extensions-dir'] ?? options.ompExtensionsDir;
+  const claudeSettingsPath = values['claude-settings'] ?? options.claudeSettingsPath;
+  return { env, cwd, homeDir, userConfigPath, projectConfigPath, resolvePath, hostConfigPaths,
+    ompExtensionsDir, claudeSettingsPath };
 }
 
 export function transformersAvailable() {

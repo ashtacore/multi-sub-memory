@@ -226,13 +226,17 @@ function retryOnBusy(fn, deadlineMs = 5000) {
 
 export function openDatabase(dbPath, options = {}) {
   const readOnly = Boolean(options.readOnly);
+  const { busyTimeoutMs = 5000 } = options;
+  if (!Number.isInteger(busyTimeoutMs) || busyTimeoutMs <= 0) {
+    throw new RangeError('busyTimeoutMs must be a positive integer');
+  }
   if (!readOnly && typeof dbPath === 'string' && dbPath !== ':memory:' && !dbPath.startsWith('file:')) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   }
 
   const db = new DatabaseSync(dbPath, { readOnly });
   try {
-    db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
+    db.exec(`PRAGMA busy_timeout = ${Math.min(busyTimeoutMs, 2 ** 31 - 1)}; PRAGMA foreign_keys = ON;`);
     if (!readOnly) {
       retryOnBusy(() => db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;'));
       runMigrations(db);
