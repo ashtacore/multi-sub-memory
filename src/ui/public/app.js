@@ -166,9 +166,11 @@ function recordError(error) {
   }
 }
 
+const selectedDreamCheckouts = new Map();
+
 function updateDreamControls() {
   const project = projectSelect.value;
-  renderDreamControls(dreamData, project, dreamRequests.has(project));
+  renderDreamControls(dreamData, project, dreamRequests.has(project), selectedDreamCheckouts.get(project));
   const result = byId('dream-result');
   const state = dreamResults.get(project);
   result.hidden = !state;
@@ -352,8 +354,9 @@ function switchView(selected) {
 
 async function dream(dryRun) {
   const project = projectSelect.value;
+  const checkout = byId('dream-checkout').value;
   const fingerprint = dreamData?.config.config_fingerprint;
-  if (!fingerprint || dreamRequests.has(project)) return;
+  if (!checkout || !fingerprint || dreamData.project_key !== project || dreamRequests.has(project)) return;
   const trigger = document.activeElement;
   dreamRequests.add(project);
   dreamResults.delete(project);
@@ -361,7 +364,7 @@ async function dream(dryRun) {
   try {
     const result = await api('dreamer/run', {
       method: 'POST',
-      body: { project_key: project, dry_run: dryRun, expected_config_fingerprint: fingerprint },
+      body: { project_key: project, checkout, dry_run: dryRun, expected_config_fingerprint: fingerprint },
     });
     dreamResults.set(project, { message: dreamResult(result), tone: result.skipped ? '' : 'success' });
   } catch (error) {
@@ -400,6 +403,10 @@ byId('dream-sort-mobile').addEventListener('change', (event) => {
   dreamSort = sort;
   dreamOrder = order;
   void refreshView();
+});
+byId('dream-checkout').addEventListener('change', (event) => {
+  selectedDreamCheckouts.set(projectSelect.value, event.target.value);
+  updateDreamControls();
 });
 byId('dream-trigger').addEventListener('click', () => void dream(false));
 byId('dream-dryrun').addEventListener('click', () => void dream(true));

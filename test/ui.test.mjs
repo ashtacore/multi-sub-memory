@@ -8,11 +8,11 @@ import test from 'node:test';
 import { loadConfig, writeConfig } from '../src/config.mjs';
 import { acquireLease, hashNormalizedContent, MIGRATIONS, openDatabase, releaseLease } from '../src/db.mjs';
 import { addNoteComment, archiveMemory, recordAccess, writeMemory, writeNote } from '../src/memory-service.mjs';
-import { resolveProjectKey } from '../src/project-id.mjs';
+import { normalizePath, resolveProjectKey } from '../src/project-id.mjs';
 import { allowedLoopbackGuards, startDashboardServer } from '../src/ui/server.mjs';
 import { fixtureGit, initGit, writeProjectConfig } from './git-fixtures.mjs';
 
-async function fixture(t, { dreamer, env = {}, embeddingEngine, gitWorkspace = true } = {}) {
+async function fixture(t, { dreamer, env = {}, embeddingEngine, gitWorkspace = true, globalMode = false } = {}) {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'multi-sub-memory-ui-'));
   if (gitWorkspace) initGit(cwd);
   const dbPath = path.join(cwd, 'dashboard.db');
@@ -35,7 +35,7 @@ async function fixture(t, { dreamer, env = {}, embeddingEngine, gitWorkspace = t
     db?.close();
     db = undefined;
     db = openDatabase(dbPath);
-    dashboard = await startDashboardServer({ cwd, userConfigPath, db, env: dashboardEnv, embeddingEngine, port: 0 });
+    dashboard = await startDashboardServer({ cwd, globalMode, userConfigPath, db, env: dashboardEnv, embeddingEngine, port: 0 });
     return db;
   }
   await restart(env);
@@ -523,7 +523,7 @@ test('scope-only memory PATCH outside Git keeps an existing project and requires
   assert.equal(db.prepare('SELECT project_key FROM memories WHERE id = ?').get(memory.id).project_key, 'global');
 });
 
-test('Dreamer browses other workspaces and runs only for the launch workspace with current settings', async (t) => {
+test('Dreamer rejects unknown checkouts and uses the launch workspace settings by default', async (t) => {
   let runnerCalls = 0;
   const runner = createServer((req, res) => {
     runnerCalls++;
@@ -552,11 +552,11 @@ test('Dreamer browses other workspaces and runs only for the launch workspace wi
   assert.equal(info.json.config.enabled, true);
   const otherHistory = await request('/api/dreamer?project_key=' + encodeURIComponent(otherProjectKey));
   assert.equal(otherHistory.status, 200);
-  assert.equal(otherHistory.json.runnable_project_key, projectKey);
+  assert.equal(otherHistory.json.runnable_project_key, null);
   for (const dry_run of [false, true]) {
     const response = await mutate('POST', '/api/dreamer/run', { project_key: otherProjectKey, dry_run });
     assert.equal(response.status, 400);
-    assert.deepEqual(response.json, { error: 'Dreamer can only run for the workspace this dashboard was launched in' });
+    assert.match(response.json.error, /known local checkout/);
   }
 
   writeProjectConfig(userConfigPath, cwd, { dreamer: { enabled: false } });
@@ -569,6 +569,94 @@ test('Dreamer browses other workspaces and runs only for the launch workspace wi
   assert.deepEqual(disabled.json, { projectKey, skipped: true, reason: 'disabled' });
   assert.equal(runnerCalls, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM dream_runs').get().count, 0);
+});
+
+test('global dashboard runs Dreamer in verified checkouts and prefers the last-used checkout', async (t) => {
+  const models = [];
+  const runner = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    models.push(JSON.parse(Buffer.concat(chunks)).model);
+    const content = JSON.stringify({ summary: 'Fixture plan', operations: [] });
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+      choices: [{ message: { content } }],
+    }));
+  });
+  runner.listen(0, '127.0.0.1');
+  await once(runner, 'listening');
+  t.after(() => new Promise((resolve, reject) => runner.close((error) => error ? reject(error) : resolve())));
+
+  const { cwd, db, dbPath, request, mutate, userConfigPath } = await fixture(t, { globalMode: true });
+  const projectKey = 'example.test/owner/shared';
+  const anotherKey = 'example.test/owner/another';
+  const missingKey = 'example.test/owner/missing';
+  async function checkout(name, key) {
+    const root = path.join(cwd, name);
+    await mkdir(root);
+    initGit(root);
+    fixtureGit(root, 'remote', 'add', 'origin', 'https://' + key + '.git');
+    return normalizePath(root);
+  }
+  const registered = await checkout('registered', projectKey);
+  const configured = await checkout('configured', projectKey);
+  const unlisted = await checkout('unlisted', projectKey);
+  const another = await checkout('another', anotherKey);
+  const missing = path.join(cwd, 'removed');
+  const nonRoot = path.join(configured, 'subdir');
+  await mkdir(nonRoot);
+  const register = db.prepare('INSERT INTO projects (project_key, project_root, updated_at) VALUES (?, ?, ?)');
+  register.run(projectKey, registered, Date.now());
+  register.run(missingKey, missing, Date.now());
+  const dreamer = {
+    enabled: true, mode: 'http',
+    http: { baseUrl: 'http://127.0.0.1:' + runner.address().port + '/v1', model: 'default-model' },
+  };
+  writeConfig(userConfigPath, {
+    dbPath,
+    dreamer,
+    projects: {
+      [projectKey]: { checkouts: [configured, another, missing, nonRoot], dreamer: { http: { model: 'shared-model' } } },
+      [anotherKey]: { checkouts: [another] },
+    },
+  });
+
+  const overview = await request('/api/overview');
+  assert.equal(overview.status, 200, overview.text);
+  assert.equal(overview.json.default_project_key, null);
+  const projects = new Map(overview.json.projects.map((project) => [project.project_key, project.checkouts]));
+  assert.deepEqual(projects.get(projectKey), [registered, configured]);
+  assert.deepEqual(projects.get(anotherKey), [another]);
+  assert.deepEqual(projects.get(missingKey), []);
+
+  const endpoint = '/api/dreamer/run';
+  const status = async (key) => request('/api/dreamer?project_key=' + encodeURIComponent(key));
+  const info = await status(projectKey);
+  assert.equal(info.status, 200, info.text);
+  assert.deepEqual(info.json.checkouts, [registered, configured]);
+  assert.equal(info.json.config.runner.model, 'shared-model');
+  for (const checkout of [another, missing, unlisted, nonRoot]) {
+    assert.equal((await mutate('POST', endpoint, { project_key: projectKey, checkout, dry_run: true })).status, 400);
+  }
+  assert.equal((await mutate('POST', endpoint, { project_key: missingKey, dry_run: true })).status, 400);
+  assert.deepEqual(models, []);
+
+  for (const checkout of [registered, configured]) {
+    const response = await mutate('POST', endpoint, {
+      project_key: projectKey, checkout, dry_run: true,
+      expected_config_fingerprint: info.json.config.config_fingerprint,
+    });
+    assert.equal(response.status, 200, response.text);
+    assert.equal(response.json.status, 'dry-run');
+  }
+  assert.deepEqual((await status(projectKey)).json.checkouts, [configured, registered]);
+  const defaultRun = await mutate('POST', endpoint, { project_key: anotherKey, dry_run: true });
+  assert.equal(defaultRun.status, 200, defaultRun.text);
+  assert.equal(defaultRun.json.status, 'dry-run');
+  assert.deepEqual(models, ['shared-model', 'shared-model', 'default-model']);
+
+  await rm(configured, { recursive: true, force: true });
+  assert.deepEqual((await status(projectKey)).json.checkouts, [registered]);
+  assert.equal((await mutate('POST', endpoint, { project_key: projectKey, checkout: configured, dry_run: true })).status, 400);
 });
 
 test('Dreamer uses fresh authorization, redacts secrets, and records a dry run without applying it', async (t) => {

@@ -11,3 +11,5 @@ node_modules/
 Thumbs.db
 coverage/
 tmp/
+/desktop/.dashboard/
+/desktop/dist/
