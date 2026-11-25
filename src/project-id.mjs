@@ -94,3 +94,70 @@ export function resolveProjectKey(cwd = process.cwd(), { timeoutMs } = {}) {
     isGit,
   };
 }
+
+function splitProjectSegments(projectRoot) {
+  const normalized = projectRoot.replaceAll('\\', '/').replace(/\/+$/, '');
+  const segments = normalized.split('/').filter(Boolean);
+  if (!segments.length) return null;
+  return {
+    base: segments.at(-1),
+    ancestors: segments.slice(0, -1).reverse(),
+  };
+}
+
+export function formatProjectLabels(entries) {
+  const labels = new Map();
+  const byBase = new Map();
+
+  for (const { projectKey, projectRoot } of entries) {
+    const parsed = typeof projectRoot === 'string' && projectRoot.trim()
+      ? splitProjectSegments(projectRoot.trim())
+      : null;
+    if (!parsed) {
+      labels.set(projectKey, projectKey);
+      continue;
+    }
+    const groupKey = parsed.base.toLowerCase();
+    const group = byBase.get(groupKey) ?? [];
+    group.push({ projectKey, ...parsed });
+    byBase.set(groupKey, group);
+  }
+
+  for (const group of byBase.values()) {
+    if (group.length === 1) {
+      labels.set(group[0].projectKey, group[0].base);
+      continue;
+    }
+    let remaining = group;
+    let depth = 1;
+    while (remaining.length > 0) {
+      if (!remaining.some(({ ancestors }) => ancestors.length >= depth)) {
+        for (const item of remaining) {
+          labels.set(item.projectKey, `${item.base} (${item.projectKey})`);
+        }
+        break;
+      }
+      const buckets = new Map();
+      for (const item of remaining) {
+        const qualifier = item.ancestors.slice(0, depth).reverse().join('/');
+        const key = qualifier.toLowerCase();
+        const bucket = buckets.get(key) ?? [];
+        bucket.push({ item, qualifier });
+        buckets.set(key, bucket);
+      }
+      const next = [];
+      for (const bucket of buckets.values()) {
+        if (bucket.length === 1) {
+          const { item, qualifier } = bucket[0];
+          labels.set(item.projectKey, qualifier ? `${item.base} (${qualifier})` : `${item.base} (${item.projectKey})`);
+        } else {
+          for (const { item } of bucket) next.push(item);
+        }
+      }
+      remaining = next;
+      depth++;
+    }
+  }
+
+  return labels;
+}

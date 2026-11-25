@@ -118,7 +118,7 @@ export async function startDashboardServer(options = {}) {
   const baseConfig = options.config ?? loadConfig({ cwd, ...configOptions });
   const config = options.dbPath === undefined
     ? baseConfig : { ...baseConfig, dbPath: expandHome(options.dbPath, homeDir) };
-  const { projectKey: defaultProjectKey } = resolveProjectKey(cwd);
+  const { projectKey: defaultProjectKey, projectRoot: defaultProjectRoot } = resolveProjectKey(cwd);
   const publicRoot = await realpath(publicDir);
   const csrfToken = randomBytes(32).toString('hex');
   const tokenBytes = Buffer.from(csrfToken);
@@ -126,7 +126,7 @@ export async function startDashboardServer(options = {}) {
     ? createEmbeddingEngine({ embedding: config.embedding, env }) : options.embeddingEngine;
   const ownsDb = !options.db;
   const db = options.db ?? openDatabase(config.dbPath);
-  const api = createApi({ db, config, cwd, defaultProjectKey, embeddingEngine, env, configOptions });
+  const api = createApi({ db, config, cwd, defaultProjectKey, defaultProjectRoot, embeddingEngine, env, configOptions });
   const inFlight = new Set();
   let hosts;
   let origins;

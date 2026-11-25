@@ -202,6 +202,17 @@ export const MIGRATIONS = [{
       db.exec('ALTER TABLE dream_runs ADD COLUMN last_transcript_message_id INTEGER;');
     }
   },
+}, {
+  version: 6,
+  up(db) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS projects (
+        project_key TEXT PRIMARY KEY NOT NULL,
+        project_root TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  },
 }];
 
 const busyWait = new Int32Array(new SharedArrayBuffer(4));

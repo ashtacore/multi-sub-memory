@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { normalizePath, resolveProjectKey } from '../src/project-id.mjs';
+import { formatProjectLabels, normalizePath, resolveProjectKey } from '../src/project-id.mjs';
 
 function tempDirectory(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-project-'));
@@ -159,4 +159,38 @@ test('POSIX directories with literal backslashes have distinct keys', { skip: pr
   assert.equal(first.projectRoot, path.join(fs.realpathSync.native(directory), 'a\\b'));
   assert.notEqual(first.projectRoot, second.projectRoot);
   assert.notEqual(first.projectKey, second.projectKey);
+});
+
+test('formatProjectLabels uses basename and appends unique ancestor segments on collision', () => {
+  const unique = formatProjectLabels([
+    { projectKey: 'dir:1', projectRoot: 'C:\\Programming\\GameDev\\CoveCrawler' },
+    { projectKey: 'dir:2', projectRoot: '/home/dev/multi-sub-memory' },
+    { projectKey: 'dir:unknown', projectRoot: null },
+  ]);
+  assert.equal(unique.get('dir:1'), 'CoveCrawler');
+  assert.equal(unique.get('dir:2'), 'multi-sub-memory');
+  assert.equal(unique.get('dir:unknown'), 'dir:unknown');
+
+  const singleLevel = formatProjectLabels([
+    { projectKey: 'dir:a', projectRoot: 'C:\\Programming\\GameDev\\CoveCrawler' },
+    { projectKey: 'dir:b', projectRoot: 'C:\\Programming\\CoveCrawler' },
+  ]);
+  assert.equal(singleLevel.get('dir:a'), 'CoveCrawler (GameDev)');
+  assert.equal(singleLevel.get('dir:b'), 'CoveCrawler (Programming)');
+
+  const multiLevel = formatProjectLabels([
+    { projectKey: 'dir:a', projectRoot: 'C:\\Work\\GameDev\\CoveCrawler' },
+    { projectKey: 'dir:b', projectRoot: 'C:\\Personal\\GameDev\\CoveCrawler' },
+    { projectKey: 'dir:c', projectRoot: 'C:\\Programming\\CoveCrawler' },
+  ]);
+  assert.equal(multiLevel.get('dir:a'), 'CoveCrawler (Work/GameDev)');
+  assert.equal(multiLevel.get('dir:b'), 'CoveCrawler (Personal/GameDev)');
+  assert.equal(multiLevel.get('dir:c'), 'CoveCrawler (Programming)');
+
+  const driveLevel = formatProjectLabels([
+    { projectKey: 'dir:c', projectRoot: 'c:/CoveCrawler' },
+    { projectKey: 'dir:d', projectRoot: 'd:/CoveCrawler' },
+  ]);
+  assert.equal(driveLevel.get('dir:c'), 'CoveCrawler (c:)');
+  assert.equal(driveLevel.get('dir:d'), 'CoveCrawler (d:)');
 });

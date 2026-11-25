@@ -11,10 +11,13 @@ function prettyMetadata(value) {
   }
 }
 
-function memoryDetails(memory) {
+function memoryDetails(memory, projectLabel) {
   const details = node('details', { testId: 'mem-provenance' }, node('summary', { text: 'Provenance' }),
     definitionList([
       ['ID', memory.id],
+      ['Project', memory.project_name ?? projectLabel(memory.project_key)],
+      ['Project path', memory.project_root],
+      ['Project key', memory.project_key],
       ['Source orchestrator', memory.source_orchestrator],
       ['Source session', memory.source_session_id],
       ['Created', dateText(memory.created_at)],
@@ -26,7 +29,9 @@ function memoryDetails(memory) {
   return details;
 }
 
-export function renderRecords(list, records, kind, { onSaved, onError, fallbackFocus, append = false }) {
+export function renderRecords(list, records, kind, {
+  onSaved, onError, fallbackFocus, append = false, projectLabel = (key) => key,
+}) {
   const previousFocus = document.activeElement;
   const previousCard = list.contains(previousFocus) && previousFocus.closest('article');
   const isMemory = kind === 'memory';
@@ -40,18 +45,24 @@ export function renderRecords(list, records, kind, { onSaved, onError, fallbackF
     const tags = isMemory ? [
       badge(categoryText(record.category)), badge('I' + record.importance), badge(categoryText(record.scope)),
     ] : [];
-    tags.push(badge(categoryText(record.status), toneFor(record.status)), badge(record.project_key));
+    const projectBadge = badge(projectLabel(record.project_key));
+    projectBadge.dataset.projectKey = record.project_key;
+    projectBadge.title = record.project_key;
+    tags.push(badge(categoryText(record.status), toneFor(record.status)), projectBadge);
     if (!isMemory && record.surface_condition) tags.push(badge(record.surface_condition));
 
     const edit = button('Edit', prefix + '-edit', (trigger) => {
       if (isMemory) {
-        const { content, category, importance, status } = record;
-        editMemory(trigger, { content, category, importance, status },
+        const { content, category, importance, status, project_key } = record;
+        editMemory(trigger, { content, category, importance, status, project_key },
           (values) => {
             if ('importance' in values) values.importance = Number(values.importance);
+            if ('project_key' in values) {
+              values.scope = values.project_key === 'global' ? 'global' : 'project';
+            }
             return update(values);
           },
-          () => onSaved('Memory saved.'), onError);
+          () => onSaved('Memory saved.'), onError, projectLabel);
       } else {
         const { content, status, surface_condition } = record;
         editNote(trigger, { content, status, surface_condition: surface_condition ?? '' },
@@ -65,21 +76,30 @@ export function renderRecords(list, records, kind, { onSaved, onError, fallbackF
     const restoring = isMemory ? record.status !== 'active' : record.status === 'dismissed';
     const nextStatus = restoring ? 'active' : isMemory ? 'archived' : 'dismissed';
     const action = restoring ? 'Restore' : isMemory ? 'Archive' : 'Dismiss';
-    const changeStatus = button(action, prefix + '-' + action.toLowerCase(), async (trigger) => {
-      trigger.disabled = true;
-      try {
-        await update({ status: nextStatus });
-        if (trigger.isConnected && document.activeElement === document.body) {
+    function statusButton(label, targetStatus, testSuffix, message) {
+      return button(label, prefix + '-' + testSuffix, async (trigger) => {
+        trigger.disabled = true;
+        try {
+          await update({ status: targetStatus });
+          if (trigger.isConnected && document.activeElement === document.body) {
+            trigger.disabled = false;
+            trigger.focus();
+          }
+          onSaved(message);
+        } catch (error) {
+          onError(error);
+        } finally {
           trigger.disabled = false;
-          trigger.focus();
         }
-        onSaved((isMemory ? 'Memory' : 'Note') + ' ' + (restoring ? 'restored' : nextStatus) + '.');
-      } catch (error) {
-        onError(error);
-      } finally {
-        trigger.disabled = false;
-      }
-    });
+      });
+    }
+    const activate = !isMemory && record.status === 'pending'
+      ? statusButton('Activate', 'active', 'activate', 'Note activated.')
+      : null;
+    const changeStatus = statusButton(
+      action, nextStatus, action.toLowerCase(),
+      (isMemory ? 'Memory' : 'Note') + ' ' + (restoring ? 'restored' : nextStatus) + '.',
+    );
     const remove = button('Delete', prefix + '-delete', (trigger) => {
       confirmDelete(trigger, kind, () => api(path, { method: 'DELETE' }),
         () => onSaved(isMemory ? 'Memory deleted.' : 'Note deleted.'));
@@ -87,10 +107,10 @@ export function renderRecords(list, records, kind, { onSaved, onError, fallbackF
     const card = node('article', { className: 'card record', testId: kind + '-card' },
       node('div', { className: 'tags' }, ...tags),
       node('p', { text: record.content, className: 'record-content' }),
-      isMemory ? memoryDetails(record) : definitionList([
+      isMemory ? memoryDetails(record, projectLabel) : definitionList([
         ['Created', dateText(record.created_at)], ['Updated', dateText(record.updated_at)],
       ]),
-      node('div', { className: 'actions' }, edit, changeStatus, remove),
+      node('div', { className: 'actions' }, edit, ...(activate ? [activate] : []), changeStatus, remove),
     );
     card.dataset.recordId = record.id;
     return card;

@@ -75,13 +75,17 @@ function bindDialog(id) {
 
 const openMemory = bindDialog('edit-memory-dialog');
 const memoryStatus = byId('edit-memory-dialog').querySelector('select[name="status"]');
+const memoryProject = byId('edit-memory-dialog').querySelector('select[name="project_key"]');
 const supersededOption = new Option('Superseded', 'superseded');
 
-export function editMemory(trigger, values, save, onSaved, onConflict) {
+export function editMemory(trigger, values, save, onSaved, onConflict, projectLabel = (key) => key) {
   if (values.status === 'superseded') {
     memoryStatus.add(supersededOption);
   } else {
     supersededOption.remove();
+  }
+  if (values.project_key && ![...memoryProject.options].some(({ value }) => value === values.project_key)) {
+    memoryProject.add(new Option(projectLabel(values.project_key), values.project_key));
   }
   openMemory(trigger, values, save, onSaved, onConflict);
 }

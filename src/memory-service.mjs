@@ -70,9 +70,24 @@ function requireContent(content) {
   return content;
 }
 
+function projectIdentityFor(scope, input, context) {
+  if (scope === 'global') return { projectKey: GLOBAL_PROJECT_KEY, projectRoot: null };
+  return resolveCachedProjectKey(input.cwd ?? context.defaultCwd);
+}
+
 function projectKeyFor(scope, input, context) {
-  if (scope === 'global') return GLOBAL_PROJECT_KEY;
-  return resolveCachedProjectKey(input.cwd ?? context.defaultCwd).projectKey;
+  return projectIdentityFor(scope, input, context).projectKey;
+}
+
+function recordProject(db, projectKey, projectRoot, now) {
+  if (!projectKey || projectKey === GLOBAL_PROJECT_KEY || !projectRoot) return;
+  db.prepare(`
+    INSERT INTO projects (project_key, project_root, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT (project_key) DO UPDATE SET
+      project_root = excluded.project_root,
+      updated_at = excluded.updated_at
+  `).run(projectKey, projectRoot, now);
 }
 
 function formatMemory(row) {
@@ -148,10 +163,11 @@ export async function writeMemory(db, input, context = {}) {
   const content = requireContent(input.content);
   const { scope = 'project', category = 'GENERAL', importance = 3 } = input;
   if (!MEMORY_SCOPES.includes(scope)) throw new Error('Memory scope must be project or global');
-  const projectKey = projectKeyFor(scope, input, context);
+  const { projectKey, projectRoot } = projectIdentityFor(scope, input, context);
   const hash = hashNormalizedContent(content);
   const result = inWriteTransaction(db, () => {
     const now = Date.now();
+    recordProject(db, projectKey, projectRoot, now);
     const row = db.prepare(`
       INSERT INTO memories (
         id, project_key, scope, category, content, normalized_hash, importance,
@@ -202,14 +218,41 @@ export async function updateMemory(db, input, context = {}) {
   if (input.scope !== undefined && !MEMORY_SCOPES.includes(input.scope)) {
     throw new Error('Memory scope must be project or global');
   }
-  const targetProjectKey = input.scope === 'project' ? projectKeyFor('project', input, context) : GLOBAL_PROJECT_KEY;
+  if (input.project_key !== undefined && (typeof input.project_key !== 'string' || !input.project_key.trim() || input.project_key.trim() !== input.project_key)) {
+    throw new Error('Memory project_key must be a non-blank string');
+  }
+  if (input.scope === 'global' && input.project_key !== undefined && input.project_key !== GLOBAL_PROJECT_KEY) {
+    throw new Error('Global memories must use the global project key');
+  }
+  if (input.scope === 'project' && input.project_key === GLOBAL_PROJECT_KEY) {
+    throw new Error('Project memories cannot use the global project key');
+  }
+  const needsDefaultProject = input.scope === 'project' && input.project_key === undefined;
+  const targetProject = needsDefaultProject
+    ? projectIdentityFor('project', input, context)
+    : { projectKey: input.project_key ?? GLOBAL_PROJECT_KEY, projectRoot: null };
+  const targetProjectKey = targetProject.projectKey;
   let result;
   try {
     result = inWriteTransaction(db, () => {
       const existing = memoryRow(db, input.id);
       checkRevision(existing, context.expectedUpdatedAt);
-      const scope = input.scope ?? existing.scope;
-      const projectKey = scope === existing.scope ? existing.project_key : targetProjectKey;
+      const scope = input.scope ?? (input.project_key !== undefined
+        ? (input.project_key === GLOBAL_PROJECT_KEY ? 'global' : 'project')
+        : existing.scope);
+      let projectKey;
+      if (scope === 'global') {
+        projectKey = GLOBAL_PROJECT_KEY;
+      } else if (input.project_key !== undefined) {
+        projectKey = input.project_key;
+      } else if (existing.scope === 'project') {
+        projectKey = existing.project_key;
+      } else {
+        projectKey = targetProjectKey;
+      }
+      if (scope === 'project' && needsDefaultProject && projectKey === targetProjectKey) {
+        recordProject(db, targetProjectKey, targetProject.projectRoot, Date.now());
+      }
       const status = input.status ?? existing.status;
       if (status === 'superseded' && existing.superseded_by === null) {
         throw new Error('Use archive with superseded_by to mark a memory as superseded');
@@ -298,17 +341,20 @@ export function writeNote(db, input, context = {}) {
   const content = requireContent(input.content);
   const { status = 'active' } = input;
   if (status !== 'active' && status !== 'pending') throw new Error('New note status must be active or pending');
-  const projectKey = projectKeyFor('project', input, context);
+  const { projectKey, projectRoot } = projectIdentityFor('project', input, context);
   const now = Date.now();
-  return db.prepare(`
-    INSERT INTO notes (
-      id, project_key, status, content, surface_condition, source_orchestrator,
-      source_session_id, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
-  `).get(
-    generateId(), projectKey, status, content, input.surface_condition ?? null,
-    input.source_orchestrator ?? null, input.source_session_id ?? null, now, now,
-  );
+  return inWriteTransaction(db, () => {
+    recordProject(db, projectKey, projectRoot, now);
+    return db.prepare(`
+      INSERT INTO notes (
+        id, project_key, status, content, surface_condition, source_orchestrator,
+        source_session_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
+    `).get(
+      generateId(), projectKey, status, content, input.surface_condition ?? null,
+      input.source_orchestrator ?? null, input.source_session_id ?? null, now, now,
+    );
+  });
 }
 
 export function selectNotes(db, { projectKey, status, includeGlobal }) {

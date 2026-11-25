@@ -194,8 +194,30 @@ test('overview combines project and global status counts without returning local
   assert.deepEqual(data.global.memories, { active: 1, archived: 0, superseded: 0, total: 1 });
   assert.deepEqual(data.totals.memories, { active: 2, archived: 0, superseded: 0, total: 2 });
   assert.deepEqual(data.totals.notes, { active: 0, pending: 1, dismissed: 1, total: 2 });
+  assert.equal(projects.get(projectKey).display_name, path.basename(cwd));
+  assert.equal(projects.get('dreamer-only').display_name, 'dreamer-only');
+  assert.equal(projects.get('transcripts-only').display_name, 'transcripts-only');
   assert.equal(response.text.includes('fixture.jsonl'), false);
   assert.equal(response.text.includes('dashboard.db'), false);
+});
+
+test('overview disambiguates colliding project directory names with parent segments', async (t) => {
+  const { cwd, db, request } = await fixture(t);
+  const firstDir = path.join(cwd, 'Programming', 'GameDev', 'CoveCrawler');
+  const secondDir = path.join(cwd, 'Programming', 'CoveCrawler');
+  await mkdir(firstDir, { recursive: true });
+  await mkdir(secondDir, { recursive: true });
+  await writeMemory(db, { cwd: firstDir, content: 'GameDev CoveCrawler memory' });
+  await writeMemory(db, { cwd: secondDir, content: 'Programming CoveCrawler memory' });
+
+  const firstKey = resolveProjectKey(firstDir).projectKey;
+  const secondKey = resolveProjectKey(secondDir).projectKey;
+  const response = await request('/api/overview');
+  assert.equal(response.status, 200);
+  const projects = new Map(response.json.projects.map((item) => [item.project_key, item]));
+  assert.equal(projects.get(firstKey).display_name, 'CoveCrawler (GameDev)');
+  assert.equal(projects.get(secondKey).display_name, 'CoveCrawler (Programming)');
+  assert.equal(response.text.includes('project_root'), false);
 });
 
 test('memories edit, archive, restore, rank filtered results, and delete associated search data', async (t) => {
@@ -628,4 +650,138 @@ test('Dreamer uses fresh authorization, redacts secrets, and records a dry run w
     + ' GET `/obj?X-Amz-Signature=[REDACTED]`';
   assert.equal(legacy.summary, sanitized);
   assert.equal(legacy.error, sanitized);
+});
+
+test('memories, notes, and dreamer endpoints support sorting and dreamer status filtering', async (t) => {
+  const { db, projectKey, request } = await fixture(t);
+  const insertMemory = db.prepare(`
+    INSERT INTO memories (id, project_key, scope, category, content, normalized_hash, importance, status, created_at, updated_at)
+    VALUES (?, ?, 'project', 'GENERAL', ?, ?, ?, 'active', ?, ?)
+  `);
+  insertMemory.run('m1', projectKey, 'First memory', hashNormalizedContent('First memory'), 2, 100, 300);
+  insertMemory.run('m2', projectKey, 'Second memory', hashNormalizedContent('Second memory'), 5, 200, 200);
+  insertMemory.run('m3', projectKey, 'Third memory', hashNormalizedContent('Third memory'), 3, 300, 100);
+
+  assert.deepEqual((await request('/api/memories?sort=importance&order=asc')).json.memories.map(({ id }) => id), ['m1', 'm3', 'm2']);
+  assert.deepEqual((await request('/api/memories?sort=created_at&order=desc')).json.memories.map(({ id }) => id), ['m3', 'm2', 'm1']);
+  assert.deepEqual((await request('/api/memories?sort=updated_at&order=desc')).json.memories.map(({ id }) => id), ['m1', 'm2', 'm3']);
+  assert.equal((await request('/api/memories?sort=bogus')).status, 400);
+  assert.equal((await request('/api/memories?order=sideways')).status, 400);
+
+  const insertNote = db.prepare(`
+    INSERT INTO notes (id, project_key, status, content, created_at, updated_at)
+    VALUES (?, ?, 'active', ?, ?, ?)
+  `);
+  insertNote.run('n1', projectKey, 'First note', 100, 300);
+  insertNote.run('n2', projectKey, 'Second note', 200, 200);
+  insertNote.run('n3', projectKey, 'Third note', 300, 100);
+
+  const page1 = await request('/api/notes?status=active&sort=created_at&order=asc&limit=2');
+  assert.deepEqual(page1.json.notes.map(({ id }) => id), ['n1', 'n2']);
+  assert.ok(page1.json.next_cursor);
+  const page2 = await request('/api/notes?status=active&sort=created_at&order=asc&limit=2&cursor=' + page1.json.next_cursor);
+  assert.deepEqual(page2.json.notes.map(({ id }) => id), ['n3']);
+  assert.equal(page2.json.next_cursor, null);
+  assert.deepEqual((await request('/api/notes?status=active&sort=updated_at&order=asc')).json.notes.map(({ id }) => id), ['n3', 'n2', 'n1']);
+  assert.equal((await request('/api/notes?sort=bogus')).status, 400);
+
+  const insertRun = db.prepare(`
+    INSERT INTO dream_runs (id, project_key, runner, status, started_at, finished_at, summary, error)
+    VALUES (?, ?, 'http', ?, ?, ?, ?, ?)
+  `);
+  insertRun.run('r1', projectKey, 'completed', 1000, 9000, 'Slow run', null);
+  insertRun.run('r2', projectKey, 'failed', 2000, 4000, null, 'Quick failure');
+  insertRun.run('r3', projectKey, 'running', 3000, null, null, null);
+
+  assert.deepEqual((await request('/api/dreamer?status=failed')).json.runs.map(({ id }) => id), ['r2']);
+  assert.deepEqual((await request('/api/dreamer?sort=started_at&order=asc')).json.runs.map(({ id }) => id), ['r1', 'r2', 'r3']);
+  assert.deepEqual((await request('/api/dreamer?sort=finished_at&order=desc')).json.runs.map(({ id }) => id), ['r1', 'r2', 'r3']);
+  assert.deepEqual((await request('/api/dreamer?sort=finished_at&order=asc')).json.runs.map(({ id }) => id), ['r2', 'r1', 'r3']);
+  assert.deepEqual((await request('/api/dreamer?sort=duration&order=desc')).json.runs.map(({ id }) => id), ['r1', 'r2', 'r3']);
+  assert.deepEqual((await request('/api/dreamer?sort=duration&order=asc')).json.runs.map(({ id }) => id), ['r2', 'r1', 'r3']);
+  assert.equal((await request('/api/dreamer?status=bogus')).status, 400);
+  assert.equal((await request('/api/dreamer?sort=bogus')).status, 400);
+});
+
+test('memories expose project provenance and can move between projects or promote to global', async (t) => {
+  const { db, cwd, projectKey, request, mutate } = await fixture(t);
+  const otherCwd = path.join(path.dirname(cwd), 'other-app');
+  await mkdir(otherCwd, { recursive: true });
+  const { memory: projectMem } = await writeMemory(db, {
+    content: 'Project memory to move', category: 'ARCHITECTURE', importance: 4,
+  }, { defaultCwd: cwd });
+  const { memory: otherMem } = await writeMemory(db, {
+    content: 'Already in other project', category: 'GENERAL', importance: 3, cwd: otherCwd,
+  }, { defaultCwd: cwd });
+  const { memory: globalMem } = await writeMemory(db, {
+    content: 'Existing global memory', scope: 'global', category: 'WORKFLOW', importance: 5,
+  }, { defaultCwd: cwd });
+
+  const listed = await request('/api/memories');
+  assert.equal(listed.status, 200);
+  const listedProject = listed.json.memories.find(({ id }) => id === projectMem.id);
+  const listedGlobal = listed.json.memories.find(({ id }) => id === globalMem.id);
+  assert.equal(listedProject.project_name, path.basename(cwd));
+  assert.equal(listedProject.project_root, resolveProjectKey(cwd).projectRoot);
+  assert.equal(listedGlobal.project_name, 'Global');
+  assert.equal(listedGlobal.project_root, null);
+
+  // Move project memory to another project.
+  const moved = await mutate('PATCH', '/api/memories/' + projectMem.id, {
+    scope: 'project',
+    project_key: otherMem.project_key,
+    expected_updated_at: String(projectMem.updated_at),
+  });
+  assert.equal(moved.status, 200, moved.text);
+  assert.equal(moved.json.memory.scope, 'project');
+  assert.equal(moved.json.memory.project_key, otherMem.project_key);
+  assert.equal(moved.json.memory.project_name, 'other-app');
+  assert.equal(moved.json.memory.project_root, resolveProjectKey(otherCwd).projectRoot);
+
+  // Promote to global.
+  const promoted = await mutate('PATCH', '/api/memories/' + projectMem.id, {
+    scope: 'global',
+    project_key: 'global',
+    expected_updated_at: String(moved.json.memory.updated_at),
+  });
+  assert.equal(promoted.status, 200, promoted.text);
+  assert.equal(promoted.json.memory.scope, 'global');
+  assert.equal(promoted.json.memory.project_key, 'global');
+  assert.equal(promoted.json.memory.project_name, 'Global');
+  assert.equal(promoted.json.memory.project_root, null);
+
+  // Demote global back to original project.
+  const demoted = await mutate('PATCH', '/api/memories/' + projectMem.id, {
+    scope: 'project',
+    project_key: projectKey,
+    expected_updated_at: String(promoted.json.memory.updated_at),
+  });
+  assert.equal(demoted.status, 200, demoted.text);
+  assert.equal(demoted.json.memory.scope, 'project');
+  assert.equal(demoted.json.memory.project_key, projectKey);
+
+  // Reject invalid scope/project_key combinations.
+  const badGlobal = await mutate('PATCH', '/api/memories/' + projectMem.id, {
+    scope: 'global',
+    project_key: otherMem.project_key,
+    expected_updated_at: String(demoted.json.memory.updated_at),
+  });
+  assert.equal(badGlobal.status, 400);
+  const badProject = await mutate('PATCH', '/api/memories/' + projectMem.id, {
+    scope: 'project',
+    project_key: 'global',
+    expected_updated_at: String(demoted.json.memory.updated_at),
+  });
+  assert.equal(badProject.status, 400);
+
+  // Reject duplicate content conflict in target project.
+  const { memory: dupSource } = await writeMemory(db, {
+    content: 'Already in other project', category: 'GENERAL', importance: 3,
+  }, { defaultCwd: cwd });
+  const conflict = await mutate('PATCH', '/api/memories/' + dupSource.id, {
+    scope: 'project',
+    project_key: otherMem.project_key,
+    expected_updated_at: String(dupSource.updated_at),
+  });
+  assert.equal(conflict.status, 409, conflict.text);
 });

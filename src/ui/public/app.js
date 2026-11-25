@@ -5,17 +5,40 @@ import { renderRecords } from './records.js';
 
 const categories = ['ARCHITECTURE', 'CONFIG_VALUES', 'CONSTRAINTS', 'PROJECT_RULES', 'DECISIONS', 'WORKFLOW', 'GENERAL'];
 const projectSelect = byId('project');
+const editMemoryProjectSelect = byId('edit-memory-dialog').querySelector('select[name="project_key"]');
 const search = byId('mem-search');
 const memoryCount = byId('mem-count');
 const notesLoadMore = byId('notes-load-more');
 const navigation = [...document.querySelectorAll('[data-view]')];
 const noteStatuses = [...document.querySelectorAll('[data-status]')];
 const errors = new Map();
+const projectNames = new Map();
 const dreamResults = new Map();
+
+function projectLabel(projectKey) {
+  if (projectKey === 'global') return 'Global';
+  return projectNames.get(projectKey) ?? projectKey;
+}
+
+function syncProjectLabels() {
+  for (const element of document.querySelectorAll('[data-project-key]')) {
+    const key = element.dataset.projectKey;
+    const label = projectLabel(key);
+    if (element.dataset.projectSuffix) {
+      const text = label + element.dataset.projectSuffix;
+      if (element.textContent !== text) element.textContent = text;
+    } else if (element.textContent !== label) {
+      element.textContent = label;
+    }
+  }
+}
 const dreamRequests = new Set();
 const recordQueries = new Map();
 let view = 'memories';
 let noteStatus = 'active';
+let dreamStatus = 'all';
+let dreamSort = 'started_at';
+let dreamOrder = 'desc';
 let overview;
 let overviewRequest;
 let viewRequest;
@@ -62,23 +85,33 @@ function refreshStats() {
 }
 
 function updateProjectOptions(projects, defaultKey) {
-  const labels = projects.map(({ project_key }) => [
-    project_key, project_key + (project_key === defaultKey ? ' · current' : ''),
+  projectNames.clear();
+  for (const { project_key, display_name } of projects) {
+    projectNames.set(project_key, display_name || project_key);
+  }
+  syncProjectLabels();
+  const labels = projects.map(({ project_key, display_name }) => [
+    project_key, (display_name || project_key) + (project_key === defaultKey ? ' · current' : ''),
   ]);
-  if (JSON.stringify(labels) === JSON.stringify([...projectSelect.options].slice(2).map((item) => [item.value, item.text]))) return;
-  const selected = projectSelect.value;
-  projectSelect.replaceChildren(...[...projectSelect.options].slice(0, 2));
+  syncSelectOptions(projectSelect, 2, labels);
+  syncSelectOptions(editMemoryProjectSelect, 1, labels);
+}
+
+function syncSelectOptions(select, fixedCount, labels) {
+  if (JSON.stringify(labels) === JSON.stringify([...select.options].slice(fixedCount).map((item) => [item.value, item.text]))) return;
+  const selected = select.value;
+  select.replaceChildren(...[...select.options].slice(0, fixedCount));
   for (const [key, label] of labels) {
     const option = node('option', { text: label });
     option.value = key;
-    projectSelect.append(option);
+    select.append(option);
   }
-  if (![...projectSelect.options].some(({ value }) => value === selected)) {
-    const option = node('option', { text: selected });
+  if (selected && ![...select.options].some(({ value }) => value === selected)) {
+    const option = node('option', { text: projectLabel(selected) });
     option.value = selected;
-    projectSelect.append(option);
+    select.append(option);
   }
-  projectSelect.value = selected;
+  if (selected) select.value = selected;
 }
 
 async function refreshOverview() {
@@ -140,6 +173,33 @@ function updateDreamControls() {
   result.className = 'banner' + (state?.tone ? ' ' + state.tone : '');
 }
 
+function splitSort(value) {
+  const [sort, order] = value.split(':');
+  return { sort, order };
+}
+
+function syncDreamMobileControls() {
+  byId('dream-status-mobile').value = dreamStatus;
+  byId('dream-sort-mobile').value = `${dreamSort}:${dreamOrder}`;
+}
+
+function handleDreamStatus(status) {
+  dreamStatus = status;
+  syncDreamMobileControls();
+  void refreshView();
+}
+
+function handleDreamSort(column) {
+  if (dreamSort === column) {
+    dreamOrder = dreamOrder === 'desc' ? 'asc' : 'desc';
+  } else {
+    dreamSort = column;
+    dreamOrder = 'desc';
+  }
+  syncDreamMobileControls();
+  void refreshView();
+}
+
 async function refreshView({ quiet = false, append = false } = {}) {
   clearTimeout(searchTimer);
   viewRequest?.abort();
@@ -151,12 +211,12 @@ async function refreshView({ quiet = false, append = false } = {}) {
   if (current === 'memories') {
     Object.assign(params, {
       q: search.value, scope: byId('mem-scope').value, category: byId('mem-category').value,
-      status: byId('mem-status').value,
+      status: byId('mem-status').value, ...splitSort(byId('mem-sort').value),
     });
     if (!quiet) memoryCount.textContent = 'Loading…';
   }
   if (current === 'notes') {
-    params.status = noteStatus;
+    Object.assign(params, { status: noteStatus, ...splitSort(byId('note-sort').value) });
     if (append) {
       params.cursor = notesNextCursor;
       notesLoadMore.setAttribute('aria-disabled', 'true');
@@ -165,6 +225,9 @@ async function refreshView({ quiet = false, append = false } = {}) {
       notesLoadMore.hidden = true;
       notesLoadMore.removeAttribute('aria-disabled');
     }
+  }
+  if (current === 'dreamer') {
+    Object.assign(params, { status: dreamStatus, sort: dreamSort, order: dreamOrder });
   }
   if (current !== 'dreamer' && !append) {
     const key = new URLSearchParams(params).toString();
@@ -181,14 +244,20 @@ async function refreshView({ quiet = false, append = false } = {}) {
     showError('view');
     if (current === 'dreamer') {
       dreamData = data;
-      renderDream(data);
+      renderDream(data, projectLabel, {
+        status: dreamStatus,
+        sort: dreamSort,
+        order: dreamOrder,
+        onStatus: handleDreamStatus,
+        onSort: handleDreamSort,
+      });
       updateDreamControls();
       return;
     }
     const kind = current === 'memories' ? 'memory' : 'note';
     const heading = byId(current + '-heading');
     const firstAdded = renderRecords(byId(kind + '-list'), data[current], kind, {
-      onSaved: saved, onError: recordError, fallbackFocus: heading, append,
+      onSaved: saved, onError: recordError, fallbackFocus: heading, append, projectLabel,
     });
     if (current === 'notes') {
       notesNextCursor = data.next_cursor;
@@ -279,7 +348,16 @@ projectSelect.addEventListener('change', () => {
   void refreshView();
 });
 search.addEventListener('input', scheduleSearch);
-for (const id of ['mem-scope', 'mem-category', 'mem-status']) byId(id).addEventListener('change', () => void refreshView());
+for (const id of ['mem-scope', 'mem-category', 'mem-status', 'mem-sort', 'note-sort']) {
+  byId(id).addEventListener('change', () => void refreshView());
+}
+byId('dream-status-mobile').addEventListener('change', (event) => handleDreamStatus(event.target.value));
+byId('dream-sort-mobile').addEventListener('change', (event) => {
+  const { sort, order } = splitSort(event.target.value);
+  dreamSort = sort;
+  dreamOrder = order;
+  void refreshView();
+});
 byId('dream-trigger').addEventListener('click', () => void dream(false));
 byId('dream-dryrun').addEventListener('click', () => void dream(true));
 notesLoadMore.addEventListener('click', () => {

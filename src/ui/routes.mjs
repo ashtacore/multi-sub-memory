@@ -6,11 +6,17 @@ import {
   GLOBAL_PROJECT_KEY, MAX_LIST_LIMIT, MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
   StaleRecordError, updateMemory, updateNote,
 } from '../memory-service.mjs';
+import { formatProjectLabels } from '../project-id.mjs';
 import { hybridSearch } from '../search.mjs';
 
 const all = 'all';
 const globalKey = GLOBAL_PROJECT_KEY;
 const bodyLimit = 256 * 1024;
+const SORT_ORDERS = ['desc', 'asc'];
+const MEMORY_SORTS = ['importance', 'created_at', 'updated_at'];
+const NOTE_SORTS = ['updated_at', 'created_at'];
+const DREAM_STATUSES = ['completed', 'dry-run', 'failed', 'running'];
+const DREAM_SORTS = ['started_at', 'finished_at', 'duration'];
 
 export class RequestError extends Error {
   constructor(status, message) {
@@ -58,7 +64,9 @@ const nonblank = (value) => typeof value === 'string' && Boolean(value.trim());
 const oneOf = (values) => (value) => values.includes(value);
 const importance = (value) => Number.isInteger(value) && value >= 1 && value <= 5;
 const memoryRules = {
-  content: nonblank, category: oneOf(MEMORY_CATEGORIES), importance, status: oneOf(MEMORY_STATUSES), expected_updated_at: nonblank,
+  content: nonblank, category: oneOf(MEMORY_CATEGORIES), importance, status: oneOf(MEMORY_STATUSES),
+  scope: oneOf(MEMORY_SCOPES), project_key: (value) => nonblank(value) && value.trim() === value,
+  expected_updated_at: nonblank,
 };
 const noteRules = {
   content: nonblank, status: oneOf(NOTE_STATUSES), expected_updated_at: nonblank,
@@ -92,7 +100,54 @@ function emptyCounts() {
   return { memories: counts(MEMORY_STATUSES), notes: counts(NOTE_STATUSES), transcripts: { files: 0, messages: 0 } };
 }
 
-function overview({ db, defaultProjectKey, config, embeddingEngine }) {
+function knownProjectRoots(db, defaultProjectKey, defaultProjectRoot) {
+  const roots = new Map();
+  if (defaultProjectKey && defaultProjectRoot) roots.set(defaultProjectKey, defaultProjectRoot);
+  for (const { project_key, project_root } of db.prepare(
+    'SELECT project_key, project_root FROM transcript_files WHERE project_root IS NOT NULL ORDER BY last_indexed_at DESC, id DESC',
+  ).all()) {
+    if (!roots.has(project_key)) roots.set(project_key, project_root);
+  }
+  const hasProjectsTable = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'projects'").get();
+  if (hasProjectsTable) {
+    for (const { project_key, project_root } of db.prepare('SELECT project_key, project_root FROM projects').all()) {
+      roots.set(project_key, project_root);
+    }
+  }
+  return roots;
+}
+
+function knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, extraKeys = []) {
+  const roots = knownProjectRoots(db, defaultProjectKey, defaultProjectRoot);
+  const keys = new Set(roots.keys());
+  if (defaultProjectKey && defaultProjectKey !== globalKey) keys.add(defaultProjectKey);
+  for (const table of ['memories', 'notes', 'dream_runs']) {
+    for (const { project_key } of db.prepare('SELECT DISTINCT project_key FROM ' + table).all()) {
+      if (project_key && project_key !== globalKey) keys.add(project_key);
+    }
+  }
+  for (const key of extraKeys) {
+    if (key && key !== globalKey) keys.add(key);
+  }
+  const labels = formatProjectLabels([...keys].map((projectKey) => ({
+    projectKey,
+    projectRoot: roots.get(projectKey),
+  })));
+  return { roots, labels };
+}
+
+function attachMemoryProject(row, { roots, labels }) {
+  if (row.project_key === globalKey) {
+    return { ...row, project_name: 'Global', project_root: null };
+  }
+  return {
+    ...row,
+    project_name: labels.get(row.project_key) ?? row.project_key,
+    project_root: roots.get(row.project_key) ?? null,
+  };
+}
+
+function overview({ db, defaultProjectKey, defaultProjectRoot, config, embeddingEngine }) {
   const projects = new Map();
   const global = emptyCounts();
   const totals = emptyCounts();
@@ -126,6 +181,15 @@ function overview({ db, defaultProjectKey, config, embeddingEngine }) {
   for (const { project_key } of db.prepare('SELECT DISTINCT project_key FROM dream_runs').all()) {
     projectCounts(project_key);
   }
+  const roots = knownProjectRoots(db, defaultProjectKey, defaultProjectRoot);
+  const labels = formatProjectLabels([...projects.keys()].map((projectKey) => ({
+    projectKey,
+    projectRoot: roots.get(projectKey),
+  })));
+  const projectList = [...projects.values()].map((project) => ({
+    ...project,
+    display_name: labels.get(project.project_key) ?? project.project_key,
+  })).sort((a, b) => a.display_name.localeCompare(b.display_name) || a.project_key.localeCompare(b.project_key));
   let engineStatus;
   try {
     engineStatus = embeddingEngine?.getStatus?.();
@@ -134,7 +198,7 @@ function overview({ db, defaultProjectKey, config, embeddingEngine }) {
   }
   const enabled = engineStatus?.enabled ?? config.embedding?.enabled ?? false;
   return {
-    projects: [...projects.values()].sort((a, b) => a.project_key.localeCompare(b.project_key)),
+    projects: projectList,
     global: { memories: global.memories, notes: global.notes },
     totals,
     default_project_key: defaultProjectKey,
@@ -159,10 +223,13 @@ function rowFilter(fields) {
   };
 }
 
-async function memories({ db, embeddingEngine, cwd }, params) {
+async function memories({ db, defaultProjectKey, defaultProjectRoot, embeddingEngine, cwd }, params) {
   const scope = choice(params, 'scope', [...MEMORY_SCOPES, all], all);
   const status = choice(params, 'status', [...MEMORY_STATUSES, all], 'active');
   const category = choice(params, 'category', [...MEMORY_CATEGORIES, all], all);
+  const sort = choice(params, 'sort', MEMORY_SORTS, 'importance');
+  const order = choice(params, 'order', SORT_ORDERS, 'desc');
+  const direction = order.toUpperCase();
   const projectKey = projectFilter(params);
   const fields = {
     project_key: projectKey,
@@ -173,11 +240,15 @@ async function memories({ db, embeddingEngine, cwd }, params) {
   const { where, values } = rowFilter(fields);
   const limit = listLimit(params);
   const query = params.get('q')?.trim();
+  const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot);
   if (!query) {
+    const orderBy = sort === 'importance'
+      ? `importance ${direction}, updated_at DESC, id ASC`
+      : `${sort} ${direction}, id ${direction}`;
+    const rows = db.prepare('SELECT * FROM memories' + where + ' ORDER BY ' + orderBy + ' LIMIT ?').all(...values, limit);
     return {
       mode: 'list',
-      memories: db.prepare('SELECT * FROM memories' + where
-        + ' ORDER BY importance DESC, updated_at DESC, id ASC LIMIT ?').all(...values, limit),
+      memories: rows.map((row) => attachMemoryProject(row, catalog)),
     };
   }
   const { mode, results } = await hybridSearch(db, {
@@ -185,7 +256,10 @@ async function memories({ db, embeddingEngine, cwd }, params) {
     memoryFilters: { projectKey, scope: fields.scope, category: fields.category, status: fields.status },
   });
   const find = db.prepare('SELECT * FROM memories WHERE id = ?');
-  return { mode, memories: results.map(({ id }) => find.get(id)).filter(Boolean) };
+  return {
+    mode,
+    memories: results.map(({ id }) => find.get(id)).filter(Boolean).map((row) => attachMemoryProject(row, catalog)),
+  };
 }
 
 function noteCursor(value) {
@@ -207,6 +281,10 @@ function noteCursor(value) {
 
 function notes({ db }, params) {
   const status = choice(params, 'status', [...NOTE_STATUSES, all], all);
+  const sort = choice(params, 'sort', NOTE_SORTS, 'updated_at');
+  const order = choice(params, 'order', SORT_ORDERS, 'desc');
+  const direction = order.toUpperCase();
+  const cmp = order === 'asc' ? '>' : '<';
   const { where, values } = rowFilter({
     project_key: projectFilter(params), status: status === all ? undefined : status,
   });
@@ -214,23 +292,23 @@ function notes({ db }, params) {
   if (cursors.length > 1) throw new RequestError(400, 'Invalid cursor');
   const cursor = noteCursor(cursors[0] ?? null);
   const limit = listLimit(params);
-  const boundary = cursor ? (where ? ' AND ' : ' WHERE ') + '(updated_at < ? OR (updated_at = ? AND id < ?))' : '';
+  const boundary = cursor ? (where ? ' AND ' : ' WHERE ') + `(${sort} ${cmp} ? OR (${sort} = ? AND id ${cmp} ?))` : '';
   if (cursor) {
-    const [updatedAt, id] = cursor;
-    values.push(updatedAt, updatedAt, id);
+    const [timestamp, id] = cursor;
+    values.push(timestamp, timestamp, id);
   }
-  const rows = db.prepare('SELECT * FROM notes' + where + boundary + ' ORDER BY updated_at DESC, id DESC LIMIT ?')
+  const rows = db.prepare(`SELECT * FROM notes${where}${boundary} ORDER BY ${sort} ${direction}, id ${direction} LIMIT ?`)
     .all(...values, limit + 1);
   const hasMore = rows.length > limit;
   if (hasMore) rows.pop();
   const last = rows.at(-1);
   return {
     notes: rows,
-    next_cursor: hasMore ? Buffer.from(JSON.stringify([last.updated_at, last.id])).toString('base64url') : null,
+    next_cursor: hasMore ? Buffer.from(JSON.stringify([last[sort], last.id])).toString('base64url') : null,
   };
 }
 
-async function changeRecord({ db, config, embeddingEngine }, req, table, id) {
+async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot, embeddingEngine, cwd }, req, table, id) {
   const noun = table === 'memories' ? 'Memory' : 'Note';
   if (req.method === 'DELETE') {
     if (!db.prepare('DELETE FROM ' + table + ' WHERE id = ?').run(id).changes) {
@@ -241,15 +319,24 @@ async function changeRecord({ db, config, embeddingEngine }, req, table, id) {
   const { expected_updated_at: expectedUpdatedAt, ...body } = validate(
     await readBody(req), table === 'memories' ? memoryRules : noteRules,
   );
-  if (table === 'memories' && body.status === 'superseded') {
-    throw new RequestError(400, 'Memories cannot be marked superseded manually.');
+  if (table === 'memories') {
+    if (body.status === 'superseded') {
+      throw new RequestError(400, 'Memories cannot be marked superseded manually.');
+    }
+    if (body.scope === 'global' && body.project_key !== undefined && body.project_key !== globalKey) {
+      throw new RequestError(400, 'Global memories cannot have a project key.');
+    }
+    if (body.scope === 'project' && body.project_key === globalKey) {
+      throw new RequestError(400, 'Project memories require a non-global project key.');
+    }
   }
   try {
     if (table === 'memories') {
       const memory = await updateMemory(db, { ...body, id }, {
-        embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt,
+        defaultCwd: cwd, embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt,
       });
-      return { memory };
+      const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, [memory.project_key]);
+      return { memory: attachMemoryProject(memory, catalog) };
     }
     return { note: updateNote(db, { ...body, id }, { expectedUpdatedAt }) };
   } catch (error) {
@@ -316,12 +403,24 @@ function dreamer(context, params) {
   const { config, authorized, fingerprint, endpoint, keyConfigured, redactDream } = effectiveDreamer(context);
   const { enabled = false, mode = 'disabled', cadence = {}, http, cli } = config.dreamer ?? {};
   const runner = mode === 'http' || mode === 'cli' ? config.dreamer[mode] : undefined;
-  const { where, values } = rowFilter({ project_key: projectFilter(params) });
+  const status = choice(params, 'status', [...DREAM_STATUSES, all], all);
+  const sort = choice(params, 'sort', DREAM_SORTS, 'started_at');
+  const order = choice(params, 'order', SORT_ORDERS, 'desc');
+  const direction = order.toUpperCase();
+  const { where, values } = rowFilter({
+    project_key: projectFilter(params),
+    status: status === all ? undefined : status,
+  });
   const activeLeases = db.prepare(`
     SELECT lease_key, substr(lease_key, 7) AS project_key, owner, acquired_at, expires_at
       FROM leases WHERE lease_key LIKE 'dream:%' AND expires_at > ? ORDER BY acquired_at DESC
   `).all(Date.now());
-  const runs = db.prepare('SELECT * FROM dream_runs' + where + ' ORDER BY started_at DESC, id ASC LIMIT 50')
+  const orderBy = sort === 'started_at'
+    ? `started_at ${direction}, id ASC`
+    : sort === 'finished_at'
+      ? `finished_at IS NULL ASC, finished_at ${direction}, started_at DESC, id ASC`
+      : `finished_at IS NULL ASC, (finished_at - started_at) ${direction}, started_at DESC, id ASC`;
+  const runs = db.prepare('SELECT * FROM dream_runs' + where + ' ORDER BY ' + orderBy + ' LIMIT 50')
     .all(...values).map((run) => ({
       ...run,
       error: run.error === null ? null : sanitizeDreamError(run.error, env, http?.apiKeyEnv),
