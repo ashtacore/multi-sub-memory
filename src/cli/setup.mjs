@@ -2,11 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import {
-  DEFAULT_DB_PATH, DEFAULT_EMBEDDING_ENABLED, loadConfig, parseConfigLayer, readConfigText, resolveConfigDestination, writeConfig,
+  DEFAULT_DB_PATH, DEFAULT_EMBEDDING_ENABLED, effectiveDatabaseFilePath, loadConfig, parseConfigLayer, parseJsonc,
+  readConfigText, resolveConfigDestination, writeConfig,
 } from '../config.mjs';
 import { createEmbeddingEngine } from '../embeddings.mjs';
 import {
-  CLI_PRESETS, DREAMER_EXECUTABLE_GUIDANCE, HOSTS, detectHost, findExecutable, hostConfigPath, hostSnippet, prepareHostRegistration,
+  CLI_PRESETS, DREAMER_EXECUTABLE_GUIDANCE, HOOK_HOSTS, HOSTS, detectHost, findExecutable, hookConfigPaths,
+  hostConfigPath, hostSnippet, prepareHookInstall, prepareHookUninstall, prepareHostRegistration,
 } from './hosts.mjs';
 import { cliContext, configErrorMessage, parseOptions, transformersAvailable } from './options.mjs';
 
@@ -22,6 +24,9 @@ const help = [
   '  --db <path> --config <path>       Override storage paths',
   '  --no-embeddings                  Use FTS-only search',
   '  --host <omp|claude|codex|agy|all|none>  Repeat or use a comma-separated list',
+  '  --hooks <omp|claude|all>         Install startup hooks. Repeat or use a comma-separated list',
+  '  --uninstall-hooks <omp|claude|all>  Remove startup hooks. Repeat or use a comma-separated list',
+  '  --omp-extensions-dir <path> --claude-settings <path>',
   '  --dreamer-mode <disabled|http|cli>',
   '  --http-base-url <url> --http-model <model> --http-api-key-env <name>',
   '  --cli-orchestrator <omp|claude|codex> --cli-command <path> --cli-model <model>',
@@ -44,6 +49,12 @@ function selectedHosts(value) {
   }
   if (hosts[0] === 'all') return Object.keys(HOSTS);
   return hosts[0] === 'none' ? [] : hosts;
+}
+
+function selectedHookHosts(values, flag) {
+  const hosts = values?.flatMap((value) => value.split(',').map((host) => host.trim())) ?? [];
+  for (const host of hosts) choices(host, [...HOOK_HOSTS, 'all'], flag);
+  return hosts.includes('all') ? HOOK_HOSTS : [...new Set(hosts)];
 }
 
 async function dreamerConfig(current, values, ask) {
@@ -100,26 +111,68 @@ function pathKey(file) {
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
-function checkPaths(dbPath, context, hosts, settingsPath) {
-  if (pathKey(resolveConfigDestination(context.userConfigPath)) !== pathKey(settingsPath)) {
+function removalDatabasePaths(context) {
+  const { env, userConfigPath, projectConfigPath } = context;
+  const candidates = [DEFAULT_DB_PATH, env.MULTI_SUB_MEMORY_DB];
+  for (const file of new Set([userConfigPath, projectConfigPath])) {
+    try {
+      // The database path can still be valid when another setting fails validation.
+      candidates.push(parseJsonc(fs.readFileSync(file, 'utf8'))?.dbPath);
+    } catch {
+      // Missing or unreadable settings do not hide the other path candidates.
+    }
+  }
+  try {
+    candidates.push(loadConfig(context).dbPath);
+  } catch {
+    // Removal can proceed with the individual paths when config loading fails.
+  }
+  return candidates.filter((value) => typeof value === 'string' && value.trim())
+    .map((value) => effectiveDatabaseFilePath(value, context)).filter((file) => file !== undefined);
+}
+
+function checkPaths(dbPaths, context, hosts, hookHosts = [], settingsPath) {
+  if (settingsPath && pathKey(resolveConfigDestination(context.userConfigPath)) !== pathKey(settingsPath)) {
     throw new Error(settingsChanged);
   }
   const hostPaths = hosts.map((host) => hostConfigPath(host, context));
-  const sqlitePaths = [dbPath, settingsPath + '.lock'];
-  const paths = [...sqlitePaths, settingsPath, ...hostPaths,
-    ...hostPaths.map((file) => file + '.bak')];
+  const resolvedSettings = settingsPath ?? resolveConfigDestination(context.userConfigPath);
+  const paths = [
+    resolvedSettings,
+    ...(settingsPath ? [resolvedSettings + '.lock'] : []),
+    ...hostPaths,
+    ...hostPaths.map((file) => file + '.bak'),
+    ...hookHosts.flatMap((host) => hookConfigPaths(host, context)),
+  ];
   if (context.projectConfigPath !== context.userConfigPath) paths.push(context.projectConfigPath);
-  const destinations = paths.map((file) => resolveConfigDestination(file));
-  const keys = destinations.map(pathKey);
-  for (const [index, sqlitePath] of sqlitePaths.entries()) {
+  const keys = paths.map((file) => pathKey(resolveConfigDestination(file)));
+  const dbDestinations = dbPaths.map((file) => resolveConfigDestination(file));
+  // The saved and effective paths may share a database or corresponding sidecars.
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    const dbSidecars = dbPaths.flatMap((dbPath, index) => [dbPath + suffix, dbDestinations[index] + suffix]);
+    keys.push(...new Set(dbSidecars.map((file) => pathKey(resolveConfigDestination(file)))));
+  }
+  if (settingsPath) {
+    const lockPath = resolvedSettings + '.lock';
+    const lockDest = resolveConfigDestination(lockPath);
     for (const suffix of ['-wal', '-shm', '-journal']) {
-      // Check sidecar names beside both the supplied path and its resolved target.
-      const sidecars = [sqlitePath + suffix, destinations[index] + suffix];
-      keys.push(...new Set(sidecars.map((file) => pathKey(resolveConfigDestination(file)))));
+      keys.push(...new Set([lockPath + suffix, lockDest + suffix].map((file) => pathKey(resolveConfigDestination(file)))));
     }
   }
-  if (new Set(keys).size !== keys.length) {
-    throw new Error('Choose distinct paths for the database, settings, host configs, and host backups');
+  if (new Set(keys).size !== keys.length || (hookHosts.length && keys.some((file) =>
+    keys.some((other) => other !== file && other.startsWith(file + path.sep))))) {
+    throw new Error('Choose distinct paths for the database, settings, host configs, hooks, and backups');
+  }
+}
+
+function applyHookActions(actions, print) {
+  for (const { host, install, apply } of actions) {
+    const { configPath, changed, backupPath } = apply();
+    const result = install
+      ? (changed ? 'Installed startup hook' : 'Startup hook already installed')
+      : (changed ? 'Removed startup hook' : 'No managed startup hook found');
+    print(result + ' for ' + host + ' at ' + configPath);
+    if (backupPath) print('Backup: ' + backupPath);
   }
 }
 
@@ -160,6 +213,10 @@ export async function runSetup(argv = [], options = {}) {
     const values = parseOptions(argv, {
       yes: { type: 'boolean', short: 'y' },
       host: { type: 'string', multiple: true },
+      hooks: { type: 'string', multiple: true },
+      'uninstall-hooks': { type: 'string', multiple: true },
+      'omp-extensions-dir': { type: 'string' },
+      'claude-settings': { type: 'string' },
       'no-embeddings': { type: 'boolean' },
       ...Object.fromEntries(dreamerOptions.map((key) => [key, { type: 'string' }])),
     });
@@ -167,7 +224,23 @@ export async function runSetup(argv = [], options = {}) {
       print(help);
       return 0;
     }
+    const installHosts = selectedHookHosts(values.hooks, '--hooks');
+    const uninstallHosts = selectedHookHosts(values['uninstall-hooks'], '--uninstall-hooks');
+    if (installHosts.some((host) => uninstallHosts.includes(host))) {
+      throw new Error('A host cannot appear in both --hooks and --uninstall-hooks');
+    }
     const context = cliContext(values, options);
+    const hookHosts = [...installHosts, ...uninstallHosts];
+    const prepareHooks = () => [
+      ...installHosts.map((host) => ({ host, install: true, apply: prepareHookInstall(host, context) })),
+      ...uninstallHosts.map((host) => ({ host, install: false, apply: prepareHookUninstall(host, context) })),
+    ];
+    if (uninstallHosts.length && !installHosts.length && values.db === undefined && !values.host
+      && values['no-embeddings'] === undefined && !hasDreamerOptions(values)) {
+      checkPaths(removalDatabasePaths(context), context, [], hookHosts);
+      applyHookActions(prepareHooks(), print);
+      return 0;
+    }
     const { cwd, env, resolvePath, userConfigPath } = context;
     const settingsPath = resolveConfigDestination(userConfigPath);
     const originalSettings = readConfigText(settingsPath);
@@ -218,9 +291,12 @@ export async function runSetup(argv = [], options = {}) {
       ...user, dbPath: savedDbPath, dreamer,
       embedding: { ...user.embedding, enabled: embeddingsEnabled },
     };
-    checkPaths(dbPath, context, hosts, settingsPath);
     // Validate the effective configuration before writing any files.
     const effective = loadConfig({ ...context, userConfigData: draft });
+    const dbPaths = [dbPath];
+    const effectiveDbPath = effectiveDatabaseFilePath(effective.dbPath, context);
+    if (effectiveDbPath !== undefined && effectiveDbPath !== dbPath) dbPaths.push(effectiveDbPath);
+    checkPaths(dbPaths, context, hosts, hookHosts, settingsPath);
     const registration = hosts.map((host) => {
       try {
         return prepareHostRegistration(host, context);
@@ -229,6 +305,7 @@ export async function runSetup(argv = [], options = {}) {
         throw error;
       }
     });
+    const hookActions = prepareHooks();
 
     const { openDatabase } = await import('../db.mjs');
     const db = openDatabase(dbPath);
@@ -263,6 +340,7 @@ export async function runSetup(argv = [], options = {}) {
       print((changed ? 'Registered MCP at ' : 'MCP already registered at ') + configPath);
       if (backupPath) print('Backup: ' + backupPath);
     }
+    applyHookActions(hookActions, print);
     for (const host of Object.keys(HOSTS).filter((host) => !hosts.includes(host))) {
       print('\nManual MCP configuration for ' + host + ':\n' + hostSnippet(host));
     }

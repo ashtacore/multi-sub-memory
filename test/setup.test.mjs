@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -7,8 +7,11 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { runSetup } from '../src/cli/setup.mjs';
 import { DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, expandHome, loadConfig, readConfigLayer, writeConfig } from '../src/config.mjs';
+import { openDatabase } from '../src/db.mjs';
+import { writeMemory } from '../src/memory-service.mjs';
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-setup-'));
@@ -541,6 +544,343 @@ test('setup prints a manual snippet and preserves existing remote MCP registrati
       assert.equal(fs.readFileSync(hostPath, 'utf8'), source);
       assert.equal(fs.existsSync(hostPath + '.bak'), false);
       assert.equal(fs.existsSync(expandHome(DEFAULT_CONFIG_PATH, options.homeDir)), false);
+    });
+  }
+});
+
+const hookSetup = ['--yes', '--host', 'none', '--no-embeddings'];
+
+test('setup installs, loads, and removes the managed OMP loader', async (t) => {
+  const { options, errors, output } = fixture(t);
+  const extensionDir = path.join(options.cwd, 'extensions');
+  const managedDir = path.join(extensionDir, 'multi-sub-memory');
+  const loaderPath = path.join(managedDir, 'index.js');
+  const manifestPath = path.join(managedDir, 'package.json');
+  const unrelated = path.join(extensionDir, 'unrelated.mjs');
+  fs.mkdirSync(extensionDir);
+  fs.writeFileSync(unrelated, '// fixture');
+  const override = ['--omp-extensions-dir', 'extensions'];
+  const install = [...hookSetup, ...override, '--hooks', 'omp'];
+  assert.equal(await runSetup(install, options), 0, errors());
+  const source = fs.readFileSync(loaderPath, 'utf8');
+  const manifest = fs.readFileSync(manifestPath, 'utf8');
+  assert.deepEqual(JSON.parse(manifest), { type: 'module', private: true, multiSubMemoryManaged: true });
+  assert.match(source, /^\/\/ Managed by multi-sub-memory setup/);
+  assert.equal(await runSetup(install, options), 0, errors());
+  assert.match(output(), /Startup hook already installed for omp/);
+  assert.equal(fs.readFileSync(loaderPath, 'utf8'), source);
+  assert.equal(fs.readFileSync(manifestPath, 'utf8'), manifest);
+
+  const dbPath = expandHome(DEFAULT_DB_PATH, options.homeDir);
+  const db = openDatabase(dbPath);
+  try {
+    await writeMemory(db, { content: 'Installed loader fixture', cwd: options.cwd });
+  } finally {
+    db.close();
+  }
+  const env = { ...process.env, MULTI_SUB_MEMORY_DB: dbPath,
+    MULTI_SUB_MEMORY_CONFIG: expandHome(DEFAULT_CONFIG_PATH, options.homeDir), MULTI_SUB_MEMORY_NO_EMBEDDINGS: '1' };
+  const target = pathToFileURL(loaderPath).href;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    const { default: register } = await import(${JSON.stringify(target)});
+    let run;
+    register({ on(name, handler) {
+      if (name !== 'before_agent_start') throw new Error(name);
+      run = handler;
+    } });
+    const result = await run({ systemPrompt: 'Original' }, { cwd: process.cwd(), sessionId: 'fixture' });
+    process.stdout.write(result?.systemPrompt ?? '');
+  `], { cwd: options.cwd, env, encoding: 'utf8', timeout: 6000, windowsHide: true });
+  assert.ifError(child.error);
+  assert.equal(child.status, 0, child.stderr);
+  assert.match(child.stdout, /^Original\n\n<project-memory [^>]+>[\s\S]*Installed loader fixture/);
+
+  fs.writeFileSync(loaderPath, source.replace(/import\("[^"]+"\)/,
+    'import(' + JSON.stringify(pathToFileURL(path.join(options.cwd, 'missing.mjs')).href) + ')'));
+  const { default: registerBroken } = await import(pathToFileURL(loaderPath).href);
+  let brokenHandler;
+  registerBroken({ on: (name, handler) => {
+    assert.equal(name, 'before_agent_start');
+    brokenHandler = handler;
+  } });
+  assert.equal(await brokenHandler({}, {}), undefined);
+
+  // Hook-only uninstall can proceed with invalid application config.
+  const configPath = expandHome(DEFAULT_CONFIG_PATH, options.homeDir);
+  fs.writeFileSync(configPath, '{ invalid');
+  const before = fs.readFileSync(dbPath);
+  assert.equal(await runSetup(['--uninstall-hooks', 'omp', ...override], options), 0, errors());
+  assert.equal(fs.existsSync(loaderPath), false);
+  assert.equal(fs.existsSync(manifestPath), false);
+  assert.equal(fs.existsSync(managedDir), false);
+  assert.equal(fs.readFileSync(unrelated, 'utf8'), '// fixture');
+  assert.equal(fs.readFileSync(configPath, 'utf8'), '{ invalid');
+  assert.deepEqual(fs.readFileSync(dbPath), before);
+});
+
+test('setup protects unmanaged OMP files and retains other files in the managed directory', async (t) => {
+  const { options, errors } = fixture(t);
+  const directory = path.join(options.homeDir, '.omp', 'agent', 'extensions', 'multi-sub-memory');
+  const loader = path.join(directory, 'index.js');
+  const manifest = path.join(directory, 'package.json');
+  const userManifest = '{"type":"module","name":"fixture"}\n';
+  const other = path.join(directory, 'fixture.mjs');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(loader, '// unmanaged');
+  fs.writeFileSync(other, '// fixture');
+  assert.equal(await runSetup([...hookSetup, '--hooks', 'omp'], options), 1);
+  assert.match(errors(), /Unmanaged OMP extension/);
+  assert.equal(fs.existsSync(expandHome(DEFAULT_DB_PATH, options.homeDir)), false);
+  assert.equal(await runSetup(['--uninstall-hooks', 'omp'], options), 0);
+  assert.equal(fs.readFileSync(loader, 'utf8'), '// unmanaged');
+  assert.equal(fs.existsSync(manifest), false);
+  fs.writeFileSync(loader, '// Managed by multi-sub-memory setup\n');
+  fs.writeFileSync(manifest, userManifest);
+  assert.equal(await runSetup([...hookSetup, '--hooks', 'omp'], options), 1);
+  assert.match(errors(), /Unmanaged OMP extension at .*package\.json/);
+  assert.equal(fs.readFileSync(loader, 'utf8'), '// Managed by multi-sub-memory setup\n');
+  assert.equal(await runSetup(['--uninstall-hooks', 'omp'], options), 0);
+  assert.equal(fs.existsSync(loader), false);
+  assert.equal(fs.readFileSync(manifest, 'utf8'), userManifest);
+  assert.equal(fs.readFileSync(other, 'utf8'), '// fixture');
+});
+
+test('setup appends and removes a Claude startup hook with byte-preserving edits and backups', async (t) => {
+  const { options, errors, output } = fixture(t);
+  const file = path.join(options.cwd, 'settings.json');
+  const lookalike = 'node "/tools/multi-sub-memory-custom/hooks/claude/session-start.mjs"';
+  const existing = '{ "matcher" : "resume", "hooks" : [{"type":"command","command":'
+    + JSON.stringify(lookalike) + '}], "number":9007199254740993 }';
+  const source = '\uFEFF{\r\n  "hooks": { "SessionStart" : [\r\n    ' + existing
+    + '\r\n  ], "Stop": [] },\r\n  "number":9007199254740993\r\n}\r\n';
+  fs.writeFileSync(file, source);
+  const override = ['--claude-settings', 'settings.json'];
+  const install = [...hookSetup, ...override, '--hooks', 'claude'];
+  assert.equal(await runSetup(install, options), 0, errors());
+  const read = () => fs.readFileSync(file, 'utf8');
+  const installed = read();
+  const [, managed] = JSON.parse(installed.slice(1)).hooks.SessionStart;
+  assert.equal(managed.matcher, '');
+  assert.equal(managed.hooks[0].type, 'command');
+  const command = managed.hooks[0].command;
+  assert.match(command, /^node --input-type=module -e "\/\* multi-sub-memory:claude-session-start \*\/ import\(/);
+  const argument = /"([^"]+)"$/.exec(command)[1];
+  const encoded = command.includes("Buffer.from(process.argv[1],'base64url')");
+  const targetUrl = encoded ? Buffer.from(argument, 'base64url').toString() : argument;
+  assert.match(targetUrl, /^file:\/\/.*\/hooks\/claude\/session-start\.mjs$/);
+  assert.equal(installed, source.replace(existing, existing + ', ' + JSON.stringify(managed)));
+  assert.equal(fs.readFileSync(file + '.bak', 'utf8'), source);
+  assert.equal(await runSetup(install, options), 0, errors());
+  assert.match(output(), /Startup hook already installed for claude/);
+  assert.equal(read(), installed);
+  assert.equal(fs.readFileSync(file + '.bak', 'utf8'), source);
+
+  const dbPath = expandHome(DEFAULT_DB_PATH, options.homeDir);
+  const db = openDatabase(dbPath);
+  try {
+    await writeMemory(db, { content: 'Installed Claude hook fixture', cwd: options.cwd });
+  } finally {
+    db.close();
+  }
+  const spawnOptions = {
+    shell: true, cwd: options.cwd, encoding: 'utf8', timeout: 6000, windowsHide: true,
+    input: JSON.stringify({ cwd: options.cwd, session_id: 'fixture' }),
+    env: { ...process.env, MULTI_SUB_MEMORY_DB: dbPath,
+      MULTI_SUB_MEMORY_CONFIG: expandHome(DEFAULT_CONFIG_PATH, options.homeDir), MULTI_SUB_MEMORY_NO_EMBEDDINGS: '1' },
+  };
+  const child = spawnSync(command, spawnOptions);
+  assert.ifError(child.error);
+  assert.equal(child.status, 0, child.stderr);
+  assert.match(child.stdout, /^<project-memory [^>]+>[\s\S]*Installed Claude hook fixture/);
+
+  const missingUrl = new URL(path.basename(path.dirname(options.cwd)) + '.mjs', targetUrl).href;
+  assert.equal(fs.existsSync(new URL(missingUrl)), false);
+  const missingArgument = encoded ? Buffer.from(missingUrl).toString('base64url') : missingUrl;
+  const missing = spawnSync(command.replace(/"[^"]+"$/, () => `"${missingArgument}"`), spawnOptions);
+  assert.ifError(missing.error);
+  assert.equal(missing.status, 0, missing.stderr);
+  assert.equal(missing.stdout, '');
+  assert.equal(missing.stderr, '');
+
+  assert.equal(await runSetup(['--uninstall-hooks', 'claude', ...override], options), 0, errors());
+  assert.equal(read(), source.replace(existing, existing + ' '));
+  assert.equal(fs.readFileSync(file + '.bak', 'utf8'), installed);
+});
+
+test('setup updates a marked Claude command in place and preserves hooks in the same matcher group', async (t) => {
+  const { options, errors } = fixture(t);
+  const file = path.join(options.cwd, 'claude.json');
+  const previous = 'node --input-type=module -e "/* multi-sub-memory:claude-session-start */"';
+  const other = '{"type":"command","command":"side task","timeout":9007199254740993}';
+  const managed = '{"type":"command","command":' + JSON.stringify(previous) + '}';
+  const source = '{"hooks":{"SessionStart":[{"matcher":"resume","hooks":[' + other + ',' + managed
+    + ',' + other + ']}],"Stop":[]},"number":9007199254740993}\n';
+  fs.writeFileSync(file, source);
+  const override = ['--claude-settings', file];
+  assert.equal(await runSetup([...hookSetup, ...override, '--hooks', 'claude'], options), 0, errors());
+  const updated = fs.readFileSync(file, 'utf8');
+  const command = JSON.parse(updated).hooks.SessionStart[0].hooks[1].command;
+  assert.notEqual(command, previous);
+  assert.equal(updated, source.replace(JSON.stringify(previous), JSON.stringify(command)));
+  assert.equal(await runSetup(['--uninstall-hooks', 'claude', ...override], options), 0, errors());
+  assert.equal(fs.readFileSync(file, 'utf8'), source.replace(managed + ',', ''));
+  assert.equal(fs.readFileSync(file + '.bak', 'utf8'), updated);
+});
+
+test('setup supports all hosts and rejects overlapping flags and backup collisions before writes', async (t) => {
+  const { options, errors } = fixture(t);
+  const loader = path.join(options.homeDir, '.omp', 'agent', 'extensions', 'multi-sub-memory', 'index.js');
+  const manifest = path.join(path.dirname(loader), 'package.json');
+  const settings = path.join(options.homeDir, '.claude', 'settings.json');
+  const database = expandHome(DEFAULT_DB_PATH, options.homeDir);
+  assert.equal(await runSetup([...hookSetup, '--hooks', 'all', '--uninstall-hooks', 'omp'], options), 1);
+  assert.match(errors(), /cannot appear in both/);
+  assert.equal(await runSetup([...hookSetup, '--hooks', 'omp,claude', '--db', settings + '.bak'], options), 1);
+  assert.match(errors(), /Choose distinct paths/);
+  assert.equal(await runSetup([...hookSetup, '--hooks', 'omp', '--db', manifest], options), 1);
+  assert.match(errors(), /Choose distinct paths/);
+  assert.equal(fs.existsSync(database), false);
+  assert.equal(fs.existsSync(loader), false);
+  assert.equal(fs.existsSync(manifest), false);
+
+  assert.equal(await runSetup([...hookSetup, '--hooks', 'omp', '--hooks', 'all'], options), 0, errors());
+  assert.equal(fs.existsSync(loader), true);
+  assert.equal(JSON.parse(fs.readFileSync(settings, 'utf8')).hooks.SessionStart.length, 1);
+  assert.equal(await runSetup(['--uninstall-hooks', 'all'], options), 0, errors());
+  assert.equal(fs.existsSync(loader), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')).hooks.SessionStart, []);
+  assert.equal(await runSetup(['--uninstall-hooks', 'omp', '--uninstall-hooks', 'claude'], options), 0, errors());
+});
+
+test('setup rejects a Claude settings backup that aliases the database through its parent', async (t) => {
+  const { options, errors } = fixture(t);
+  const directory = path.join(options.cwd, 'actual');
+  const alias = path.join(options.cwd, 'alias');
+  fs.mkdirSync(directory);
+  fs.symlinkSync(directory, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const settings = path.join(directory, 'settings.json');
+  const database = settings + '.bak';
+  const db = openDatabase(database);
+  db.close();
+  const originalDb = fs.readFileSync(database);
+  const originalSettings = Buffer.from('{ "fixture": true }\n');
+  fs.writeFileSync(settings, originalSettings);
+
+  assert.equal(await runSetup([...hookSetup, '--hooks', 'claude', '--db', database,
+    '--claude-settings', path.join(alias, 'settings.json')], options), 1);
+  assert.match(errors(), /Choose distinct paths/);
+  assert.deepEqual(fs.readFileSync(database), originalDb);
+  assert.deepEqual(fs.readFileSync(settings), originalSettings);
+  assert.equal(fs.existsSync(expandHome(DEFAULT_CONFIG_PATH, options.homeDir)), false);
+});
+
+test('setup rejects a Claude backup at the effective database path before opening storage', async (t) => {
+  const { options, errors } = fixture(t);
+  const settings = path.join(options.cwd, 'claude-settings.json');
+  const database = settings + '.bak';
+  options.env.MULTI_SUB_MEMORY_DB = database;
+  const db = openDatabase(database);
+  db.close();
+  const originalDb = fs.readFileSync(database);
+  const originalSettings = Buffer.from('{ "fixture": true }\n');
+  fs.writeFileSync(settings, originalSettings);
+
+  assert.equal(await runSetup([...hookSetup, '--hooks', 'claude', '--claude-settings', settings], options), 1);
+  assert.match(errors(), /Choose distinct paths/);
+  assert.deepEqual(fs.readFileSync(database), originalDb);
+  assert.deepEqual(fs.readFileSync(settings), originalSettings);
+  assert.equal(fs.existsSync(expandHome(DEFAULT_DB_PATH, options.homeDir)), false);
+  assert.equal(fs.existsSync(expandHome(DEFAULT_CONFIG_PATH, options.homeDir)), false);
+});
+
+test('setup rejects a Claude backup at the effective SQLite file URI before opening storage', async (t) => {
+  const cases = [
+    ['file URL', 'claude settings.json', (backup) => pathToFileURL(backup).href],
+    ['relative URI with a literal tilde', path.join('~', 'claude-settings.json'),
+      () => 'file:~/claude-settings.json.bak'],
+  ];
+  if (process.platform === 'win32') {
+    cases.push(['single-slash drive URI', 'claude-settings.json', (backup) => 'file:' + pathToFileURL(backup).pathname]);
+  }
+
+  for (const [name, settingsPath, makeURI] of cases) {
+    await t.test(name, async (subtest) => {
+      const { options, errors } = fixture(subtest);
+      const settings = path.join(options.cwd, settingsPath);
+      const backup = settings + '.bak';
+      const selectedDbPath = path.join(options.cwd, 'selected.db');
+      const originalSettings = Buffer.from('{ "fixture": true }\n');
+      fs.mkdirSync(path.dirname(settings), { recursive: true });
+      fs.writeFileSync(settings, originalSettings);
+      options.env.MULTI_SUB_MEMORY_DB = makeURI(backup);
+
+      assert.equal(await runSetup([...hookSetup, '--db', selectedDbPath, '--hooks', 'claude',
+        '--claude-settings', settings], options), 1, errors());
+      assert.match(errors(), /Choose distinct paths/);
+      assert.deepEqual(fs.readFileSync(settings), originalSettings);
+      assert.equal(fs.existsSync(backup), false);
+      assert.equal(fs.existsSync(selectedDbPath), false);
+    });
+  }
+});
+
+test('hook-only Claude uninstall refuses to overwrite a SQLite database as a backup', async (t) => {
+  const { options, errors } = fixture(t);
+  const settings = path.join(options.cwd, 'claude-settings.json');
+  const database = settings + '.bak';
+  const db = openDatabase(database);
+  db.close();
+  const originalDb = fs.readFileSync(database);
+  const originalSettings = Buffer.from(JSON.stringify({
+    hooks: { SessionStart: [{ matcher: '', hooks: [{
+      type: 'command', command: 'node -e "/* multi-sub-memory:claude-session-start */"',
+    }] }] },
+  }) + '\n');
+  fs.writeFileSync(settings, originalSettings);
+
+  assert.equal(await runSetup(['--uninstall-hooks', 'claude', '--claude-settings', settings], options), 1);
+  assert.match(errors(), /Refusing to overwrite SQLite database at .* with a backup/);
+  assert.deepEqual(fs.readFileSync(database), originalDb);
+  assert.deepEqual(fs.readFileSync(settings), originalSettings);
+});
+
+test('hook-only Claude uninstall protects absent database files and sidecars from backup writes', async (t) => {
+  const cases = [
+    ['environment override with malformed config', 'settings.json', ({ options, backup, user }) => {
+      options.env.MULTI_SUB_MEMORY_DB = backup;
+      fs.writeFileSync(user, '{ invalid');
+    }],
+    ['file URI with conflicting modes', 'settings.json', ({ options, backup }) => {
+      options.env.MULTI_SUB_MEMORY_DB = pathToFileURL(backup).href + '?mode=memory&mode=rwc';
+    }],
+    ['user config with an invalid unrelated field', 'settings.json', ({ backup, user }) => {
+      fs.writeFileSync(user, JSON.stringify({ dbPath: backup, embedding: false }));
+    }],
+    ['project config and rollback sidecar', 'settings.json-journal', ({ options, settings }) => {
+      fs.writeFileSync(path.join(options.cwd, '.multi-sub-memory.jsonc'),
+        JSON.stringify({ dbPath: pathToFileURL(settings.slice(0, -'-journal'.length)).href }));
+    }],
+  ];
+  for (const [name, settingsName, configure] of cases) {
+    await t.test(name, async (subtest) => {
+      const { options, errors } = fixture(subtest);
+      const settings = path.join(options.cwd, settingsName);
+      const backup = settings + '.bak';
+      const user = path.join(options.cwd, 'config.jsonc');
+      options.env.MULTI_SUB_MEMORY_CONFIG = user;
+      const original = Buffer.from(JSON.stringify({
+        hooks: { SessionStart: [{ matcher: '', hooks: [{
+          type: 'command', command: 'node -e "/* multi-sub-memory:claude-session-start */"',
+        }] }] },
+      }) + '\n');
+      fs.writeFileSync(settings, original);
+      configure({ options, settings, backup, user });
+
+      assert.equal(fs.existsSync(backup), false);
+      assert.equal(await runSetup(['--uninstall-hooks', 'claude', '--claude-settings', settings], options), 1);
+      assert.match(errors(), /Choose distinct paths/);
+      assert.deepEqual(fs.readFileSync(settings), original);
+      assert.equal(fs.existsSync(backup), false);
     });
   }
 });

@@ -40,23 +40,28 @@ export function normalizePath(inputPath, options = {}) {
   return trimmed;
 }
 
-function revParse(cwd, ...args) {
+function revParse(cwd, deadline, ...args) {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
     if (gitRepositoryEnv.has(process.platform === 'win32' ? key.toUpperCase() : key)) delete env[key];
   }
-  return spawnSync('git', ['rev-parse', ...args], {
+  const timeout = deadline === undefined ? 2000 : Math.floor(deadline - performance.now());
+  if (timeout <= 0) throw new Error('Git probe timed out');
+  const result = spawnSync('git', ['rev-parse', ...args], {
     cwd,
     env,
-    timeout: 2000,
+    timeout,
+    ...(deadline === undefined ? {} : { killSignal: 'SIGKILL' }),
     encoding: 'utf8',
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  if (deadline !== undefined && result.error?.code === 'ETIMEDOUT') throw result.error;
+  return result;
 }
 
-function gitDirectory(cwd, option) {
-  const absolute = revParse(cwd, '--path-format=absolute', option);
+function gitDirectory(cwd, deadline, option) {
+  const absolute = revParse(cwd, deadline, '--path-format=absolute', option);
   if (absolute.error) return undefined;
 
   if (absolute.status === 0) {
@@ -65,15 +70,16 @@ function gitDirectory(cwd, option) {
     if (path.isAbsolute(directory)) return directory;
   }
 
-  const relative = revParse(cwd, option);
+  const relative = revParse(cwd, deadline, option);
   if (relative.status !== 0) return undefined;
   const directory = relative.stdout.replace(gitLineTerminator, '');
   return directory ? path.resolve(cwd, directory) : undefined;
 }
 
-export function resolveProjectKey(cwd = process.cwd()) {
-  const commonDir = gitDirectory(cwd, '--git-common-dir');
-  const topLevel = commonDir ? gitDirectory(cwd, '--show-toplevel') : undefined;
+export function resolveProjectKey(cwd = process.cwd(), { timeoutMs } = {}) {
+  const deadline = timeoutMs === undefined ? undefined : performance.now() + timeoutMs;
+  const commonDir = gitDirectory(cwd, deadline, '--git-common-dir');
+  const topLevel = commonDir ? gitDirectory(cwd, deadline, '--show-toplevel') : undefined;
   const isGit = Boolean(commonDir);
   const projectRoot = normalizePath(isGit
     ? topLevel || (path.basename(commonDir) === '.git' ? path.dirname(commonDir) : commonDir)

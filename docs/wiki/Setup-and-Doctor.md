@@ -17,6 +17,12 @@ Setup detects hosts through their settings, transcript directories, and executab
 
 Setup merges the server's command and arguments into the selected host files and saves a `.bak` copy before replacing an existing file. The backup contains the original host settings and may include credentials. For JSON hosts, the edit preserves unrelated settings, formatting, and large integer values byte-for-byte. For Codex, the automatic edit targets the server's TOML table. An existing remote MCP registration requires a manual edit. If setup reports that it cannot safely edit the file, use the printed snippet as a guide to edit the existing registration. Commands accept `--home` and `--omp-config`, `--claude-config`, `--codex-config`, and `--agy-config` to select alternative paths.
 
+## Startup hooks
+
+Full setup checks both the database it initializes and the effective filesystem database, including their WAL, SHM, and rollback journal sidecars, for collisions with settings, host configs, hooks, and backups. Hook-only removal checks configured and default database destinations even when those files are absent. Setup resolves file-backed SQLite URIs to filesystem paths and stops before writing files if it cannot resolve the URI. MCP registration and Claude Code hook edits refuse to replace an existing SQLite database or a non-regular file at a backup destination.
+
+Pass `--hooks <omp|claude|all>` to install startup hooks during setup. Use `--uninstall-hooks <omp|claude|all>` to remove managed hooks. Removal by itself skips prompts and keeps application storage untouched. Both flags accept repeated hosts or a comma-separated list. Use `--omp-extensions-dir` and `--claude-settings` to override the hook paths. See [Startup hooks](Startup-Hooks.md) for host behavior and the Codex and Antigravity instruction templates.
+
 ## Dreamer settings
 
 Dreamer defaults to disabled. HTTP mode records an OpenAI-compatible base URL, a model, and optionally the name of the environment variable that supplies the bearer token. Changing the base URL clears the previous key binding unless you explicitly select a key variable. CLI mode records an OMP, Claude Code, or Codex preset, with optional command and model overrides. Setup checks for the chosen executable without starting it. Dreamer cadence defaults to manual. Automatic cadence uses a minimum interval and a minimum count of new or updated memories. See [Dreamer usage and behavior](Dreamer.md).

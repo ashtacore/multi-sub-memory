@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { INDEXER_ORCHESTRATORS } from './indexers/types.mjs';
@@ -106,6 +107,47 @@ export function expandHome(inputPath, homeDir = os.homedir()) {
     return path.join(homeDir, inputPath.slice(2).replaceAll('\\', '/'));
   }
   return inputPath;
+}
+
+const hookUriOptions = new Map([
+  ['mode', ['ro', 'rw', 'rwc']],
+  ['cache', ['shared', 'private']],
+  ['psow', ['0', '1']],
+]);
+
+export function effectiveDatabaseFilePath(dbPath, { cwd = process.cwd(), homeDir, strictHookUri = false } = {}) {
+  if (dbPath === ':memory:') return undefined;
+  if (!/^file:/i.test(dbPath)) return path.resolve(cwd, expandHome(dbPath, homeDir));
+
+  try {
+    const [location] = dbPath.slice('file:'.length).split('#', 1);
+    const queryStart = location.indexOf('?');
+    const uriPath = queryStart === -1 ? location : location.slice(0, queryStart);
+    const query = queryStart === -1 ? '' : location.slice(queryStart + 1);
+    const decodedPath = decodeURIComponent(uriPath);
+    if (decodedPath.includes('\0')) throw new Error('Invalid SQLite URI path');
+    const params = new URLSearchParams(query);
+    const modes = params.getAll('mode');
+    if (decodedPath === ':memory:' || (modes.length > 0 && modes.every((mode) => mode === 'memory'))) return undefined;
+    if (strictHookUri) {
+      const seen = new Set();
+      for (const [name, value] of params) {
+        if (seen.has(name) || !hookUriOptions.get(name)?.includes(value)) return undefined;
+        seen.add(name);
+      }
+    }
+    if (uriPath.startsWith('//')) {
+      const [authority] = uriPath.slice(2).split('/', 1);
+      if (authority !== '' && authority !== 'localhost') throw new Error('Non-local SQLite URI authority');
+      return fileURLToPath(dbPath);
+    }
+    if (!decodedPath) throw new Error('Invalid SQLite URI path');
+    const sqlitePath = process.platform === 'win32' && /^\/[A-Za-z]:(?:[\\/]|$)/.test(decodedPath)
+      ? decodedPath.slice(1) : decodedPath;
+    return path.resolve(cwd, sqlitePath);
+  } catch (cause) {
+    throw new Error('Unsupported SQLite URI in effective dbPath', { cause });
+  }
 }
 
 export function stripJsonc(text) {
