@@ -1,0 +1,323 @@
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { test } from 'node:test';
+import { promisify } from 'node:util';
+import { acquireLease, hashNormalizedContent, normalizeContent, openDatabase, releaseLease, runMigrations } from '../src/db.mjs';
+import { cosineSimilarity, decodeFloat32Vector, encodeFloat32Vector } from '../src/embeddings.mjs';
+
+function databaseFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-db-'));
+  const dbPath = path.join(root, 'state', 'memory.db');
+  const connections = [];
+  t.after(() => {
+    try {
+      for (const db of connections.reverse()) db.close();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+  return {
+    root,
+    dbPath,
+    open(options) {
+      const db = openDatabase(dbPath, options);
+      connections.push(db);
+      return db;
+    },
+    openUnmigrated() {
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+      const db = new DatabaseSync(dbPath);
+      connections.push(db);
+      return db;
+    },
+  };
+}
+
+function addMemory(db, overrides = {}) {
+  const memory = {
+    id: 'memory', projectKey: 'project', scope: 'project', category: 'GENERAL',
+    content: 'originalmemory', importance: 3, status: 'active', ...overrides,
+  };
+  db.prepare(`
+    INSERT INTO memories (id, project_key, scope, category, content, normalized_hash,
+      importance, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+  `).run(memory.id, memory.projectKey, memory.scope, memory.category, memory.content,
+    hashNormalizedContent(memory.content), memory.importance, memory.status);
+}
+
+function count(db, table) {
+  return db.prepare(`SELECT count(*) AS count FROM ${table}`).get().count;
+}
+
+function matches(db, table, query) {
+  return db.prepare(`SELECT rowid FROM ${table} WHERE ${table} MATCH ? ORDER BY rowid`)
+    .all(query).map((row) => row.rowid);
+}
+
+test('creates the core schema in WAL mode and preserves the migration record on reopen', (t) => {
+  const fixture = databaseFixture(t);
+  assert.equal(fs.existsSync(path.dirname(fixture.dbPath)), false);
+  const db = fixture.open();
+  assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
+  assert.equal(db.prepare('PRAGMA busy_timeout').get().timeout, 5000);
+  assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
+  assert.equal(db.prepare('PRAGMA synchronous').get().synchronous, 1);
+
+  const schema = db.prepare('SELECT name, type FROM sqlite_schema').all();
+  const objects = new Map(schema.map(({ name, type }) => [name, type]));
+  for (const table of ['schema_migrations', 'memories', 'memory_embeddings', 'notes',
+    'transcript_files', 'transcript_messages', 'transcript_embeddings', 'dream_runs', 'leases']) {
+    assert.equal(objects.get(table), 'table', table);
+  }
+  for (const table of ['memories_fts', 'notes_fts', 'transcript_messages_fts']) {
+    assert.equal(objects.get(table), 'table', table);
+    for (const operation of ['insert', 'update', 'delete']) {
+      const trigger = `${table}_${operation}`;
+      assert.equal(objects.get(trigger), 'trigger', trigger);
+    }
+  }
+  for (const index of ['idx_memories_project_status_rank', 'idx_notes_project_status',
+    'idx_transcript_files_session_id', 'idx_transcript_files_project_orchestrator',
+    'idx_dream_runs_project_started']) {
+    assert.equal(objects.get(index), 'index', index);
+  }
+
+  const selectMigrations = 'SELECT version, applied_at FROM schema_migrations ORDER BY version';
+  const migrations = db.prepare(selectMigrations).all();
+  assert.deepEqual(migrations.map(({ version }) => version), [1]);
+  assert.ok(Number.isInteger(migrations[0].applied_at) && migrations[0].applied_at > 0);
+  addMemory(db);
+  const reopened = fixture.open();
+  assert.deepEqual(reopened.prepare(selectMigrations).all(), migrations);
+  assert.equal(count(reopened, 'memories'), 1);
+});
+
+test('two processes can open and migrate a fresh database concurrently', async (t) => {
+  const fixture = databaseFixture(t);
+  const readyFiles = ['a.ready', 'b.ready'].map((name) => path.join(fixture.root, name));
+  assert.equal(fs.existsSync(fixture.dbPath), false);
+
+  const worker = `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import { setTimeout as delay } from 'node:timers/promises';
+    import { openDatabase } from ${JSON.stringify(new URL('../src/db.mjs', import.meta.url).href)};
+
+    const [dbPath, ownReady, peerReady] = process.argv.slice(1);
+    fs.writeFileSync(ownReady, '');
+    const deadline = Date.now() + 5000;
+    while (!fs.existsSync(peerReady)) {
+      assert.ok(Date.now() < deadline, 'Other database opener did not reach the barrier');
+      await delay(1);
+    }
+    // Give both processes the same start time after the later arrival.
+    const startAt = Math.max(fs.statSync(ownReady).mtimeMs, fs.statSync(peerReady).mtimeMs) + 100;
+    await delay(Math.max(0, startAt - Date.now()));
+
+    const db = openDatabase(dbPath);
+    try {
+      assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
+      assert.deepEqual(db.prepare('SELECT version FROM schema_migrations').all()
+        .map(({ version }) => version), [1]);
+    } finally {
+      db.close();
+    }
+  `;
+
+  const run = promisify(execFile);
+  const results = await Promise.allSettled(readyFiles.map((ownReady, index) => run(process.execPath, [
+    '--input-type=module', '--eval', worker, '--', fixture.dbPath, ownReady, readyFiles[1 - index],
+  ], { timeout: 15000, windowsHide: true })));
+  for (const result of results) {
+    if (result.status === 'rejected') throw result.reason;
+  }
+
+  const db = fixture.open({ readOnly: true });
+  assert.deepEqual(db.prepare('SELECT version FROM schema_migrations').all()
+    .map(({ version }) => version), [1]);
+});
+
+test('rolls back both schema changes and the migration record when migration fails', (t) => {
+  const db = databaseFixture(t).openUnmigrated();
+  db.exec('CREATE TABLE notes (id TEXT PRIMARY KEY)');
+  assert.throws(() => runMigrations(db), /notes already exists/i);
+  assert.equal(count(db, 'schema_migrations'), 0);
+  assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name = 'memories'").get(), undefined);
+  db.exec('DROP TABLE notes');
+  runMigrations(db);
+  assert.equal(count(db, 'schema_migrations'), 1);
+});
+
+test('read-only connections allow reads, reject writes, and skip migrations and directory creation', (t) => {
+  const fixture = databaseFixture(t);
+  const missingPath = path.join(fixture.root, 'missing', 'nested', 'memory.db');
+  assert.throws(() => openDatabase(missingPath, { readOnly: true }));
+  assert.equal(fs.existsSync(path.join(fixture.root, 'missing')), false);
+
+  const db = fixture.openUnmigrated();
+  db.exec('CREATE TABLE fixture (value TEXT); INSERT INTO fixture VALUES (\'existing\');');
+  const readOnly = fixture.open({ readOnly: true });
+  assert.equal(readOnly.prepare('PRAGMA busy_timeout').get().timeout, 5000);
+  assert.equal(readOnly.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
+  assert.equal(readOnly.prepare('SELECT value FROM fixture').get().value, 'existing');
+  assert.throws(() => readOnly.exec("INSERT INTO fixture VALUES ('new')"), /readonly/i);
+  assert.equal(readOnly.prepare("SELECT name FROM sqlite_schema WHERE name = 'schema_migrations'").get(), undefined);
+});
+
+test('WAL lets a writer commit while another connection holds a read snapshot', (t) => {
+  const fixture = databaseFixture(t);
+  const writer = fixture.open();
+  const reader = fixture.open();
+  reader.exec('BEGIN');
+  assert.equal(count(reader, 'memories'), 0);
+
+  writer.exec('BEGIN IMMEDIATE');
+  addMemory(writer);
+  assert.equal(count(reader, 'memories'), 0);
+  writer.exec('COMMIT');
+  assert.equal(count(reader, 'memories'), 0);
+  reader.exec('COMMIT');
+
+  assert.equal(count(reader, 'memories'), 1);
+  addMemory(reader, { id: 'second', content: 'secondmemory' });
+  assert.equal(count(writer, 'memories'), 2);
+});
+
+test('memory search follows writes and deleting a memory cascades to its embedding', (t) => {
+  const db = databaseFixture(t).open();
+  addMemory(db);
+  const rowid = db.prepare('SELECT rowid FROM memories').get().rowid;
+  assert.deepEqual(matches(db, 'memories_fts', 'content:originalmemory category:general'), [rowid]);
+  db.exec("UPDATE memories SET content = 'revisedmemory', category = 'DECISIONS' WHERE id = 'memory'");
+  assert.deepEqual(matches(db, 'memories_fts', 'originalmemory OR category:general'), []);
+  assert.deepEqual(matches(db, 'memories_fts', 'content:revisedmemory category:decisions'), [rowid]);
+
+  db.prepare('INSERT INTO memory_embeddings VALUES (?, ?, ?, ?, ?)')
+    .run('memory', 'fixture-model', 2, encodeFloat32Vector([0.5, -1]), 1);
+  const { vector } = db.prepare('SELECT vector FROM memory_embeddings').get();
+  assert.deepEqual(decodeFloat32Vector(vector), new Float32Array([0.5, -1]));
+
+  db.exec("DELETE FROM memories WHERE id = 'memory'");
+  assert.deepEqual(matches(db, 'memories_fts', 'revisedmemory'), []);
+  assert.equal(count(db, 'memory_embeddings'), 0);
+});
+
+test('compares a live vector with a SQLite embedding BLOB', (t) => {
+  const db = openDatabase(':memory:');
+  t.after(() => db.close());
+  addMemory(db);
+  db.prepare('INSERT INTO memory_embeddings VALUES (?, ?, ?, ?, ?)')
+    .run('memory', 'fixture-model', 1, encodeFloat32Vector([-1]), 1);
+  const { vector } = db.prepare('SELECT vector FROM memory_embeddings').get();
+  assert.ok(vector instanceof Uint8Array);
+  assert.equal(cosineSimilarity(new Float32Array([1]), vector), -1);
+});
+
+test('note search follows content and surface condition changes', (t) => {
+  const db = databaseFixture(t).open();
+  const insert = db.prepare(`
+    INSERT INTO notes (id, project_key, content, created_at, updated_at) VALUES (?, ?, ?, 1, 1)
+  `).run('note', 'project', 'originalnote');
+  const rowid = insert.lastInsertRowid;
+  assert.deepEqual(matches(db, 'notes_fts', 'content:originalnote project_key:project'), [rowid]);
+  db.exec("UPDATE notes SET content = 'revisednote', surface_condition = 'release' WHERE id = 'note'");
+  assert.deepEqual(matches(db, 'notes_fts', 'originalnote'), []);
+  assert.deepEqual(matches(db, 'notes_fts', 'content:revisednote surface_condition:release'), [rowid]);
+  db.exec("DELETE FROM notes WHERE id = 'note'");
+  assert.deepEqual(matches(db, 'notes_fts', 'revisednote OR release'), []);
+});
+
+test('transcript search follows writes and file deletion cascades through messages and embeddings', (t) => {
+  const db = databaseFixture(t).open();
+  const file = db.prepare(`
+    INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, mtime_ms, last_indexed_at)
+    VALUES ('fixture.jsonl', 'fixture', 'session', 'project', 1, 1)
+  `).run().lastInsertRowid;
+  const insert = db.prepare(`
+    INSERT INTO transcript_messages (file_id, seq, role, text, tool_names, line_no)
+    VALUES (?, ?, 'assistant', ?, ?, ?)
+  `);
+  const first = insert.run(file, 1, 'originalmessage', 'originaltool', 1).lastInsertRowid;
+  assert.throws(() => db.exec(`
+    INSERT INTO transcript_embeddings (message_id, model_id, dims, vector)
+    VALUES (NULL, 'fixture-model', 1, X'0000803F')
+  `), /NOT NULL constraint failed: transcript_embeddings\.message_id/);
+  assert.deepEqual(matches(db, 'transcript_messages_fts', 'text:originalmessage role:assistant'), [first]);
+  db.prepare('UPDATE transcript_messages SET text = ?, tool_names = ? WHERE id = ?')
+    .run('revisedmessage', 'revisedtool', first);
+  assert.deepEqual(matches(db, 'transcript_messages_fts', 'originalmessage OR originaltool'), []);
+  assert.deepEqual(matches(db, 'transcript_messages_fts', 'text:revisedmessage tool_names:revisedtool'), [first]);
+  db.prepare('DELETE FROM transcript_messages WHERE id = ?').run(first);
+  assert.deepEqual(matches(db, 'transcript_messages_fts', 'revisedmessage OR revisedtool'), []);
+
+  const second = insert.run(file, 2, 'cascadedmessage', null, 2).lastInsertRowid;
+  db.prepare('INSERT INTO transcript_embeddings VALUES (?, ?, ?, ?)')
+    .run(second, 'fixture-model', 1, encodeFloat32Vector([1]));
+  assert.deepEqual(matches(db, 'transcript_messages_fts', 'cascadedmessage'), [second]);
+  db.prepare('DELETE FROM transcript_files WHERE id = ?').run(file);
+  assert.equal(count(db, 'transcript_messages'), 0);
+  assert.equal(count(db, 'transcript_embeddings'), 0);
+  assert.deepEqual(matches(db, 'transcript_messages_fts', 'cascadedmessage'), []);
+});
+
+test('enforces schema constraints and deduplicates content per project and scope', (t) => {
+  const db = databaseFixture(t).open();
+  assert.throws(() => addMemory(db, { id: null }), /NOT NULL constraint failed: memories\.id/);
+  assert.throws(() => db.exec(`
+    INSERT INTO memory_embeddings (memory_id, model_id, dims, vector, updated_at)
+    VALUES (NULL, 'fixture-model', 1, X'0000803F', 1)
+  `), /NOT NULL constraint failed: memory_embeddings\.memory_id/);
+  assert.throws(() => db.exec(`
+    INSERT INTO notes (project_key, content, created_at, updated_at)
+    VALUES ('project', 'fixture', 1, 1)
+  `), /NOT NULL constraint failed: notes\.id/);
+  assert.throws(() => db.exec(`
+    INSERT INTO dream_runs (project_key, runner, status, started_at)
+    VALUES ('project', 'fixture-runner', 'running', 1)
+  `), /NOT NULL constraint failed: dream_runs\.id/);
+  assert.throws(() => db.exec(`
+    INSERT INTO leases (owner, acquired_at, expires_at) VALUES ('fixture-owner', 1, 2)
+  `), /NOT NULL constraint failed: leases\.lease_key/);
+
+  for (const overrides of [{ scope: 'other' }, { category: 'other' }, { importance: 0 },
+    { importance: 6 }, { status: 'other' }]) {
+    assert.throws(() => addMemory(db, overrides), /CHECK constraint failed/);
+  }
+  assert.throws(() => db.exec(`
+    INSERT INTO notes (id, project_key, status, content, created_at, updated_at)
+    VALUES ('note', 'project', 'other', 'fixture', 1, 1)
+  `), /CHECK constraint failed/);
+  addMemory(db);
+  assert.throws(() => addMemory(db, { id: 'duplicate', content: ' ORIGINALMEMORY ' }), /UNIQUE constraint failed/);
+  addMemory(db, { id: 'another-project', projectKey: 'another' });
+  addMemory(db, { id: 'global', scope: 'global' });
+  assert.equal(count(db, 'memories'), 3);
+});
+
+test('leases support owner renewal, expiry takeover and owner-only release', (t) => {
+  const fixture = databaseFixture(t);
+  const first = fixture.open();
+  const second = fixture.open();
+  assert.throws(() => acquireLease(first, 'index', 'alpha', 0, 100), RangeError);
+  assert.throws(() => acquireLease(first, 'index', 'alpha', -1, 100), RangeError);
+  assert.throws(() => acquireLease(first, 'index', 'alpha', Infinity, 100), RangeError);
+  assert.equal(acquireLease(first, 'index', 'alpha', 10, 100), true);
+  assert.equal(acquireLease(second, 'index', 'beta', 10, 105), false);
+  assert.equal(acquireLease(first, 'index', 'alpha', 10, 105), true);
+  assert.equal(acquireLease(second, 'index', 'beta', 10, 114), false);
+  assert.equal(acquireLease(second, 'index', 'beta', 10, 115), true);
+  assert.equal(releaseLease(first, 'index', 'alpha'), false);
+  assert.equal(releaseLease(second, 'index', 'beta'), true);
+  assert.equal(releaseLease(second, 'index', 'beta'), false);
+});
+
+test('normalizes whitespace and case before hashing content', () => {
+  assert.equal(normalizeContent(' \t Hello\r\n  WORLD \u00a0'), 'hello world');
+  assert.equal(hashNormalizedContent('   A\n BC  '), hashNormalizedContent('a bc'));
+  assert.equal(hashNormalizedContent(' ABC '), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+});

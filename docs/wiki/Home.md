@@ -5,3 +5,4 @@ Use this wiki for durable project knowledge. [GitHub Issues](https://github.com/
 | Area | What it covers |
 |---|---|
 | [Decisions](Decisions.md) | Accepted project-wide decisions, rationale, and ADR template |
+| [Storage and embeddings](Storage-and-Embeddings.md) | SQLite schema, full-text indexes, leases, and local vector embeddings |
