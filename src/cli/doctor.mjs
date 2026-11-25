@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, readConfigLayer } from '../config.mjs';
 import { createEmbeddingEngine, DEFAULT_EMBEDDING_DIMS, DEFAULT_EMBEDDING_MODEL } from '../embeddings.mjs';
-import { CLI_PRESETS, HOSTS, detectHost, findExecutable } from './hosts.mjs';
+import { CLI_PRESETS, DREAMER_EXECUTABLE_GUIDANCE, HOSTS, detectHost, findExecutable } from './hosts.mjs';
 import { cliContext, configErrorMessage, parseOptions, transformersAvailable } from './options.mjs';
 
 const help = [
@@ -196,15 +196,22 @@ async function dreamerChecks(dreamer, userHttp, testBackend, context, fetchImpl,
   if (mode === 'cli') {
     const command = dreamer.cli.command ?? CLI_PRESETS[dreamer.cli.orchestrator].command;
     let executable;
+    let incompatible;
     try {
-      executable = findExecutable(command, context.env, context.cwd);
+      executable = findExecutable(command, context.env, undefined, { forSpawn: true });
+      if (!executable) incompatible = findExecutable(command, context.env, context.cwd);
     } catch {
       // Report inaccessible paths the same way as a missing executable.
     }
-    add('Dreamer probe', executable ? 'pass' : 'fail', executable ? 'Executable found at ' + executable
-      : 'Could not find the configured executable.', executable ? { executable } : {
-        remediation: 'Install the selected orchestrator, update PATH, or configure dreamer.cli.command.',
+    if (executable) {
+      add('Dreamer probe', 'pass', 'Executable found at ' + executable, { executable });
+    } else {
+      add('Dreamer probe', 'fail', incompatible
+        ? 'The configured executable cannot be launched by Dreamer.' : 'Could not find the configured executable.', {
+        remediation: incompatible ? DREAMER_EXECUTABLE_GUIDANCE
+          : 'Install the selected orchestrator, update PATH, or configure dreamer.cli.command.',
       });
+    }
     return;
   }
 

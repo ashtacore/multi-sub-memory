@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { hashNormalizedContent } from './db.mjs';
+import { maybeTriggerAutoDream } from './dreamer/trigger.mjs';
 import { encodeFloat32Vector } from './embeddings.mjs';
 import { resolveProjectKey } from './project-id.mjs';
 
@@ -39,7 +40,7 @@ export function resolveCachedProjectKey(cwd) {
   return project;
 }
 
-function generateId() {
+export function generateId() {
   const bytes = Buffer.alloc(16);
   bytes.writeUIntBE(Date.now(), 0, 6);
   randomBytes(10).copy(bytes, 6);
@@ -63,7 +64,7 @@ function projectKeyFor(scope, input, context) {
 }
 
 function formatMemory(row) {
-  const { metadata_json, ...memory } = row;
+  const { metadata_json, last_dreamed_at, ...memory } = row;
   return { ...memory, metadata: JSON.parse(metadata_json) };
 }
 
@@ -73,7 +74,7 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-function mergeMetadata(previous, incoming) {
+export function mergeMetadata(previous, incoming) {
   if (incoming === undefined) return previous;
   const existing = JSON.parse(previous);
   if (isPlainObject(existing) && isPlainObject(incoming)) {
@@ -91,7 +92,7 @@ function memoryRow(db, id) {
   return requireRow(db.prepare('SELECT * FROM memories WHERE id = ?').get(id), 'Memory', id);
 }
 
-function inWriteTransaction(db, write) {
+export function inWriteTransaction(db, write) {
   db.exec('BEGIN IMMEDIATE');
   try {
     const result = write();
@@ -107,26 +108,27 @@ function inWriteTransaction(db, write) {
   }
 }
 
-async function storeEmbedding(db, memory, engine) {
-  if (!engine) return;
+export async function storeEmbedding(db, memory, engine, fallbackModel) {
+  if (!engine) return 0;
   try {
     const vector = await engine.embed(memory.content);
-    if (!vector) return;
-    const { model } = engine.getStatus();
+    if (!vector) return 0;
+    const model = engine.getStatus?.()?.model ?? fallbackModel;
     // Another writer may have changed the text while inference was running.
-    db.prepare(`
+    return db.prepare(`
       INSERT INTO memory_embeddings (memory_id, model_id, dims, vector, updated_at)
       SELECT id, ?, ?, ?, ? FROM memories WHERE id = ? AND content = ?
       ON CONFLICT (memory_id) DO UPDATE SET
         model_id = excluded.model_id, dims = excluded.dims,
         vector = excluded.vector, updated_at = excluded.updated_at
-    `).run(model, vector.length, encodeFloat32Vector(vector), Date.now(), memory.id, memory.content);
+    `).run(model, vector.length, encodeFloat32Vector(vector), Date.now(), memory.id, memory.content).changes;
   } catch {
     // Embeddings are optional, including when the database closes during inference.
+    return 0;
   }
 }
 
-function invalidateEmbedding(db, id) {
+export function invalidateEmbedding(db, id) {
   db.prepare('DELETE FROM memory_embeddings WHERE memory_id = ?').run(id);
 }
 
@@ -172,6 +174,13 @@ export async function writeMemory(db, input, context = {}) {
   });
   if (!result.deduplicated || result.reactivated) {
     void storeEmbedding(db, result.memory, context.embeddingEngine);
+  }
+  const { config, configOptions, spawnDream } = context;
+  if (scope === 'project' && config?.dbPath && (input.cwd !== undefined || config.dreamer?.cadence?.mode === 'auto')) {
+    setImmediate(() => maybeTriggerAutoDream({
+      db, config, projectKey, cwd: input.cwd ?? context.defaultCwd,
+      reloadProjectConfig: input.cwd !== undefined, configOptions, spawnImpl: spawnDream,
+    }));
   }
   return result;
 }

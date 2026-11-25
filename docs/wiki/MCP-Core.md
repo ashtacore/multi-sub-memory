@@ -13,6 +13,10 @@ caller-supplied database connection open.
 Enable automatic transcript refresh with `indexers.backgroundRefresh`. See
 [Indexers](Indexers.md) for session discovery, CLI indexing, and configuration.
 
+With automatic Dreamer cadence enabled, a project memory write schedules a
+background eligibility check. The tool returns independently of the Dreamer
+process. [Dreamer](Dreamer.md)
+
 ## Tools
 
 | Tool | Action | Behavior |

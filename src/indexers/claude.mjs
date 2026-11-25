@@ -64,10 +64,12 @@ export const claudeAdapter = {
         skipEmbedding: hasToolResult,
       });
     }
+    let cwdInferred = false;
     if (!cwd && byteOffset === 0) {
       const root = existingMeta.sessionsDir ? expandHome(existingMeta.sessionsDir) : getDefaultClaudeSessionsDir();
       cwd = decodeProjectFolder(filePath, root);
+      cwdInferred = Boolean(cwd);
     }
-    return { sessionId: sessionId ?? path.basename(filePath, '.jsonl'), cwd, messages, recognized, ...checkpoint };
+    return { sessionId: sessionId ?? path.basename(filePath, '.jsonl'), cwd, cwdInferred, messages, recognized, ...checkpoint };
   },
 };

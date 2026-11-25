@@ -13,11 +13,11 @@ const ISO_TIMESTAMP = /^(?:\d{4}|[+-]\d{6})-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(
  * @typedef {{seq: number, role: string, timestamp?: string|number, text: string,
  *   toolNames: string[], lineNo: number, skipEmbedding?: boolean}} TranscriptMessage
  * @typedef {{sessionId?: string, cwd?: string, sessionsDir?: string,
- *   nextSeq?: number, lineCount?: number, checkpointHash?: string, signal?: AbortSignal}} TranscriptMeta
+ *   nextSeq?: number, lineCount?: number, checkpointHash?: string, signal?: AbortSignal, recoverHeaderCwd?: boolean}} TranscriptMeta
  * @typedef {{sessionId: string, cwd?: string, messages: TranscriptMessage[],
  *   newByteOffset: number, lineCount: number, mtimeMs: number, fileSize: number,
  *   fileIdentity?: string, checkpointHash?: string|null, checkpointMismatch?: boolean,
- *   recognized?: boolean}} TranscriptBatch
+ *   recognized?: boolean, headerCwd?: string}} TranscriptBatch
  * @typedef {{orchestrator: 'omp'|'claude'|'codex'|'agy', discoverFiles: (config: object) => string[],
  *   parseIncremental: (filePath: string, byteOffset: number, existingMeta: TranscriptMeta) => TranscriptBatch|Promise<TranscriptBatch>}} TranscriptAdapter
  */
@@ -108,7 +108,8 @@ function checkOpenedFile(before, opened, current) {
   }
 }
 
-export function readIncrementalJsonlLines(filePath, byteOffset = 0, previousLineCount, previousCheckpointHash) {
+export function readIncrementalJsonlLines(filePath, byteOffset = 0, previousLineCount, previousCheckpointHash,
+  captureHeader = false) {
   validateOffset(byteOffset);
   const resolved = path.resolve(filePath);
   const before = statWithoutLinks(resolved);
@@ -118,7 +119,7 @@ export function readIncrementalJsonlLines(filePath, byteOffset = 0, previousLine
     const stat = fs.fstatSync(fd, { bigint: true });
     checkOpenedFile(before, stat, statWithoutLinks(resolved));
     const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
-    const reader = readChunks(stat, buffer, byteOffset, previousLineCount, previousCheckpointHash);
+    const reader = readChunks(stat, buffer, byteOffset, previousLineCount, previousCheckpointHash, captureHeader);
     let step = reader.next();
     while (!step.done) {
       const { position, length } = step.value;
@@ -130,7 +131,8 @@ export function readIncrementalJsonlLines(filePath, byteOffset = 0, previousLine
   }
 }
 
-export async function readIncrementalJsonlLinesAsync(filePath, byteOffset = 0, previousLineCount, previousCheckpointHash, signal) {
+export async function readIncrementalJsonlLinesAsync(filePath, byteOffset = 0, previousLineCount,
+  previousCheckpointHash, signal, captureHeader = false) {
   validateOffset(byteOffset);
   signal?.throwIfAborted();
   const resolved = path.resolve(filePath);
@@ -142,7 +144,7 @@ export async function readIncrementalJsonlLinesAsync(filePath, byteOffset = 0, p
     checkOpenedFile(before, stat, await statWithoutLinksAsync(resolved));
     signal?.throwIfAborted();
     const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
-    const reader = readChunks(stat, buffer, byteOffset, previousLineCount, previousCheckpointHash);
+    const reader = readChunks(stat, buffer, byteOffset, previousLineCount, previousCheckpointHash, captureHeader);
     let step = reader.next();
     while (!step.done) {
       const { position, length } = step.value;
@@ -157,7 +159,7 @@ export async function readIncrementalJsonlLinesAsync(filePath, byteOffset = 0, p
 }
 
 // The drivers fill the same buffer. Only this generator interprets the bytes.
-function* readChunks(stat, buffer, byteOffset, previousLineCount, previousCheckpointHash) {
+function* readChunks(stat, buffer, byteOffset, previousLineCount, previousCheckpointHash, captureHeader = false) {
   const fileSize = Number(stat.size);
   const mtimeMs = Number(stat.mtimeMs);
   const fileIdentity = transcriptFileIdentity(stat);
@@ -169,12 +171,25 @@ function* readChunks(stat, buffer, byteOffset, previousLineCount, previousCheckp
   let lineCount = previousLineCount ?? 0;
   const hash = createHash('sha256');
   let endsAtNewline = false;
+  let headerLine;
+  // Capture the header during prefix validation so recovery uses the same file and bytes as the checkpoint.
+  let headerParts = captureHeader && previousCheckpointHash != null ? [] : undefined;
   for (let position = 0; position < byteOffset;) {
     const count = yield { position, length: Math.min(buffer.length, byteOffset - position) };
     if (count === 0) throw new Error('Transcript shrank while reading');
     const chunk = buffer.subarray(0, count);
     hash.update(chunk);
     endsAtNewline = chunk.at(-1) === 0x0A;
+    if (headerParts) {
+      const newline = chunk.indexOf(0x0A);
+      if (newline === -1) headerParts.push(Buffer.from(chunk));
+      else {
+        const part = chunk.subarray(0, newline);
+        const header = headerParts.length ? Buffer.concat([...headerParts, part]) : part;
+        if (isUtf8(header)) headerLine = header.toString('utf8');
+        headerParts = undefined;
+      }
+    }
     // Older checkpoints and standalone callers can recover the count during validation.
     if (previousLineCount == null) {
       for (let newline = chunk.indexOf(0x0A); newline !== -1; newline = chunk.indexOf(0x0A, newline + 1)) {
@@ -214,7 +229,7 @@ function* readChunks(stat, buffer, byteOffset, previousLineCount, previousCheckp
     position += count;
   }
   const checkpointHash = endsAtNewline ? hash.digest('hex') : null;
-  return { truncated, lines, newByteOffset, lineCount, mtimeMs, fileSize, fileIdentity, checkpointHash };
+  return { truncated, lines, newByteOffset, lineCount, mtimeMs, fileSize, fileIdentity, checkpointHash, headerLine };
 }
 
 export function normalizeTranscriptRole(value) {

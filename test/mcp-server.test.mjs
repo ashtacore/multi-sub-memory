@@ -168,6 +168,8 @@ test('memory writes deduplicate, merge metadata, and reactivate archived or supe
   assert.equal(first.memory.category, 'GENERAL');
   assert.equal(first.memory.scope, 'project');
   assert.equal(first.memory.importance, 3);
+  db.prepare('UPDATE memories SET last_dreamed_at = 1 WHERE id = ?').run(id);
+  assert.equal(Object.hasOwn(first.memory, 'last_dreamed_at'), false);
   assert.deepEqual(await memory('get', { id }), first.memory);
   db.prepare('UPDATE memories SET updated_at = 0 WHERE id = ?').run(id);
 

@@ -423,7 +423,7 @@ test('setup skips embedding inference when --no-embeddings overrides the probe',
 test('non-interactive setup writes all three Dreamer modes', async (t) => {
   const { options, errors, output } = fixture(t);
   const { cwd } = options;
-  const command = path.join(cwd, process.platform === 'win32' ? 'fixture.cmd' : 'fixture');
+  const command = path.join(cwd, process.platform === 'win32' ? 'fixture.exe' : 'fixture');
   fs.writeFileSync(command, 'fixture', { mode: 0o700 });
   const scenarios = [
     ['disabled', []],
@@ -441,7 +441,7 @@ test('non-interactive setup writes all three Dreamer modes', async (t) => {
     if (mode === 'http') {
       assert.deepEqual(dreamer.http, { baseUrl: 'https://example.test/v1', model: 'fixture', apiKeyEnv: 'FIXTURE_KEY' });
     } else if (mode === 'cli') {
-      assert.deepEqual(dreamer.cli, { orchestrator: 'omp', command, args: ['-p', '--no-session'], model: 'fixture' });
+      assert.deepEqual(dreamer.cli, { orchestrator: 'omp', command, args: ['-p', '--no-session', '--no-tools'], model: 'fixture' });
       assert.deepEqual(dreamer.cadence, { mode: 'auto', minIntervalHours: 1.5, minNewMemories: 0 });
       assert.match(output(), /Dreamer CLI executable found/);
     }
@@ -468,6 +468,26 @@ test('setup binds the Dreamer HTTP key only to the chosen endpoint', async (t) =
 
   assert.equal(await runSetup([...args, '--http-api-key-env', '-'], options), 0, errors());
   assert.deepEqual(readConfigLayer(configPath).dreamer.http, { baseUrl, model: 'fixture' });
+});
+
+test('setup warns when the configured Dreamer command is only a relative path or shell shim', async (t) => {
+  const { options, errors, output } = fixture(t);
+  const { cwd } = options;
+  const filename = process.platform === 'win32' ? 'fixture.exe' : 'fixture';
+  fs.writeFileSync(path.join(cwd, filename), 'fixture', { mode: 0o700 });
+  const commands = ['./' + filename];
+  if (process.platform === 'win32') {
+    const shim = path.join(cwd, 'fixture.cmd');
+    fs.writeFileSync(shim, '@exit /b 1');
+    commands.push(shim);
+  }
+  for (const [index, command] of commands.entries()) {
+    assert.equal(await runSetup(['-y', '--host', 'none', '--no-embeddings', '--config', path.join(cwd, index + '.jsonc'),
+      '--dreamer-mode', 'cli', '--cli-orchestrator', 'omp', '--cli-command', command], options), 0, errors());
+  }
+  assert.equal((output().match(/Dreamer requires a native executable .* on PATH or an absolute executable path/g) ?? []).length,
+    commands.length);
+  assert.doesNotMatch(output(), /Dreamer CLI executable found/);
 });
 
 test('interactive setup consumes piped readline answers and registers the selected host', async (t) => {

@@ -5,7 +5,9 @@ import {
   DEFAULT_DB_PATH, DEFAULT_EMBEDDING_ENABLED, loadConfig, parseConfigLayer, readConfigText, resolveConfigDestination, writeConfig,
 } from '../config.mjs';
 import { createEmbeddingEngine } from '../embeddings.mjs';
-import { CLI_PRESETS, HOSTS, detectHost, findExecutable, hostConfigPath, hostSnippet, prepareHostRegistration } from './hosts.mjs';
+import {
+  CLI_PRESETS, DREAMER_EXECUTABLE_GUIDANCE, HOSTS, detectHost, findExecutable, hostConfigPath, hostSnippet, prepareHostRegistration,
+} from './hosts.mjs';
 import { cliContext, configErrorMessage, parseOptions, transformersAvailable } from './options.mjs';
 
 const dreamerOptions = [
@@ -268,9 +270,10 @@ export async function runSetup(argv = [], options = {}) {
     if (effective.dreamer.enabled && effective.dreamer.mode === 'cli') {
       const { cli } = effective.dreamer;
       const command = cli.command ?? CLI_PRESETS[cli.orchestrator].command;
-      const executable = findExecutable(command, env, cwd);
+      const executable = findExecutable(command, env, undefined, { forSpawn: true });
       print(executable ? 'Dreamer CLI executable found at ' + executable
-        : 'Warning: Dreamer CLI executable unavailable. Install it or set --cli-command.');
+        : 'Warning: ' + (findExecutable(command, env, cwd) ? DREAMER_EXECUTABLE_GUIDANCE
+          : 'Dreamer CLI executable unavailable. Install it or set --cli-command.'));
     }
     await saveSettings(userConfigPath, settingsPath, originalSettings, draft);
     print('\nSaved settings to ' + userConfigPath);

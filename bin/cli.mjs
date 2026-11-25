@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
+import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { INDEXER_ORCHESTRATORS } from '../src/indexers/types.mjs';
 
-const plannedCommands = ['dream', 'ui', 'import'];
+const plannedCommands = ['ui', 'import'];
+const dreamUsage = 'Dream usage: multi-sub-memory dream [--project <cwd>] [--dry-run] [--json]';
 const indexOrchestrators = [...INDEXER_ORCHESTRATORS, 'all'];
 const args = process.argv.slice(2);
 const command = args[0] ?? 'serve';
@@ -63,10 +65,85 @@ async function indexTranscripts(args) {
   }
 }
 
+async function dream(args) {
+  if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
+    console.log(dreamUsage);
+    return;
+  }
+  const { values, tokens } = parseArgs({
+    args,
+    options: {
+      project: { type: 'string' }, cwd: { type: 'string' }, 'dry-run': { type: 'boolean' }, json: { type: 'boolean' },
+    },
+    tokens: true,
+  });
+  const names = new Set();
+  for (const { name } of tokens) {
+    if (names.has(name)) throw new Error(`--${name} may only be specified once`);
+    names.add(name);
+  }
+  if (names.has('project') && names.has('cwd')) throw new Error('Use one of --project or --cwd');
+  const cwd = values.project ?? values.cwd;
+  if (cwd === '') throw new Error('--project and --cwd require a path');
+
+  const { loadConfig, readConfigLayer, resolveUserConfigPath } = await import('../src/config.mjs');
+  const { openDatabase } = await import('../src/db.mjs');
+  const { createEmbeddingEngine } = await import('../src/embeddings.mjs');
+  const { runDream } = await import('../src/dreamer/engine.mjs');
+  const { AUTO_DREAM_CONTEXT_ENV } = await import('../src/dreamer/trigger.mjs');
+  const { resolveProjectKey } = await import('../src/project-id.mjs');
+  const backgroundContext = process.env[AUTO_DREAM_CONTEXT_ENV];
+  delete process.env[AUTO_DREAM_CONTEXT_ENV];
+  const userConfigPath = resolveUserConfigPath();
+  const user = readConfigLayer(userConfigPath);
+  const targetCwd = backgroundContext ? process.cwd() : path.resolve(cwd ?? process.cwd());
+  const config = backgroundContext ? JSON.parse(backgroundContext) : loadConfig({ cwd: targetCwd, userConfigData: user });
+  const projectKey = backgroundContext ? config.projectKey : resolveProjectKey(targetCwd).projectKey;
+  if (typeof projectKey !== 'string' || !projectKey) throw new Error('Dreamer requires a project key');
+  let result;
+  if (!config.dreamer.enabled || config.dreamer.mode === 'disabled') {
+    result = await runDream({ config, projectKey });
+  } else {
+    const db = openDatabase(config.dbPath);
+    try {
+      const embeddingEngine = createEmbeddingEngine({ embedding: config.embedding });
+      result = await runDream({
+        db, config, projectKey, cwd: targetCwd, embeddingEngine,
+        dryRun: Boolean(values['dry-run']), automatic: Boolean(backgroundContext),
+        userDreamer: user.dreamer ?? null,
+      });
+    } finally {
+      db.close();
+    }
+  }
+  if (backgroundContext) return;
+  if (values.json) console.log(JSON.stringify(result));
+  else if (result.reason === 'disabled') console.log('Dreamer is disabled in config.');
+  else if (result.reason === 'lease-held') console.log('Dreamer skipped because another run holds the project lease.');
+  else if (result.reason === 'cadence') console.log('Dreamer skipped because the automatic cadence is no longer due.');
+  else {
+    const { memoriesReviewed, memoriesMerged, memoriesArchived, memoriesUpdated, memoriesAdded, summary } = result;
+    console.log(`Dreamer ${result.status}. Reviewed ${memoriesReviewed} memories.`);
+    console.log(`Merges ${memoriesMerged}, archives ${memoriesArchived}, updates ${memoriesUpdated}, additions ${memoriesAdded}.`);
+    if (summary) console.log(summary);
+    if (result.dryRun && result.operations?.length) {
+      console.log('Proposed operations');
+      for (const { type, source_ids, id, content, category, importance, reason } of result.operations) {
+        console.log(`- ${type}${source_ids ? ' ' + source_ids.join(', ') : id ? ' ' + id : ''}`);
+        if (content !== undefined) console.log('  Content: ' + JSON.stringify(content));
+        if (category !== undefined) console.log('  Category: ' + category);
+        if (importance !== undefined) console.log('  Importance: ' + importance);
+        if (reason !== undefined) console.log('  Reason: ' + JSON.stringify(reason));
+      }
+    }
+  }
+}
+
 if (['--help', '-h', 'help'].includes(command)) {
   console.log('Usage: multi-sub-memory [command] [--cwd <path>]');
-  console.log(`Commands: serve, setup, doctor, index, ${plannedCommands.join(', ')}`);
+  console.log(`Commands: serve, setup, doctor, index, dream, ${plannedCommands.join(', ')}`);
   console.log(`Index usage: multi-sub-memory index [--orchestrator <${indexOrchestrators.join('|')}>] [--json] [--cwd <path>]`);
+  console.log(dreamUsage);
 } else if (command === 'setup') {
   const { runSetup } = await import('../src/cli/setup.mjs');
   process.exitCode = await runSetup(args.slice(1));
@@ -82,9 +159,9 @@ if (['--help', '-h', 'help'].includes(command)) {
     console.error(error.message);
     process.exitCode = 1;
   }
-} else if (command === 'index') {
+} else if (command === 'index' || command === 'dream') {
   try {
-    await indexTranscripts(args.slice(1));
+    await (command === 'index' ? indexTranscripts : dream)(args.slice(1));
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
