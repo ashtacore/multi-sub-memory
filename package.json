@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "Cross-orchestrator local Memory MCP server backed by node:sqlite",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashtacore/multi-sub-memory.git"
+  },
   "type": "module",
   "engines": {
     "node": "^22.16.0 || >=24.0.0"
@@ -12,6 +16,7 @@
   },
   "files": ["bin/", "src/", "hooks/", "docs/host-instructions/", "LICENSE", "README.md"],
   "scripts": {
+    "check": "node scripts/check.mjs",
     "test": "node --test --test-concurrency=4 \"test/**/*.test.mjs\""
   },
   "dependencies": {
@@ -20,5 +25,8 @@
   },
   "optionalDependencies": {
     "@huggingface/transformers": "^3.0.0"
+  },
+  "devDependencies": {
+    "yaml": "^2.9.1"
   }
 }

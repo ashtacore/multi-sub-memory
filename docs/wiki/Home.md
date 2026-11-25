@@ -13,3 +13,4 @@ Use this wiki for durable project knowledge. [GitHub Issues](https://github.com/
 | [Dreamer](Dreamer.md) | Memory consolidation, runner configuration, and automatic cadence |
 | [Importers](Importers.md) | Read-only migration from Magic Context, OMP mnemopi, and Markdown checklists |
 | [Dashboard](Dashboard.md) | Local browser UI, REST routes, and request security |
+| [CI and releases](CI-and-Releases.md) | Pull request verification, npm publishing, and GitHub Releases |
