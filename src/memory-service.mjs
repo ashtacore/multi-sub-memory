@@ -16,6 +16,18 @@ export const NOTE_STATUSES = Object.freeze(['active', 'pending', 'dismissed']);
 export const DEFAULT_LIST_LIMIT = 50;
 export const MAX_LIST_LIMIT = 200;
 
+export class StaleRecordError extends Error {
+  constructor() {
+    super('Record was modified by another writer; refresh and try again.');
+  }
+}
+
+function checkRevision(row, expectedUpdatedAt) {
+  if (expectedUpdatedAt !== undefined && String(row.updated_at) !== expectedUpdatedAt) {
+    throw new StaleRecordError();
+  }
+}
+
 const PROJECT_KEY_TTL_MS = 5000;
 const PROJECT_KEY_CACHE_LIMIT = 64;
 const projectKeyCache = new Map();
@@ -58,9 +70,24 @@ function requireContent(content) {
   return content;
 }
 
+function projectIdentityFor(scope, input, context) {
+  if (scope === 'global') return { projectKey: GLOBAL_PROJECT_KEY, projectRoot: null };
+  return resolveCachedProjectKey(input.cwd ?? context.defaultCwd);
+}
+
 function projectKeyFor(scope, input, context) {
-  if (scope === 'global') return GLOBAL_PROJECT_KEY;
-  return resolveCachedProjectKey(input.cwd ?? context.defaultCwd).projectKey;
+  return projectIdentityFor(scope, input, context).projectKey;
+}
+
+function recordProject(db, projectKey, projectRoot, now) {
+  if (!projectKey || projectKey === GLOBAL_PROJECT_KEY || !projectRoot) return;
+  db.prepare(`
+    INSERT INTO projects (project_key, project_root, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT (project_key) DO UPDATE SET
+      project_root = excluded.project_root,
+      updated_at = excluded.updated_at
+  `).run(projectKey, projectRoot, now);
 }
 
 function formatMemory(row) {
@@ -136,10 +163,11 @@ export async function writeMemory(db, input, context = {}) {
   const content = requireContent(input.content);
   const { scope = 'project', category = 'GENERAL', importance = 3 } = input;
   if (!MEMORY_SCOPES.includes(scope)) throw new Error('Memory scope must be project or global');
-  const projectKey = projectKeyFor(scope, input, context);
+  const { projectKey, projectRoot } = projectIdentityFor(scope, input, context);
   const hash = hashNormalizedContent(content);
   const result = inWriteTransaction(db, () => {
     const now = Date.now();
+    recordProject(db, projectKey, projectRoot, now);
     const row = db.prepare(`
       INSERT INTO memories (
         id, project_key, scope, category, content, normalized_hash, importance,
@@ -161,7 +189,7 @@ export async function writeMemory(db, input, context = {}) {
     const updated = db.prepare(`
       UPDATE memories SET content = ?, category = ?, importance = ?, status = 'active',
         superseded_by = NULL, source_orchestrator = ?, source_session_id = ?,
-        metadata_json = ?, updated_at = ?
+        metadata_json = ?, updated_at = MAX(?, updated_at + 1)
       WHERE id = ? RETURNING *
     `).get(
       reactivated ? content : existing.content, input.category ?? existing.category,
@@ -190,13 +218,41 @@ export async function updateMemory(db, input, context = {}) {
   if (input.scope !== undefined && !MEMORY_SCOPES.includes(input.scope)) {
     throw new Error('Memory scope must be project or global');
   }
-  const targetProjectKey = input.scope === 'project' ? projectKeyFor('project', input, context) : GLOBAL_PROJECT_KEY;
+  if (input.project_key !== undefined && (typeof input.project_key !== 'string' || !input.project_key.trim() || input.project_key.trim() !== input.project_key)) {
+    throw new Error('Memory project_key must be a non-blank string');
+  }
+  if (input.scope === 'global' && input.project_key !== undefined && input.project_key !== GLOBAL_PROJECT_KEY) {
+    throw new Error('Global memories must use the global project key');
+  }
+  if (input.scope === 'project' && input.project_key === GLOBAL_PROJECT_KEY) {
+    throw new Error('Project memories cannot use the global project key');
+  }
+  const needsDefaultProject = input.scope === 'project' && input.project_key === undefined;
+  const targetProject = needsDefaultProject
+    ? projectIdentityFor('project', input, context)
+    : { projectKey: input.project_key ?? GLOBAL_PROJECT_KEY, projectRoot: null };
+  const targetProjectKey = targetProject.projectKey;
   let result;
   try {
     result = inWriteTransaction(db, () => {
       const existing = memoryRow(db, input.id);
-      const scope = input.scope ?? existing.scope;
-      const projectKey = scope === existing.scope ? existing.project_key : targetProjectKey;
+      checkRevision(existing, context.expectedUpdatedAt);
+      const scope = input.scope ?? (input.project_key !== undefined
+        ? (input.project_key === GLOBAL_PROJECT_KEY ? 'global' : 'project')
+        : existing.scope);
+      let projectKey;
+      if (scope === 'global') {
+        projectKey = GLOBAL_PROJECT_KEY;
+      } else if (input.project_key !== undefined) {
+        projectKey = input.project_key;
+      } else if (existing.scope === 'project') {
+        projectKey = existing.project_key;
+      } else {
+        projectKey = targetProjectKey;
+      }
+      if (scope === 'project' && needsDefaultProject && projectKey === targetProjectKey) {
+        recordProject(db, targetProjectKey, targetProject.projectRoot, Date.now());
+      }
       const status = input.status ?? existing.status;
       if (status === 'superseded' && existing.superseded_by === null) {
         throw new Error('Use archive with superseded_by to mark a memory as superseded');
@@ -204,18 +260,18 @@ export async function updateMemory(db, input, context = {}) {
       const changedContent = content !== undefined && content !== existing.content;
       const row = db.prepare(`
         UPDATE memories SET project_key = ?, scope = ?, content = ?, normalized_hash = ?,
-          category = ?, importance = ?, status = ?, superseded_by = ?, metadata_json = ?, updated_at = ?
+          category = ?, importance = ?, status = ?, superseded_by = ?, metadata_json = ?, updated_at = MAX(?, updated_at + 1)
         WHERE id = ? RETURNING *
       `).get(
         projectKey, scope, content ?? existing.content,
         changedContent ? hashNormalizedContent(content) : existing.normalized_hash,
         input.category ?? existing.category, input.importance ?? existing.importance, status,
-        status === 'superseded' ? existing.superseded_by : null,
+        input.status === undefined || status === 'superseded' ? existing.superseded_by : null,
         input.metadata === undefined ? existing.metadata_json : JSON.stringify(input.metadata),
         Date.now(), input.id,
       );
       if (changedContent) invalidateEmbedding(db, input.id);
-      return { memory: formatMemory(row), changedContent };
+      return { memory: context.rawRow ? row : formatMemory(row), changedContent };
     });
   } catch (error) {
     if (error.errcode === 2067 || error.code === 'SQLITE_CONSTRAINT_UNIQUE'
@@ -224,7 +280,7 @@ export async function updateMemory(db, input, context = {}) {
     }
     throw error;
   }
-  if (result.changedContent) void storeEmbedding(db, result.memory, context.embeddingEngine);
+  if (result.changedContent) void storeEmbedding(db, result.memory, context.embeddingEngine, context.embeddingModel);
   return result.memory;
 }
 
@@ -237,7 +293,7 @@ export function archiveMemory(db, input) {
       if (!successor) throw new Error(`Memory not found for superseded_by: ${supersededBy}`);
     }
     const row = db.prepare(`
-      UPDATE memories SET status = ?, superseded_by = ?, updated_at = ? WHERE id = ? RETURNING *
+      UPDATE memories SET status = ?, superseded_by = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ? RETURNING *
     `).get(supersededBy === null ? 'archived' : 'superseded', supersededBy, Date.now(), input.id);
     return formatMemory(requireRow(row, 'Memory', input.id));
   });
@@ -285,17 +341,20 @@ export function writeNote(db, input, context = {}) {
   const content = requireContent(input.content);
   const { status = 'active' } = input;
   if (status !== 'active' && status !== 'pending') throw new Error('New note status must be active or pending');
-  const projectKey = projectKeyFor('project', input, context);
+  const { projectKey, projectRoot } = projectIdentityFor('project', input, context);
   const now = Date.now();
-  return db.prepare(`
-    INSERT INTO notes (
-      id, project_key, status, content, surface_condition, source_orchestrator,
-      source_session_id, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
-  `).get(
-    generateId(), projectKey, status, content, input.surface_condition ?? null,
-    input.source_orchestrator ?? null, input.source_session_id ?? null, now, now,
-  );
+  return inWriteTransaction(db, () => {
+    recordProject(db, projectKey, projectRoot, now);
+    return db.prepare(`
+      INSERT INTO notes (
+        id, project_key, status, content, surface_condition, source_orchestrator,
+        source_session_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
+    `).get(
+      generateId(), projectKey, status, content, input.surface_condition ?? null,
+      input.source_orchestrator ?? null, input.source_session_id ?? null, now, now,
+    );
+  });
 }
 
 export function selectNotes(db, { projectKey, status, includeGlobal }) {
@@ -322,17 +381,24 @@ export function readNotes(db, input = {}, context = {}) {
   });
 }
 
-export function updateNote(db, input) {
+export function updateNote(db, input, { expectedUpdatedAt } = {}) {
   const content = input.content === undefined ? null : requireContent(input.content);
-  const row = db.prepare(`
-    UPDATE notes SET content = COALESCE(?, content), status = COALESCE(?, status),
-      surface_condition = CASE WHEN ? THEN ? ELSE surface_condition END, updated_at = ?
-    WHERE id = ? RETURNING *
-  `).get(
-    content, input.status ?? null, Number(input.surface_condition !== undefined),
-    input.surface_condition ?? null, Date.now(), input.id,
-  );
-  return requireRow(row, 'Note', input.id);
+  function update() {
+    if (expectedUpdatedAt !== undefined) {
+      const existing = db.prepare('SELECT updated_at FROM notes WHERE id = ?').get(input.id);
+      checkRevision(requireRow(existing, 'Note', input.id), expectedUpdatedAt);
+    }
+    const row = db.prepare(`
+      UPDATE notes SET content = COALESCE(?, content), status = COALESCE(?, status),
+        surface_condition = CASE WHEN ? THEN ? ELSE surface_condition END, updated_at = MAX(?, updated_at + 1)
+      WHERE id = ? RETURNING *
+    `).get(
+      content, input.status ?? null, Number(input.surface_condition !== undefined),
+      input.surface_condition ?? null, Date.now(), input.id,
+    );
+    return requireRow(row, 'Note', input.id);
+  }
+  return expectedUpdatedAt === undefined ? update() : inWriteTransaction(db, update);
 }
 
 export function dismissNote(db, id) {

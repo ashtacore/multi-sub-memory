@@ -25,3 +25,6 @@ host, then run `npx -y multi-sub-memory doctor` to check the configuration.
 See [Setup and doctor](docs/wiki/Setup-and-Doctor.md) for scripted setup and
 diagnostics, and the [MCP core guide](docs/wiki/MCP-Core.md) for tool actions and
 workspace selection.
+
+Run `npx -y multi-sub-memory ui --open` to browse and edit local memories and
+notes and inspect Dreamer activity. See the [dashboard guide](docs/wiki/Dashboard.md).

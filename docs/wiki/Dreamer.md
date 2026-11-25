@@ -75,6 +75,9 @@ array. Optional Markdown fences around the JSON are accepted.
 
 ## Design rules and why
 
+- Dreamer redacts configured secrets, URL userinfo, and every URL query
+  parameter value from run summaries and errors before storing them.
+
 - A per-project SQLite lease covers planning and application. Dreamer checks
   lease ownership and verifies that referenced memories still match the
   reviewed rows before applying the plan.

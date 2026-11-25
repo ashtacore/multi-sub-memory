@@ -1,7 +1,7 @@
 import {
   cosineSimilarity, decodeFloat32Vector, DEFAULT_EMBEDDING_DIMS, DEFAULT_EMBEDDING_MODEL,
 } from './embeddings.mjs';
-import { resolveCachedProjectKey } from './memory-service.mjs';
+import { MAX_LIST_LIMIT, resolveCachedProjectKey } from './memory-service.mjs';
 
 export const SEARCH_SOURCES = Object.freeze(['memory', 'note', 'transcript']);
 export const SEARCH_SCOPES = Object.freeze(['current_project', 'all_projects']);
@@ -86,10 +86,20 @@ function parseSince(since) {
   throw new Error('since must be a valid ISO 8601 date');
 }
 
-function sourceFilter(source, { scope, projectKey, orchestrators, sinceMs }) {
+function sourceFilter(source, { scope, projectKey, orchestrators, sinceMs, memoryFilters }) {
   const clauses = [];
   const params = [];
-  if (source.status) clauses.push(source.status);
+  if (source === sourceQueries.memory && memoryFilters) {
+    for (const [column, value] of [
+      ['project_key', memoryFilters.projectKey], ['scope', memoryFilters.scope],
+      ['category', memoryFilters.category], ['status', memoryFilters.status],
+    ]) {
+      if (value !== undefined) {
+        clauses.push(`m.${column} = ?`);
+        params.push(value);
+      }
+    }
+  } else if (source.status) clauses.push(source.status);
   if (scope === 'current_project') {
     clauses.push(source.project);
     params.push(projectKey);
@@ -291,7 +301,7 @@ function fuseRanks(fts, vectors, rrfK, limit) {
 
 export async function hybridSearch(db, options = {}) {
   const {
-    query, cwd, defaultCwd, embeddingEngine, since,
+    query, cwd, defaultCwd, embeddingEngine, since, memoryFilters,
     sources: requestedSources = SEARCH_SOURCES,
     scope = 'current_project', rrfK = DEFAULT_RRF_K,
   } = options;
@@ -301,7 +311,8 @@ export async function hybridSearch(db, options = {}) {
   const orchestrators = options.orchestrators === undefined
     ? undefined : validateSelection('orchestrators', options.orchestrators, SEARCH_ORCHESTRATORS);
   const sinceMs = since === undefined ? undefined : parseSince(since);
-  const limit = Math.max(1, Math.min(MAX_SEARCH_LIMIT, Math.trunc(options.limit ?? DEFAULT_SEARCH_LIMIT)));
+  const maxLimit = memoryFilters ? MAX_LIST_LIMIT : MAX_SEARCH_LIMIT;
+  const limit = Math.max(1, Math.min(maxLimit, Math.trunc(options.limit ?? DEFAULT_SEARCH_LIMIT)));
   const projectKey = options.projectKey ?? resolveCachedProjectKey(cwd ?? defaultCwd).projectKey;
   const trimmedQuery = typeof query === 'string' ? query.trim() : '';
   const result = { mode: 'fts-only', query: trimmedQuery, scope, project_key: projectKey, results: [] };
@@ -309,7 +320,7 @@ export async function hybridSearch(db, options = {}) {
 
   const candidateLimit = Math.min(Math.max(limit * 4, 50), 200);
   const match = sanitizeFtsQuery(trimmedQuery);
-  const filters = { scope, projectKey, orchestrators, sinceMs };
+  const filters = { scope, projectKey, orchestrators, sinceMs, memoryFilters };
   const fts = [];
   const embedding = embeddingEngine && hasEligibleVectors(db, sources, filters, embeddingEngine)
     ? await embedQuery(embeddingEngine, trimmedQuery) : null;

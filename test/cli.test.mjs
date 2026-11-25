@@ -13,7 +13,7 @@ import { hashNormalizedContent, openDatabase } from '../src/db.mjs';
 import { normalizePath, resolveProjectKey } from '../src/project-id.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
-const plannedCommands = ['ui'];
+const plannedCommands = [];
 
 function invoke(args, options = {}) {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
@@ -35,7 +35,9 @@ for (const flag of ['--help', '-h', 'help']) {
     assert.match(result.stdout, /\bserve\b/);
     assert.match(result.stdout, /\bindex\b/);
     assert.match(result.stdout, /<omp\|claude\|codex\|agy\|all>/);
-    for (const command of ['setup', 'doctor', 'index', 'dream', 'import', ...plannedCommands]) assert.ok(result.stdout.includes(command), command);
+    for (const command of ['setup', 'doctor', 'index', 'dream', 'import', 'ui', ...plannedCommands]) {
+      assert.ok(result.stdout.includes(command), command);
+    }
     assert.match(result.stdout, /import --from <magic-context\|mnemopi\|notes\|all>/);
   });
 }
@@ -107,6 +109,26 @@ test('invalid serve arguments keep stdout empty', () => {
     assert.equal(result.status, 1);
     assert.equal(result.stdout, '');
     assert.match(result.stderr, message);
+  }
+});
+
+test('ui --help prints the dashboard usage', () => {
+  const result = invoke(['ui', '--help']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /Usage: multi-sub-memory ui \[--port <number>\] \[--open\] \[--cwd <path>\] \[--help\]/);
+});
+
+test('ui rejects invalid, duplicate, unknown and positional arguments', () => {
+  for (const args of [
+    ['--port'], ['--port=-1'], ['--port=65536'], ['--port=1.5'], ['--port='], ['--port=abc'],
+    ['--port=0', '--port=1'], ['--open', '--open'], ['--open=false'], ['--cwd'], ['--cwd='],
+    ['--cwd=a', '--cwd=b'], ['--help', '-h'], ['--unknown'], ['extra'],
+  ]) {
+    const result = invoke(['ui', ...args]);
+    assert.equal(result.status, 1, args.join(' '));
+    assert.equal(result.stdout, '');
+    assert.ok(result.stderr.trim());
   }
 });
 
