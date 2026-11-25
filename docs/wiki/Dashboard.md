@@ -100,10 +100,12 @@ projects:
       - ~/worktrees/repo-review
 ```
 
-The default is the most recently used available checkout. The dashboard uses
-the recorded project and indexing activity and remembers successful manual
-runs for the life of the current dashboard process. When there is no activity,
-it uses the order in the YAML list.
+Successful manual runs, including dry runs, update the project registry with
+the selected checkout. The dashboard prefers that recorded path across
+restarts while it still belongs to the repository and exists on disk. If the
+recorded path is unavailable, it tries configured paths in YAML order, then
+recently indexed paths and the launch workspace. Configured projects remain
+selectable when none of their checkouts exist.
 
 ## HTTP API
 
@@ -113,7 +115,7 @@ Use `global` for global rows alone.
 
 | Method and path | Parameters and effects |
 |---|---|
-| `GET /api/overview` | Project and global counts, verified checkout paths for each project, totals, default project key, embedding status, and database health |
+| `GET /api/overview` | Project and global counts, configured project keys, totals, default project key, embedding status, and database health |
 | `GET /api/memories` | `project_key`, `scope` (project, global, or all), `category`, `status` (active by default, archived, superseded, or all), `q`, `tag`, `limit`, `sort` (`importance`, `created_at`, or `updated_at`), and `order` (`asc` or `desc`). Filters constrain search before relevance ranking. Rows include sorted `tags`, `project_name`, and a nullable `project_root`. |
 | `GET /api/tags` | Requires `project_key` for a single repository or `global`. Returns `tags` with each name, description, and assignment count across all memory statuses. |
 | `PATCH /api/memories/:id` | Any of `content`, `category`, `importance` (1–5), `status` (active or archived), `scope` (project or global), `project_key` (a known project key or `global`), or `tags` (array replacing assignments), plus optional `expected_updated_at`. Omit `status` to keep the existing status. An explicit superseded status or unknown destination returns 400. A duplicate in the destination project and scope returns 409. |

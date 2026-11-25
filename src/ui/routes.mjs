@@ -9,7 +9,7 @@ import {
   MissingProjectDestinationError,
   NOTE_COMMENT_PREVIEW_LENGTH, NoteValidationError, SameNoteStatusError, StaleRecordError, addNoteComment,
   decodeNoteCursor, deleteNote, deleteNoteComment, encodeNoteCursor, listNoteComments, listTags,
-  memoryTags, normalizeTag, TagValidationError,
+  memoryTags, normalizeTag, recordProject, TagValidationError,
   updateMemory, updateNote, updateNoteComment,
 } from '../memory-service.mjs';
 import { formatProjectLabels, normalizePath, resolveProjectKey } from '../project-id.mjs';
@@ -160,56 +160,40 @@ function userSettings(context) {
   return readConfigLayer(resolveUserConfigPath(context.configOptions));
 }
 
-function projectCheckouts(context, settings, key, { cache = false } = {}) {
-  const { db, defaultProjectKey, defaultProjectRoot, configOptions, recentCheckouts } = context;
-  const roots = new Map();
-  function add(projectKey, root, time = 0) {
-    if (!root || (key && key !== projectKey)) return;
-    const directory = expandHome(root, configOptions.homeDir);
-    if (!path.isAbsolute(directory)) return;
-    if (!roots.has(projectKey)) roots.set(projectKey, new Map());
-    const candidates = roots.get(projectKey);
-    candidates.set(directory, Math.max(time, candidates.get(directory) ?? 0));
-  }
-  if (defaultProjectKey) add(defaultProjectKey, defaultProjectRoot);
-  for (const [projectKey, layer] of Object.entries(settings.projects ?? {})) {
-    for (const root of layer.checkouts ?? []) add(projectKey, root);
-  }
-  const where = key ? ' WHERE project_key = ?' : '';
-  const args = key ? [key] : [];
-  for (const row of db.prepare('SELECT project_key, project_root, updated_at FROM projects' + where).all(...args)) {
-    add(row.project_key, row.project_root, row.updated_at);
-  }
+function projectCheckouts(context, settings, projectKey) {
+  const { db, defaultProjectKey, defaultProjectRoot, configOptions } = context;
+  const registered = db.prepare('SELECT project_root FROM projects WHERE project_key = ?').get(projectKey);
   const transcripts = db.prepare(`
-    SELECT project_key, project_root, MAX(last_indexed_at) AS updated_at
-    FROM transcript_files${where} GROUP BY project_key, project_root
-  `).all(...args);
-  for (const row of transcripts) add(row.project_key, row.project_root, row.updated_at);
-
-  const checkouts = new Map();
-  for (const [projectKey, candidates] of roots) {
-    const valid = new Map();
-    for (const [directory, time] of candidates) {
-      try {
-        if (!statSync(directory, { throwIfNoEntry: false })?.isDirectory()) continue;
-        const root = normalizePath(directory);
-        const project = resolveProjectKey(root, { projects: settings.projects, optional: true, cache });
-        if (project?.projectKey !== projectKey || project.projectRoot !== root) continue;
-        const recent = recentCheckouts.get(projectKey);
-        valid.set(root, Math.max(time, valid.get(root) ?? 0, recent?.path === root ? recent.time : 0));
-      } catch {
-        // An inaccessible or removed directory cannot be selected.
-      }
+    SELECT project_root FROM transcript_files WHERE project_key = ? AND project_root IS NOT NULL
+    GROUP BY project_root ORDER BY MAX(last_indexed_at) DESC
+  `).all(projectKey);
+  const candidates = new Set([
+    registered?.project_root,
+    ...(settings.projects?.[projectKey]?.checkouts ?? []),
+    ...transcripts.map(({ project_root }) => project_root),
+    projectKey === defaultProjectKey ? defaultProjectRoot : null,
+  ]);
+  const checkouts = new Set();
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const directory = expandHome(candidate, configOptions.homeDir);
+    if (!path.isAbsolute(directory)) continue;
+    try {
+      if (!statSync(directory, { throwIfNoEntry: false })?.isDirectory()) continue;
+      const root = normalizePath(directory);
+      if (checkouts.has(root)) continue;
+      const project = resolveProjectKey(root, { projects: settings.projects, optional: true, cache: false });
+      if (project?.projectKey === projectKey && project.projectRoot === root) checkouts.add(root);
+    } catch {
+      // An inaccessible or removed directory cannot be selected.
     }
-    const sorted = [...valid].sort((a, b) => b[1] - a[1]);
-    checkouts.set(projectKey, sorted.map(([root]) => root));
   }
-  return checkouts;
+  return [...checkouts];
 }
 
 function overview(context) {
   const { db, defaultProjectKey, defaultProjectRoot, config, embeddingEngine } = context;
-  const checkouts = projectCheckouts(context, userSettings(context), undefined, { cache: true });
+  const configuredProjects = userSettings(context).projects ?? {};
   const projects = new Map();
   const global = emptyCounts();
   const totals = emptyCounts();
@@ -247,16 +231,13 @@ function overview(context) {
   for (const key of roots.keys()) {
     if (key !== globalKey) projectCounts(key);
   }
-  for (const [key, paths] of checkouts) {
-    if (paths.length && key !== globalKey) projectCounts(key);
-  }
+  for (const key of Object.keys(configuredProjects)) projectCounts(key);
   const labels = formatProjectLabels([...projects.keys()].map((projectKey) => ({
     projectKey,
-    projectRoot: roots.get(projectKey) ?? checkouts.get(projectKey)?.[0],
+    projectRoot: roots.get(projectKey) ?? configuredProjects[projectKey]?.checkouts?.[0],
   })));
   const projectList = [...projects.values()].map((project) => ({
     ...project,
-    checkouts: checkouts.get(project.project_key) ?? [],
     display_name: labels.get(project.project_key) ?? project.project_key,
   })).sort((a, b) => a.display_name.localeCompare(b.display_name) || a.project_key.localeCompare(b.project_key));
   let engineStatus;
@@ -453,7 +434,7 @@ async function changeRecord(context, req, table, id, params) {
       const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot);
       const destination = body.project_key;
       if (destination === all || (!catalog.labels.has(destination)
-        && !projectCheckouts(context, userSettings(context), destination).get(destination)?.length)) {
+        && !projectCheckouts(context, userSettings(context), destination).length)) {
         throw new RequestError(400, 'Unknown project destination.');
       }
     }
@@ -532,7 +513,7 @@ function dreamer(context, params) {
   const projectKey = selectedKey ?? context.defaultProjectKey;
   const settings = userSettings(context);
   const checkouts = projectKey && projectKey !== globalKey
-    ? projectCheckouts(context, settings, projectKey).get(projectKey) ?? [] : [];
+    ? projectCheckouts(context, settings, projectKey) : [];
   const { config, runnableProjectKey, authorized, fingerprint, endpoint, keyConfigured, redactDream } =
     effectiveDreamer(context, { checkout: checkouts[0], projectKey, settings });
   const { enabled = false, mode = 'disabled', cadence = {}, http, cli } = config.dreamer ?? {};
@@ -583,7 +564,7 @@ function dreamer(context, params) {
 }
 
 async function startDream(context, req) {
-  const { db, defaultProjectKey, embeddingEngine, configOptions, recentCheckouts } = context;
+  const { db, defaultProjectKey, embeddingEngine, configOptions } = context;
   const body = validate(await readBody(req), {
     project_key: (key) => nonblank(key) && key.trim() === key,
     checkout: (value) => nonblank(value) && path.isAbsolute(value) && !value.includes('\0'),
@@ -593,7 +574,7 @@ async function startDream(context, req) {
   if (!body.project_key) throw new RequestError(400, 'A project key is required');
   const projectKey = body.project_key;
   const settings = userSettings(context);
-  const checkouts = projectCheckouts(context, settings, projectKey).get(projectKey) ?? [];
+  const checkouts = projectCheckouts(context, settings, projectKey);
   const checkout = body.checkout === undefined ? checkouts[0] : normalizePath(body.checkout);
   if (!checkout || !checkouts.includes(checkout)) {
     if (body.checkout === undefined && projectKey === defaultProjectKey) {
@@ -607,17 +588,16 @@ async function startDream(context, req) {
   if (body.expected_config_fingerprint !== undefined && body.expected_config_fingerprint !== fingerprint) {
     throw new RequestError(409, 'Dreamer configuration changed; refresh before running.');
   }
-  const startedAt = Date.now();
   const result = await runDream({
     db, config, projectKey, cwd: checkout, embeddingEngine, dryRun: Boolean(body.dry_run),
     ...configOptions, userDreamer: config.dreamer,
   });
-  if (!result.skipped) recentCheckouts.set(projectKey, { path: checkout, time: startedAt });
+  if (!result.skipped) recordProject(db, projectKey, checkout, Date.now());
   return redactDream(result);
 }
 
 export function createApi(context) {
-  context = { ...context, fingerprintKey: randomBytes(32), recentCheckouts: new Map() };
+  context = { ...context, fingerprintKey: randomBytes(32) };
   return async function api(req, pathname, params) {
     if (req.method === 'GET') {
       if (pathname === '/api/overview') return overview(context);

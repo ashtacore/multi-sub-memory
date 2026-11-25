@@ -586,7 +586,7 @@ test('global dashboard runs Dreamer in verified checkouts and prefers the last-u
   await once(runner, 'listening');
   t.after(() => new Promise((resolve, reject) => runner.close((error) => error ? reject(error) : resolve())));
 
-  const { cwd, db, dbPath, request, mutate, userConfigPath } = await fixture(t, { globalMode: true });
+  const { cwd, db, dbPath, request, mutate, userConfigPath, restart } = await fixture(t, { globalMode: true });
   const projectKey = 'example.test/owner/shared';
   const anotherKey = 'example.test/owner/another';
   const missingKey = 'example.test/owner/missing';
@@ -605,7 +605,6 @@ test('global dashboard runs Dreamer in verified checkouts and prefers the last-u
   const nonRoot = path.join(configured, 'subdir');
   await mkdir(nonRoot);
   const register = db.prepare('INSERT INTO projects (project_key, project_root, updated_at) VALUES (?, ?, ?)');
-  register.run(projectKey, registered, Date.now());
   register.run(missingKey, missing, Date.now());
   const dreamer = {
     enabled: true, mode: 'http',
@@ -615,7 +614,7 @@ test('global dashboard runs Dreamer in verified checkouts and prefers the last-u
     dbPath,
     dreamer,
     projects: {
-      [projectKey]: { checkouts: [configured, another, missing, nonRoot], dreamer: { http: { model: 'shared-model' } } },
+      [projectKey]: { checkouts: [registered, configured, another, missing, nonRoot], dreamer: { http: { model: 'shared-model' } } },
       [anotherKey]: { checkouts: [another] },
     },
   });
@@ -623,16 +622,17 @@ test('global dashboard runs Dreamer in verified checkouts and prefers the last-u
   const overview = await request('/api/overview');
   assert.equal(overview.status, 200, overview.text);
   assert.equal(overview.json.default_project_key, null);
-  const projects = new Map(overview.json.projects.map((project) => [project.project_key, project.checkouts]));
-  assert.deepEqual(projects.get(projectKey), [registered, configured]);
-  assert.deepEqual(projects.get(anotherKey), [another]);
-  assert.deepEqual(projects.get(missingKey), []);
+  assert.deepEqual(new Set(overview.json.projects.map(({ project_key }) => project_key)),
+    new Set([projectKey, anotherKey, missingKey]));
+  assert.ok(overview.json.projects.every((project) => !Object.hasOwn(project, 'checkouts')));
+  assert.ok(!overview.text.includes(registered) && !overview.text.includes(configured));
 
   const endpoint = '/api/dreamer/run';
   const status = async (key) => request('/api/dreamer?project_key=' + encodeURIComponent(key));
   const info = await status(projectKey);
   assert.equal(info.status, 200, info.text);
   assert.deepEqual(info.json.checkouts, [registered, configured]);
+  assert.deepEqual((await status(anotherKey)).json.checkouts, [another]);
   assert.equal(info.json.config.runner.model, 'shared-model');
   for (const checkout of [another, missing, unlisted, nonRoot]) {
     assert.equal((await mutate('POST', endpoint, { project_key: projectKey, checkout, dry_run: true })).status, 400);
@@ -654,9 +654,35 @@ test('global dashboard runs Dreamer in verified checkouts and prefers the last-u
   assert.equal(defaultRun.json.status, 'dry-run');
   assert.deepEqual(models, ['shared-model', 'shared-model', 'default-model']);
 
+  const reopenedDb = await restart({});
+  assert.equal(reopenedDb.prepare('SELECT project_root FROM projects WHERE project_key = ?').get(projectKey).project_root,
+    configured);
+  assert.deepEqual((await status(projectKey)).json.checkouts, [configured, registered]);
+
   await rm(configured, { recursive: true, force: true });
   assert.deepEqual((await status(projectKey)).json.checkouts, [registered]);
   assert.equal((await mutate('POST', endpoint, { project_key: projectKey, checkout: configured, dry_run: true })).status, 400);
+});
+
+test('overview includes a YAML-only project with no checkout on disk', async (t) => {
+  const { cwd, db, dbPath, request, userConfigPath } = await fixture(t, { globalMode: true });
+  const projectKey = 'example.test/owner/yaml-only';
+  const missing = path.join(cwd, 'missing-checkout');
+  writeConfig(userConfigPath, { dbPath, projects: { [projectKey]: { checkouts: [missing] } } });
+  assert.equal(db.prepare('SELECT 1 FROM projects WHERE project_key = ?').get(projectKey), undefined);
+
+  const overview = await request('/api/overview');
+  assert.equal(overview.status, 200, overview.text);
+  const project = overview.json.projects.find(({ project_key }) => project_key === projectKey);
+  assert.equal(project?.display_name, 'yaml-only');
+  assert.ok(!Object.hasOwn(project, 'checkouts'));
+  assert.ok(!overview.text.includes('missing-checkout'));
+
+  const info = await request('/api/dreamer?project_key=' + encodeURIComponent(projectKey));
+  assert.equal(info.status, 200, info.text);
+  assert.equal(info.json.project_key, projectKey);
+  assert.equal(info.json.runnable_project_key, null);
+  assert.deepEqual(info.json.checkouts, []);
 });
 
 test('Dreamer uses fresh authorization, redacts secrets, and records a dry run without applying it', async (t) => {
