@@ -13,7 +13,7 @@ import { hashNormalizedContent, openDatabase } from '../src/db.mjs';
 import { normalizePath, resolveProjectKey } from '../src/project-id.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
-const plannedCommands = ['ui', 'import'];
+const plannedCommands = ['ui'];
 
 function invoke(args, options = {}) {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
@@ -35,9 +35,31 @@ for (const flag of ['--help', '-h', 'help']) {
     assert.match(result.stdout, /\bserve\b/);
     assert.match(result.stdout, /\bindex\b/);
     assert.match(result.stdout, /<omp\|claude\|codex\|agy\|all>/);
-    for (const command of ['setup', 'doctor', 'index', 'dream', ...plannedCommands]) assert.ok(result.stdout.includes(command), command);
+    for (const command of ['setup', 'doctor', 'index', 'dream', 'import', ...plannedCommands]) assert.ok(result.stdout.includes(command), command);
+    assert.match(result.stdout, /import --from <magic-context\|mnemopi\|notes\|all>/);
   });
 }
+
+test('import help and argument validation run before configuration or storage access', () => {
+  for (const flag of ['--help', '-h']) {
+    const result = invoke(['import', flag]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Usage: multi-sub-memory import --from/);
+    for (const option of ['--dry-run', '--include-archived', '--project-map', '--magic-context-db', '--mnemopi-dir', '--notes-dir', '--report', '--json', '--cwd']) {
+      assert.ok(result.stdout.includes(option), option);
+    }
+  }
+  const base = ['--from', 'all'];
+  for (const args of [[], ['--from'], ['--from', 'unknown'], ['--from', ''],
+    ...[['--bogus'], ['--report'], ['--notes-dir='], ['--cwd', '--json'], ['--json', '--json'],
+      ['--from', 'notes'], ['--'], ['extra'], ['--help']].map((extra) => [...base, ...extra]),
+  ]) {
+    const result = invoke(['import', ...args]);
+    assert.equal(result.status, 1, args.join(' '));
+    assert.equal(result.stdout, '');
+    assert.ok(result.stderr.trim());
+  }
+});
 
 for (const command of ['setup', 'doctor']) {
   test(command + ' dispatches to its own help and returns its exit code', () => {

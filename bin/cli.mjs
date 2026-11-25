@@ -4,9 +4,12 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { INDEXER_ORCHESTRATORS } from '../src/indexers/types.mjs';
 
-const plannedCommands = ['ui', 'import'];
-const dreamUsage = 'Dream usage: multi-sub-memory dream [--project <cwd>] [--dry-run] [--json]';
+const plannedCommands = ['ui'];
 const indexOrchestrators = [...INDEXER_ORCHESTRATORS, 'all'];
+const dreamUsage = 'Dream usage: multi-sub-memory dream [--project <cwd>] [--dry-run] [--json]';
+const importUsage = 'Usage: multi-sub-memory import --from <magic-context|mnemopi|notes|all> '
+  + '[--dry-run] [--include-archived] [--project-map <path>] [--magic-context-db <path>] '
+  + '[--mnemopi-dir <path>] [--notes-dir <path>] [--report <path>] [--json] [--cwd <path>]';
 const args = process.argv.slice(2);
 const command = args[0] ?? 'serve';
 
@@ -139,11 +142,53 @@ async function dream(args) {
   }
 }
 
+async function importLegacy(args) {
+  if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
+    console.log(importUsage);
+    return;
+  }
+  const { values, tokens } = parseArgs({
+    args,
+    options: {
+      from: { type: 'string' }, 'dry-run': { type: 'boolean' }, 'include-archived': { type: 'boolean' },
+      'project-map': { type: 'string' }, 'magic-context-db': { type: 'string' }, 'mnemopi-dir': { type: 'string' },
+      'notes-dir': { type: 'string' }, report: { type: 'string' }, json: { type: 'boolean' }, cwd: { type: 'string' },
+    },
+    tokens: true,
+  });
+  const names = new Set();
+  for (const { kind, name, value } of tokens) {
+    if (kind !== 'option') throw new Error('Unexpected import argument: --');
+    if (names.has(name)) throw new Error(`--${name} may only be specified once`);
+    if (value === '') throw new Error(`--${name} requires a value`);
+    names.add(name);
+  }
+  const { IMPORT_SOURCES, runImport } = await import('../src/importers/runner.mjs');
+  const { from, cwd, json } = values;
+  if (!IMPORT_SOURCES.includes(from)) throw new Error(`--from must be ${IMPORT_SOURCES.join(', ')}`);
+  const { loadConfig } = await import('../src/config.mjs');
+  const { dbPath } = loadConfig({ cwd });
+  const result = runImport({
+    dbPath, from, dryRun: values['dry-run'], includeArchived: values['include-archived'],
+    projectMapPath: values['project-map'], magicContextDb: values['magic-context-db'],
+    mnemopiDir: values['mnemopi-dir'], notesDir: values['notes-dir'], reportPath: values.report,
+  });
+  if (json) console.log(JSON.stringify(result));
+  else {
+    const { memoriesImported, memoriesSkippedDuplicate, notesImported, notesSkippedDuplicate } = result.totals;
+    const action = result.dryRun ? 'Would import' : 'Imported';
+    console.log(`${action} ${memoriesImported} memories and ${notesImported} notes.`);
+    console.log(`Duplicates skipped: ${memoriesSkippedDuplicate} memories and ${notesSkippedDuplicate} notes.`);
+    for (const { message } of result.errors) console.error(message);
+  }
+}
+
 if (['--help', '-h', 'help'].includes(command)) {
   console.log('Usage: multi-sub-memory [command] [--cwd <path>]');
-  console.log(`Commands: serve, setup, doctor, index, dream, ${plannedCommands.join(', ')}`);
+  console.log(`Commands: serve, setup, doctor, index, dream, import, ${plannedCommands.join(', ')}`);
   console.log(`Index usage: multi-sub-memory index [--orchestrator <${indexOrchestrators.join('|')}>] [--json] [--cwd <path>]`);
   console.log(dreamUsage);
+  console.log(importUsage);
 } else if (command === 'setup') {
   const { runSetup } = await import('../src/cli/setup.mjs');
   process.exitCode = await runSetup(args.slice(1));
@@ -159,9 +204,10 @@ if (['--help', '-h', 'help'].includes(command)) {
     console.error(error.message);
     process.exitCode = 1;
   }
-} else if (command === 'index' || command === 'dream') {
+} else if (command === 'index' || command === 'dream' || command === 'import') {
   try {
-    await (command === 'index' ? indexTranscripts : dream)(args.slice(1));
+    const run = { index: indexTranscripts, dream, import: importLegacy }[command];
+    await run(args.slice(1));
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
