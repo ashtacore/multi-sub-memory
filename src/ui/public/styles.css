@@ -80,6 +80,15 @@ input::placeholder { color: #969aaf; }
 .card { min-width: 0; padding: .9rem; background: var(--card); border: 1px solid var(--line); border-radius: .6rem; }
 .record { display: grid; grid-template-columns: minmax(0, 1fr); gap: .7rem; }
 .record-content { white-space: pre-wrap; }
+.note-comments[open] + .comment-preview { display: none; }
+.comment-preview { white-space: pre-line; }
+#dream-result { white-space: pre-wrap; }
+.comment-panel, .comment-chain, .comment-form, .comment { display: grid; gap: .55rem; }
+.comment-panel { margin-top: .6rem; }
+.comment-panel > :empty, .comment-panel > :has(> button[hidden]) { display: none; }
+.comment-chain { padding: 0; list-style: none; }
+.comment { padding: .65rem; border: 1px solid var(--line); border-radius: .45rem; }
+.comment > button { justify-self: start; }
 .badge {
   display: inline-block;
   max-width: 100%;

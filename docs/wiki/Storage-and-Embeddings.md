@@ -32,6 +32,15 @@ Existing and newly imported rows start with a null timestamp and a count of
 zero. The memory and note FTS update triggers reindex only when the row ID
 or indexed fields change. [MCP core](MCP-Core.md#access-tracking)
 
+Migration 8 adds `note_comments` and leaves existing topics with empty
+histories. Comments belong to one topic and are indexed by topic ID,
+creation time, and comment ID. The database requires a body and either two
+distinct statuses for a transition or two null statuses for progress.
+Transition comments are immutable until their topic is deleted. Deleting
+a topic cascades to all its comments. The notes full-text index covers
+the topic content, surface condition, and project key.
+[Note tools](MCP-Core.md#note-topics-and-comments)
+
 ## Design rules and why
 
 - Embedding rows require an explicit parent ID. The `transcript_embeddings` table uses `WITHOUT ROWID` so SQLite rejects a missing message ID instead of generating one.

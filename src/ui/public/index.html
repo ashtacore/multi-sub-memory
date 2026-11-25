@@ -171,6 +171,23 @@
         <option value="pending">Pending</option>
         <option value="dismissed">Dismissed</option>
       </select></label>
+      <label hidden>Transition comment <textarea name="comment" rows="3" disabled></textarea></label>
+      <p class="banner error" role="alert" hidden></p>
+      <div class="actions"><button type="button" data-cancel>Cancel</button><button class="primary">Save</button></div>
+    </form>
+  </dialog>
+  <dialog id="note-transition-dialog" aria-labelledby="note-transition-title">
+    <form>
+      <h2 id="note-transition-title"></h2>
+      <label>Transition comment <textarea name="comment" rows="3" required autofocus></textarea></label>
+      <p class="banner error" role="alert" hidden></p>
+      <div class="actions"><button type="button" data-cancel>Cancel</button><button class="primary">Save</button></div>
+    </form>
+  </dialog>
+  <dialog id="edit-comment-dialog" aria-labelledby="edit-comment-title">
+    <form>
+      <h2 id="edit-comment-title">Edit progress comment</h2>
+      <label>Progress comment <textarea name="body" rows="4" required autofocus></textarea></label>
       <p class="banner error" role="alert" hidden></p>
       <div class="actions"><button type="button" data-cancel>Cancel</button><button class="primary">Save</button></div>
     </form>

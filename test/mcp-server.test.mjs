@@ -98,7 +98,7 @@ test('MCP advertises the five core tools and validates action inputs', async (t)
     await expectError('mem_memory', { action }, /id is required/);
     await expectError('mem_memory', { action, id: 'missing' }, /Memory not found/);
   }
-  for (const action of ['update', 'dismiss']) {
+  for (const action of ['get', 'update', 'comment', 'dismiss']) {
     await expectError('mem_note', { action }, /id is required/);
     await expectError('mem_note', { action, id: 'missing' }, /Note not found/);
   }
@@ -583,12 +583,12 @@ test('notes read by status and project, update their condition, and dismiss by i
   assert.equal(updated.status, 'pending');
   assert.equal(updated.created_at, pending.created_at);
   await expectError('mem_note', { action: 'update', id: pending.id, content: '' }, /blank/);
-  const dismissed = await note('dismiss', { id: active.id });
+  const dismissed = await note('dismiss', { id: active.id, comment: 'Fixture closed' });
   assert.equal(dismissed.status, 'dismissed');
   assertTrackedRead(await note('read', { status: 'dismissed' }), [dismissed]);
   assertTrackedRead(await note('read'), [updated]);
   assertTrackedRead(await note('read', { status: 'all' }), [updated, dismissed]);
-  assert.equal((await note('update', { id: pending.id, status: 'active' })).status, 'active');
+  assert.equal((await note('update', { id: pending.id, status: 'active', comment: 'Review complete' })).status, 'active');
   const search = db.prepare('SELECT content FROM notes_fts WHERE notes_fts MATCH ?');
   assert.equal(search.get('Inspect').content, 'Inspect the fixture');
   assert.equal(search.get('Check'), undefined);
@@ -606,7 +606,7 @@ test('bootstrap renders deterministic sections and enforces a whole-item token b
   await note('write', { content: 'Review the draft', surface_condition: 'After a review' });
   await note('write', { content: 'Oversized note '.repeat(100), status: 'pending' });
   const dismissed = await note('write', { content: 'Dismissed fixture note' });
-  await note('dismiss', { id: dismissed.id });
+  await note('dismiss', { id: dismissed.id, comment: 'Fixture closed' });
 
   const full = await bootstrap();
   assert.match(full, /^<project-memory project="[^"]+" key="local:[a-f0-9]+">/);
@@ -818,4 +818,49 @@ test('real stdio speaks JSON-RPC only and shuts down on EOF', { timeout: 20000 }
   assert.equal((await lines.next()).done, true);
   assert.deepEqual(await exited, [0, null], stderr);
   assert.ok(fs.existsSync(dbPath));
+});
+
+test('MCP note transitions require comments and report same-status replay before staleness', async (t) => {
+  const { note, expectError } = await fixture(t);
+  const topic = await note('write', { content: 'Topic', status: 'pending', surface_condition: 'after review' });
+  const expected_updated_at = String(topic.updated_at);
+  const request = { id: topic.id, status: 'active', content: 'Updated topic', surface_condition: null,
+    comment: 'Review complete', expected_updated_at, source_orchestrator: 'fixture', source_session_id: 'session' };
+  await expectError('mem_note', { ...request, action: 'update', comment: ' \t ' }, /comment.*blank/);
+  await expectError('mem_note', { action: 'dismiss', id: topic.id }, /comment.*blank/);
+  const active = await note('update', request);
+  await expectError('mem_note', { ...request, action: 'update' }, /already in status active; supplied fields match/);
+  for (const change of [{ content: 'Different' }, { surface_condition: 'Different' }, { comment: 'Different' }]) {
+    await expectError('mem_note', { ...request, action: 'update', ...change }, /already in status active; supplied fields differ/);
+  }
+  await expectError('mem_note', { action: 'dismiss', id: topic.id, expected_updated_at }, /modified by another writer/);
+  const appended = await note('comment', { id: topic.id, comment: 'progressterm' });
+  assert.ok(appended.note.updated_at > active.updated_at);
+  assert.deepEqual([appended.comment.from_status, appended.comment.to_status], [null, null]);
+  const detail = await note('get', { id: topic.id, limit: 1 });
+  assert.equal(detail.note.access_count, 1);
+  assert.equal(detail.note.updated_at, appended.note.updated_at);
+  assert.ok(detail.next_cursor);
+  await expectError('mem_note', { action: 'get', id: topic.id, cursor: 'invalid' }, /Invalid cursor/);
+  const older = await note('get', { id: topic.id, limit: 1, cursor: detail.next_cursor });
+  assert.equal(older.note.access_count, 2);
+  assert.equal(older.next_cursor, null);
+  const transition = [...detail.comments, ...older.comments].find(({ from_status }) => from_status);
+  assert.deepEqual([transition.from_status, transition.to_status, transition.body], ['pending', 'active', request.comment]);
+  assert.deepEqual([transition.source_orchestrator, transition.source_session_id], ['fixture', 'session']);
+  await expectError('mem_note', { action: 'edit_comment', id: appended.comment.id }, /Invalid/);
+});
+
+test('bootstrap gives topics priority and only includes a short latest comment when it fits', async (t) => {
+  const { db, bootstrap, note } = await fixture(t);
+  const first = await note('write', { content: 'Primary topic' });
+  await note('write', { content: 'Secondary topic', status: 'pending' });
+  const withoutComments = await bootstrap();
+  const old = await note('comment', { id: first.id, comment: 'olderfixture' });
+  db.prepare('UPDATE note_comments SET created_at = 1 WHERE id = ?').run(old.comment.id);
+  await note('comment', { id: first.id, comment: 'newestfixture <tag> ' + 'x'.repeat(250) + ' endfixture' });
+  const full = await bootstrap();
+  assert.match(full, /Primary topic — Latest comment: newestfixture &lt;tag&gt; x+…/);
+  assert.doesNotMatch(full, /olderfixture|endfixture/);
+  assert.deepEqual(await bootstrap({ token_budget: Math.ceil(withoutComments.length / 4) }), withoutComments);
 });

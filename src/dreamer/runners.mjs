@@ -27,6 +27,12 @@ const DreamOperationSchema = z.discriminatedUnion('type', [
     .refine(({ content, category, importance }) => [content, category, importance].some((value) => value !== undefined),
       'Update requires content, category, or importance'),
   z.strictObject({ type: z.literal('add'), content: nonBlank, ...memoryFields }),
+  z.strictObject({
+    type: z.literal('compact_note_comments'),
+    note_id: nonBlank,
+    source_comment_ids: z.array(nonBlank).min(3).refine((ids) => new Set(ids).size === ids.length, 'Duplicate source comment IDs'),
+    summary: nonBlank,
+  }),
 ]);
 export const DreamPlanSchema = z.strictObject({ summary: z.string(), operations: z.array(DreamOperationSchema) });
 

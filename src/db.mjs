@@ -240,6 +240,37 @@ export const MIGRATIONS = [{
       `);
     }
   },
+}, {
+  version: 8,
+  up(db) {
+    db.exec(`
+      CREATE TABLE note_comments (
+        id TEXT PRIMARY KEY,
+        note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+        body TEXT NOT NULL CHECK (length(trim(body)) > 0),
+        from_status TEXT CHECK (from_status IN ('active', 'pending', 'dismissed')),
+        to_status TEXT CHECK (to_status IN ('active', 'pending', 'dismissed')),
+        source_orchestrator TEXT,
+        source_session_id TEXT,
+        compacted_from_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK ((from_status IS NULL AND to_status IS NULL) OR
+          (from_status IS NOT NULL AND to_status IS NOT NULL AND from_status <> to_status))
+      );
+      CREATE INDEX idx_note_comments_note_created ON note_comments (note_id, created_at, id);
+      CREATE TRIGGER note_transition_no_update BEFORE UPDATE ON note_comments
+      WHEN old.from_status IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'Status-transition comments are immutable');
+      END;
+      CREATE TRIGGER note_transition_no_delete BEFORE DELETE ON note_comments
+      WHEN old.from_status IS NOT NULL AND EXISTS (SELECT 1 FROM notes WHERE id = old.note_id)
+      BEGIN
+        SELECT RAISE(ABORT, 'Status-transition comments are immutable');
+      END;
+    `);
+  },
 }];
 
 const busyWait = new Int32Array(new SharedArrayBuffer(4));

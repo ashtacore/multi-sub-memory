@@ -9,8 +9,8 @@ import { expandSession } from './expand.mjs';
 import { runIndexers } from './indexers/runner.mjs';
 import {
   MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
-  archiveMemory, dismissNote, getMemory, listMemories, readNotes, readWithAccess, recordAccess,
-  updateMemory, updateNote, writeMemory, writeNote,
+  addNoteComment, archiveMemory, dismissNote, getMemory, getNote, listMemories, listNoteComments, readNotes,
+  readWithAccess, recordAccess, updateMemory, updateNote, writeMemory, writeNote,
 } from './memory-service.mjs';
 import { hybridSearch, SEARCH_ORCHESTRATORS, SEARCH_SCOPES, SEARCH_SOURCES } from './search.mjs';
 
@@ -82,26 +82,43 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
   }));
 
   server.registerTool('mem_note', {
-    description: 'Write, read, update, or dismiss handoff notes. Write requires content. Update and dismiss require id.',
+    description: 'Write or read handoff topics, get a topic with paginated comments, update a topic, append a progress comment, or dismiss a topic. Status changes and dismiss require a nonblank comment. Get, update, comment, and dismiss require id.',
     inputSchema: z.strictObject({
       ...recordFields,
-      action: z.enum(['write', 'read', 'update', 'dismiss']),
+      action: z.enum(['write', 'read', 'get', 'update', 'comment', 'dismiss']),
+      comment: z.string().describe('Transition reason for update or dismiss, or progress comment for comment.').optional(),
+      expected_updated_at: z.string().trim().min(1).optional(),
+      limit: z.number().int().positive().describe('Comments per get page (default 50, maximum 200).').optional(),
+      cursor: z.string().describe('The next_cursor returned by the previous get page.').optional(),
       status: z.enum([...NOTE_STATUSES, 'all']).describe('New notes may be active or pending. Use all only for read.').optional(),
       surface_condition: z.string().nullable().optional(),
       include_global: z.boolean().optional(),
     }),
   }, toolHandler((input) => {
+    const noteMutation = { expectedUpdatedAt: input.expected_updated_at, trackAccess: context.trackAccess };
     switch (input.action) {
       case 'write':
         return writeNote(db, input, context);
       case 'read':
         return readWithAccess(db, 'notes', () => readNotes(db, input, context));
+      case 'get': {
+        const id = requireId(input);
+        const [note] = readWithAccess(db, 'notes', () => [{
+          ...getNote(db, id), ...listNoteComments(db, id, input),
+        }]);
+        const { comments, next_cursor, ...topic } = note;
+        return { note: topic, comments, next_cursor };
+      }
       case 'update':
         requireId(input);
         if (input.status === 'all') throw new Error('Note status cannot be all for update');
-        return updateNote(db, input, context);
+        return updateNote(db, input, noteMutation);
+      case 'comment':
+        requireId(input);
+        return addNoteComment(db, { ...input, body: input.comment }, noteMutation);
       case 'dismiss':
-        return dismissNote(db, requireId(input), context);
+        requireId(input);
+        return dismissNote(db, input, noteMutation);
     }
   }));
 

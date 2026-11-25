@@ -44,8 +44,11 @@ process. [Dreamer](Dreamer.md)
 | `mem_memory` | `write` | Stores content under the current project or the shared global key. Defaults to category `GENERAL` and importance 3. Returns the memory and flags for deduplication and reactivation. |
 | `mem_memory` | `get`, `update`, `archive` | Looks up a memory by ID. Updates can change content, category, importance, scope, status, or metadata. To mark a memory as superseded, use `archive` with `superseded_by` set to the ID of a different, existing memory. |
 | `mem_memory` | `list` | Lists active memories from the current project and global scope by default. Accepts scope, status, category, and limit filters. The default limit is 50 and the maximum is 200. |
-| `mem_note` | `write`, `update`, `dismiss` | Creates a current-project note, changes it by ID, or marks it dismissed. New notes are active by default and can be pending. A note can record a `surface_condition`. |
-| `mem_note` | `read` | Lists active and pending notes for the current project by default. Accepts a status filter or `all`. Enable `include_global` to include notes stored under the global key. |
+| `mem_note` | `write` | Creates a current-project topic with `content` and an optional `surface_condition`. Topics start active by default and can start pending. |
+| `mem_note` | `read` | Lists active and pending topics for the current project by default. Accepts a status filter or `all` and can include global topics with `include_global`. |
+| `mem_note` | `get` | Returns `note`, `comments`, and `next_cursor` for a topic ID. The comment limit defaults to 50 and is capped at 200. |
+| `mem_note` | `update`, `dismiss` | Edits a topic or sets its status to dismissed by ID. A status transition requires a nonblank `comment`. |
+| `mem_note` | `comment` | Appends a nonblank progress `comment` by topic ID. Returns `note` and `comment`. |
 | `mem_bootstrap` | | Returns a Markdown summary of active memories and project notes. Accepts `token_budget`, `include_notes`, and `cwd`. |
 | `mem_search` | | Searches memories, notes, and indexed transcript messages. Accepts `query`, `cwd`, `sources`, `scope`, `orchestrators`, `since`, and `limit`. |
 | `mem_expand` | | Reads an indexed transcript by `session_id` and optional `file_id`. Accepts inclusive `start_seq` and `end_seq`, inclusive `line_start` and `line_end`, and `max_chars`. |
@@ -54,13 +57,30 @@ Memory, note, search, and expansion results contain JSON in the MCP text
 response. Validation and tool errors use MCP text responses with the error flag
 set. Bootstrap returns the summary as plain text.
 
+## Note topics and comments
+
+Topic text and the surface condition are editable independently. A status
+change between active, pending, and dismissed saves the reason and the
+transition together. A transition comment is read-only. MCP agents can append
+progress comments. Appending a progress comment advances the topic revision.
+
+For a topic edit, transition, or comment append, send `expected_updated_at`
+as the string form of the topic's `updated_at` to check its revision.
+Requests for the current status report whether the supplied content, surface
+condition, and reason match the current topic and its latest transition. This
+check takes precedence over a stale revision.
+
+A detail page orders comments by descending creation time and ID. Pass its
+`next_cursor` as `cursor` with the same topic ID to continue. A null cursor
+marks the final page. Search matches topic fields.
+
 ## Access tracking
 
 New MCP memories and notes start with their creation time as
 `last_accessed_at` and an `access_count` of zero. A successful MCP call
 increments the count once per distinct existing memory or note it returns.
 This includes deduplicated writes, reactivations, updates, archives, and
-dismissals. Search counts the final ranked hits. Bootstrap counts the items
+dismissals, and comment appends that return their topic. Search counts the final ranked hits. Bootstrap counts the items
 that fit the budget and appear in the summary. Each access advances the
 timestamp to the later of its current value and the access time. Startup
 hooks and dashboard views leave access metadata untouched.
@@ -76,7 +96,9 @@ global memories. It considers memories by descending importance, descending
 update time, and ascending ID, then groups the selected items by category.
 It adds an `<active-notes>` section for active and pending project notes when
 enabled. Active notes appear first, with newer notes first within each status
-and ties broken by ID. Each note can show its surface condition.
+and ties broken by ID. Each note can show its surface condition. Topic text
+and the surface condition take priority. When space remains, a topic can show
+a short preview of its latest comment.
 
 The default budget is 2,500 estimated tokens and can be overridden in
 configuration or per call. The estimate uses one token per four characters,

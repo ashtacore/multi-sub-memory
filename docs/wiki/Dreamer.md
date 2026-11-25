@@ -1,6 +1,7 @@
 # Dreamer
 
-Dreamer consolidates durable project memories through a configured language model.
+Dreamer consolidates durable project memories and eligible note comment
+chains through a configured language model.
 It starts disabled. Run it on demand after choosing a backend, or enable automatic
 cadence in the same settings. [Setup and doctor](Setup-and-Doctor.md)
 
@@ -10,9 +11,10 @@ npx multi-sub-memory dream [--project <cwd>] [--dry-run] [--json]
 
 The current directory selects the project by default. Use `--project` or its
 `--cwd` alias to select another workspace. A dry run requests and validates a
-plan, records the proposal's summary and counts, and leaves memories and
-embeddings untouched. Plain dry-run output lists each proposed operation with
-its memory IDs and supplied fields. With `--json`, a successful or dry run
+plan, records the proposal's summary and counts, and leaves memories,
+embeddings, and note comments untouched. Plain dry-run output lists each
+proposed operation with its IDs and supplied fields, including selected
+comment IDs and the proposed compaction summary. With `--json`, a successful or dry run
 includes the proposed operations and their counts. The addition count excludes
 deduplicated inserts in either mode.
 
@@ -62,7 +64,10 @@ quoting. On POSIX, the prompt
 argument is limited to 96 KiB in UTF-8. Dreamer fits whole memories in priority
 order, skipping oversized entries and continuing through later candidates up
 to the review cap. It then fits recent transcript excerpts in the remaining
-space. Only memories included in the prompt can be referenced by the plan.
+space. It uses remaining prompt space for eligible project note topics and
+their progress comments. Each eligible topic has at least five standalone
+progress comments. The plan can reference the memories, topics, and comments
+included in the prompt.
 The response must be a strict JSON object with a summary and an operations
 array. Optional Markdown fences around the JSON are accepted.
 
@@ -72,6 +77,7 @@ array. Optional Markdown fences around the JSON are accepted.
 | `archive` | Marks a memory archived and records the supplied reason. |
 | `update` | Changes content, category, importance, or a combination of those fields. A hash collision with another memory fails the run. |
 | `add` | Requires transcript evidence in the prompt and inserts a durable project memory if the normalized content does not already exist in the project scope. |
+| `compact_note_comments` | Replaces selected progress comments with a concise summary. The result has at most three progress comments including the summary, and can consist of one summary. Transition comments are preserved. |
 
 ## Design rules and why
 
@@ -84,6 +90,10 @@ array. Optional Markdown fences around the JSON are accepted.
 - Each memory ID can appear only once across the plan and must belong to the
   active project memories sent to the runner. A merge also checks whether a
   deduplicated target conflicts with another operation.
+- Note compaction checks the progress comment IDs and revisions in the write
+  transaction. A changed chain fails the plan so a later run can review the
+  current discussion. The summary comment records its run ID and source
+  comment IDs in `compacted_from_json` and advances the topic's update time.
 - Dreamer adds provenance to existing metadata on updates, archives, and
   reused merge targets. It keeps arrays, scalar values, and explicit JSON `null`
   under `user_metadata`. Absent metadata receives only provenance.

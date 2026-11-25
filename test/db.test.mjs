@@ -9,6 +9,9 @@ import { promisify } from 'node:util';
 import { MIGRATIONS, acquireLease, hashNormalizedContent, normalizeContent, openDatabase, releaseLease, runMigrations } from '../src/db.mjs';
 import { cosineSimilarity, decodeFloat32Vector, encodeFloat32Vector } from '../src/embeddings.mjs';
 
+import { formatBootstrap } from '../src/bootstrap.mjs';
+import { addNoteComment, getNote, lastNoteComments, listNoteComments, updateNote, updateNoteComment } from '../src/memory-service.mjs';
+
 function databaseFixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-db-'));
   const dbPath = path.join(root, 'state', 'memory.db');
@@ -70,7 +73,7 @@ test('creates the core schema in WAL mode and preserves the migration record on 
 
   const schema = db.prepare('SELECT name, type FROM sqlite_schema').all();
   const objects = new Map(schema.map(({ name, type }) => [name, type]));
-  for (const table of ['schema_migrations', 'memories', 'memory_embeddings', 'notes',
+  for (const table of ['schema_migrations', 'memories', 'memory_embeddings', 'notes', 'note_comments',
     'transcript_files', 'transcript_messages', 'transcript_embeddings', 'dream_runs', 'leases']) {
     assert.equal(objects.get(table), 'table', table);
   }
@@ -81,7 +84,7 @@ test('creates the core schema in WAL mode and preserves the migration record on 
       assert.equal(objects.get(trigger), 'trigger', trigger);
     }
   }
-  for (const index of ['idx_memories_project_status_rank', 'idx_notes_project_status',
+  for (const index of ['idx_memories_project_status_rank', 'idx_notes_project_status', 'idx_note_comments_note_created',
     'idx_transcript_files_session_id', 'idx_transcript_files_project_orchestrator',
     'idx_transcript_messages_file_line_seq', 'idx_dream_runs_project_started']) {
     assert.equal(objects.get(index), 'index', index);
@@ -89,7 +92,7 @@ test('creates the core schema in WAL mode and preserves the migration record on 
 
   const selectMigrations = 'SELECT version, applied_at FROM schema_migrations ORDER BY version';
   const migrations = db.prepare(selectMigrations).all();
-  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8]);
   assert.ok(Number.isInteger(migrations[0].applied_at) && migrations[0].applied_at > 0);
   addMemory(db);
   const reopened = fixture.open();
@@ -138,7 +141,7 @@ test('two processes can open and migrate a fresh database concurrently', async (
     try {
       assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
       assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-        .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7]);
+        .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8]);
     } finally {
       db.close();
     }
@@ -154,7 +157,7 @@ test('two processes can open and migrate a fresh database concurrently', async (
 
   const db = fixture.open({ readOnly: true });
   assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7]);
+    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8]);
 });
 
 test('rolls back both schema changes and the migration record when migration fails', (t) => {
@@ -165,7 +168,7 @@ test('rolls back both schema changes and the migration record when migration fai
   assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name = 'memories'").get(), undefined);
   db.exec('DROP TABLE notes');
   runMigrations(db);
-  assert.equal(count(db, 'schema_migrations'), 7);
+  assert.equal(count(db, 'schema_migrations'), 8);
 });
 
 test('adds transcript checkpoints, embedding eligibility, and Dreamer fields to a version 1 database without losing rows', (t) => {
@@ -217,7 +220,7 @@ test('reopens a pre-repair version 2 database and adds embedding eligibility wit
 
   const reopened = fixture.open();
   const migrations = reopened.prepare('SELECT version, applied_at FROM schema_migrations ORDER BY version').all();
-  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8]);
   assert.deepEqual(migrations.slice(0, 2).map(({ applied_at }) => applied_at), [1, 2]);
   const { id, byte_offset, line_count, file_identity, checkpoint_hash, file_size } = reopened
     .prepare('SELECT * FROM transcript_files').get();
@@ -269,7 +272,7 @@ test('adds Dreamer fields to a version 4 database and preserves completed runs',
   const originalRun = db.prepare('SELECT * FROM dream_runs').get();
   const reopened = fixture.open();
   assert.deepEqual(reopened.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7]);
+    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8]);
   assert.deepEqual({ ...reopened.prepare('SELECT * FROM dream_runs').get() }, {
     ...originalRun, last_transcript_message_id: null,
   });
@@ -294,7 +297,7 @@ test('records version 5 and preserves a completed run with existing Dreamer colu
 
   const reopened = fixture.open();
   assert.deepEqual(reopened.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7]);
+    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8]);
   const { status, last_transcript_message_id } = reopened.prepare(
     'SELECT status, last_transcript_message_id FROM dream_runs WHERE id = ?',
   ).get('fixture');
@@ -502,4 +505,81 @@ test('normalizes whitespace and case before hashing content', () => {
   assert.equal(normalizeContent(' \t Hello\r\n  WORLD \u00a0'), 'hello world');
   assert.equal(hashNormalizedContent('   A\n BC  '), hashNormalizedContent('a bc'));
   assert.equal(hashNormalizedContent(' ABC '), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+});
+
+test('migration 8 preserves existing topics and defines the comment constraints and cascade', (t) => {
+  const fixture = databaseFixture(t);
+  const legacy = fixture.openUnmigrated();
+  legacy.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)');
+  for (const { version, up } of MIGRATIONS.slice(0, 7)) {
+    up(legacy);
+    legacy.prepare('INSERT INTO schema_migrations VALUES (?, 1)').run(version);
+  }
+  legacy.exec("INSERT INTO notes (id, project_key, status, content, created_at, updated_at) VALUES ('legacy', 'project', 'pending', 'topicterm', 7, 9)");
+  const previous = getNote(legacy, 'legacy');
+  const readOnly = fixture.open({ readOnly: true });
+  const { text } = formatBootstrap(readOnly, { project: { projectKey: 'project', displayName: 'Project' } });
+  assert.match(text, /<active-notes>\n- \[pending\] topicterm\n<\/active-notes>/);
+  const db = fixture.open();
+  assert.deepEqual(getNote(db, 'legacy'), previous);
+  assert.deepEqual(listNoteComments(db, 'legacy'), { comments: [], next_cursor: null });
+  const insert = db.prepare(`
+    INSERT INTO note_comments (id, note_id, body, from_status, to_status, created_at, updated_at)
+    VALUES ('first', ?, ?, ?, ?, 1, 1)
+  `);
+  assert.throws(() => insert.run('missing', 'progressterm', null, null), /FOREIGN KEY/);
+  for (const fields of [[' ', null, null], ['text', null, 'active'], ['text', 'active', null],
+    ['text', 'active', 'active'], ['text', 'invalid', 'active']]) {
+    assert.throws(() => insert.run('legacy', ...fields), /CHECK/);
+  }
+  insert.run('legacy', 'progressterm', null, null);
+  updateNote(db, { id: 'legacy', status: 'active', comment: 'Migration complete' });
+  assert.throws(() => db.exec("UPDATE note_comments SET body = 'changed' WHERE from_status IS NOT NULL"), /immutable/);
+  assert.throws(() => db.exec('DELETE FROM note_comments WHERE from_status IS NOT NULL'), /immutable/);
+  assert.equal(matches(db, 'notes_fts', 'topicterm').length, 1);
+  assert.deepEqual(matches(db, 'notes_fts', 'progressterm'), []);
+  db.exec("DELETE FROM notes WHERE id = 'legacy'");
+  assert.equal(count(db, 'note_comments'), 0);
+  assert.deepEqual(matches(db, 'notes_fts', 'topicterm'), []);
+});
+
+test('note comment mutations are atomic and use separate topic and comment revisions', (t) => {
+  const db = databaseFixture(t).open();
+  db.exec(`
+    INSERT INTO notes (id, project_key, status, content, created_at, updated_at)
+    VALUES ('topic', 'project', 'pending', 'Topic', 1, 1), ('other', 'project', 'active', 'Other', 1, 1);
+    CREATE TRIGGER reject_status BEFORE UPDATE OF status ON notes
+      WHEN new.status = 'active' BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END;
+  `);
+  const before = getNote(db, 'topic');
+  const transition = { id: 'topic', status: 'active', comment: 'Ready for review' };
+  assert.throws(() => updateNote(db, transition), /fixture rollback/);
+  assert.deepEqual(getNote(db, 'topic'), before);
+  assert.equal(count(db, 'note_comments'), 0);
+  db.exec('DROP TRIGGER reject_status');
+  const active = updateNote(db, transition);
+  const [reason] = lastNoteComments(db, 'topic');
+  assert.deepEqual([reason.from_status, reason.to_status, reason.body], ['pending', 'active', transition.comment]);
+  assert.ok(active.updated_at > before.updated_at);
+  assert.throws(() => updateNoteComment(db, { note_id: 'topic', id: reason.id, body: 'changed' }), /immutable/);
+
+  const { note, comment } = addNoteComment(db, { id: 'topic', body: 'Progress' });
+  assert.ok(note.updated_at > active.updated_at);
+  assert.equal(comment.created_at, comment.updated_at);
+  assert.deepEqual([comment.from_status, comment.to_status], [null, null]);
+  assert.throws(() => updateNoteComment(db, { note_id: 'other', id: comment.id, body: 'changed' }), /not found/);
+  const edited = updateNoteComment(db, { note_id: 'topic', id: comment.id, body: 'Updated progress' },
+    { expectedUpdatedAt: String(comment.updated_at) });
+  assert.equal(edited.created_at, comment.created_at);
+  assert.ok(edited.updated_at > comment.updated_at);
+  assert.deepEqual(getNote(db, 'topic'), note);
+  assert.throws(() => updateNoteComment(db, { note_id: 'topic', id: comment.id, body: 'Stale edit' },
+    { expectedUpdatedAt: String(comment.updated_at) }), /modified by another writer/);
+
+  const insert = db.prepare(`
+    INSERT INTO note_comments (id, note_id, body, created_at, updated_at) VALUES (?, 'topic', 'Tied', ?, ?)
+  `);
+  const latest = Math.max(reason.created_at, comment.created_at) + 1;
+  for (const id of ['tie-a', 'tie-c', 'tie-b']) insert.run(id, latest, latest);
+  assert.deepEqual(lastNoteComments(db, 'topic').map(({ id }) => id), ['tie-c', 'tie-b', 'tie-a']);
 });
