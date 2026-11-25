@@ -1,7 +1,12 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import { extractMessageContent, normalizeTranscriptRole, transcriptFileIdentity } from './indexers/types.mjs';
+import { agySessionId, parseAgyMessage } from './indexers/agy.mjs';
+import { codexSessionId, parseCodexResponseItem } from './indexers/codex.mjs';
+import {
+  extractMessageContent, firstNonBlankString, normalizeTranscriptRole, parseJsonlRecord, transcriptFileIdentity,
+} from './indexers/types.mjs';
 
 export const DEFAULT_EXPAND_MAX_CHARS = 16000;
 const CHUNK_BYTES = 64 * 1024;
@@ -119,17 +124,33 @@ function toolName(call) {
   return call?.function?.name ?? call?.name ?? call?.recipient_name;
 }
 
-function parseRecord(line) {
-  try {
-    const record = JSON.parse(line);
-    return record && typeof record === 'object' && !Array.isArray(record) ? record : null;
-  } catch {
-    return null;
+function matchesCheckpointHash(fd, byteOffset, checkpointHash) {
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let endsAtNewline = false;
+  for (let position = 0; position < byteOffset;) {
+    const count = fs.readSync(fd, buffer, 0, Math.min(buffer.length, byteOffset - position), position);
+    if (count === 0) return false;
+    hash.update(buffer.subarray(0, count));
+    endsAtNewline = buffer[count - 1] === 0x0A;
+    position += count;
   }
+  return endsAtNewline && hash.digest('hex') === checkpointHash;
 }
 
-function parseLine(line, record = parseRecord(line)) {
+function parseLine(line, orchestrator, record = parseJsonlRecord(line)) {
   if (!record) return { role: 'raw', text: line };
+
+  const mapped = orchestrator === 'codex' ? parseCodexResponseItem(record, { includeToolOutput: true })
+    : orchestrator === 'agy' ? parseAgyMessage(record) : undefined;
+  if (mapped) {
+    const { role, text, timestamp, toolNames } = mapped;
+    return {
+      role, text,
+      ...(timestamp == null ? {} : { timestamp }),
+      ...(toolNames.length ? { tool_names: toolNames } : {}),
+    };
+  }
 
   const message = record.message ?? record;
   const content = message.content ?? record.content;
@@ -156,9 +177,25 @@ function arraysEqual(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function matchesMessage(parsed, expected) {
-  return parsed.role === expected.role && parsed.text === expected.text
-    && arraysEqual(parsed.tool_names ?? [], normalizeToolNames(expected.tool_names));
+function indexedToolNames(orchestrator, record, parsed) {
+  switch (orchestrator) {
+    case 'omp':
+    case 'claude':
+      return extractMessageContent(record?.message?.content).toolNames;
+    case 'codex':
+      return record ? parseCodexResponseItem(record)?.toolNames ?? [] : [];
+    case 'agy':
+      return record ? parseAgyMessage(record)?.toolNames ?? [] : [];
+    default:
+      return parsed.tool_names ?? [];
+  }
+}
+
+function matchesMessage(parsed, expected, orchestrator, record) {
+  if (parsed.role !== expected.role || parsed.text !== expected.text) return false;
+  const expectedTools = normalizeToolNames(expected.tool_names);
+  return arraysEqual(parsed.tool_names ?? [], expectedTools)
+    || arraysEqual(indexedToolNames(orchestrator, record, parsed), expectedTools);
 }
 
 function appendMessage(result, message, maxChars) {
@@ -211,11 +248,21 @@ function diskMessages(db, file, fd, options, maxChars) {
   try {
     for (const line of readLines(fd)) {
       line_no++;
-      const record = line_no === 1 ? parseRecord(line) : undefined;
+      const record = line_no === 1 ? parseJsonlRecord(line) : undefined;
       if (line_no === 1) {
         const sessionIds = [record?.session_id, record?.sessionId, record?.message?.session_id, record?.message?.sessionId,
           record?.type === 'session' ? record.id : undefined];
-        if (sessionIds.some((id) => typeof id === 'string' && id !== file.session_id)) return null;
+        const declaredId = file.orchestrator === 'codex'
+          ? codexSessionId(record) ?? firstNonBlankString(record?.payload?.session_id)
+          : file.orchestrator === 'agy' ? agySessionId(record) : undefined;
+        const indexedId = file.session_id.trim();
+        const idMismatch = declaredId !== undefined ? declaredId !== indexedId : sessionIds.some((id) => {
+          const normalized = firstNonBlankString(id);
+          return normalized !== undefined && normalized !== indexedId;
+        });
+        // A later Antigravity record can set the indexed session ID. Verify the committed prefix in that case.
+        if (idMismatch && (file.orchestrator !== 'agy' || file.checkpoint_hash == null || !(file.byte_offset > 0)
+          || !matchesCheckpointHash(fd, file.byte_offset, file.checkpoint_hash))) return null;
       }
       const atAnchor = line_no === anchor?.line_no;
       const outputComplete = result.truncated || line_no > line_end;
@@ -225,15 +272,16 @@ function diskMessages(db, file, fd, options, maxChars) {
       const include = !outputComplete && line_no >= line_start
         && (!hasSeqRange || (anchor ? atRequested : seq !== undefined && seq >= (start_seq ?? 0)));
       if (atAnchor || atRequested || include) {
-        const parsed = parseLine(line, record);
+        const lineRecord = line_no === 1 ? record : parseJsonlRecord(line);
+        const parsed = parseLine(line, file.orchestrator, lineRecord);
         if (atAnchor) {
-          if (!matchesMessage(parsed, anchor)) return null;
+          if (!matchesMessage(parsed, anchor, file.orchestrator, lineRecord)) return null;
           anchorValidated = true;
           if (outputComplete) break;
         }
         while (line_no === requested?.peek()?.line_no) {
           const expected = requested.peek();
-          if (!matchesMessage(parsed, expected)) return null;
+          if (!matchesMessage(parsed, expected, file.orchestrator, lineRecord)) return null;
           seq ??= expected.seq;
           requested.advance();
         }
@@ -307,7 +355,7 @@ export function expandSession(db, options = {}) {
   validateRange('line_start', line_start, 'line_end', line_end, 1);
   validateInteger('max_chars', max_chars, 1);
 
-  const files = `SELECT id, session_id, orchestrator, project_key, file_path, byte_offset, file_identity
+  const files = `SELECT id, session_id, orchestrator, project_key, file_path, byte_offset, file_identity, checkpoint_hash
     FROM transcript_files`;
   const file = file_id === undefined
     ? db.prepare(`${files} WHERE session_id = ? ORDER BY last_indexed_at DESC, id DESC LIMIT 1`).get(session_id.trim())

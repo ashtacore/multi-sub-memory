@@ -11,14 +11,18 @@ to read the message or a larger range from the original file.
 |---|---|---|
 | OMP (`omp`) | `~/.omp/agent/sessions` | A `session` header supplies `id` and `cwd`. `message` records supply the role and content. `toolCall` blocks supply tool names. |
 | Claude Code (`claude`) | `~/.claude/projects` | Records supply `sessionId` and `cwd`. The adapter reads user and assistant content and extracts names from `tool_use` blocks. If no entry supplies a working directory, the adapter tries to decode the project folder name. The folder encoding can lose path information. |
+| Codex (`codex`) | `~/.codex/sessions` | `session_meta` supplies the session ID and working directory. `turn_context` can update the directory. The adapter reads conversation messages and tool names from `response_item` records. A rollout filename can supply a fallback UUID. |
+| Antigravity (`agy`) | `~/.gemini/antigravity-cli/brain` | Records supply conversation and workspace metadata. The adapter reads attributable user and assistant turns, and can recover the conversation ID from the directory that contains `.system_generated/logs`. |
 
 Discovery recursively finds regular `.jsonl` files, skips symbolic links and
-Windows junctions, and yields no files for a missing root. Both adapters accept
-string content and text blocks. A missing session ID falls back to the filename
-stem. The runner resolves project identity from the working directory, so
-linked Git worktrees share the key derived from `git-common-dir`. If there is
-no working directory or existing project key, the transcript’s parent directory
-provides the project identity.
+Windows junctions, and yields no files for a missing root. All adapters accept
+string content and text blocks. The filename stem is the last fallback for a
+missing session ID. The runner resolves project identity from the working
+directory, so linked Git worktrees share the key derived from `git-common-dir`.
+If there is no working directory or existing project key, the transcript’s
+parent directory provides the project identity. See
+[Transcript formats](../transcript-formats.md) for record mappings and synthetic
+examples.
 
 `src/indexers/types.mjs` defines the `TranscriptAdapter` contract and shared
 JSONL reader. Each adapter has an `orchestrator` ID (`omp`, `claude`, `codex`,
@@ -35,7 +39,7 @@ claim the path. Adapters using the shared reader pass the previous checkpoint ha
 and return the reader’s checkpoint result so the runner can rebuild when
 continuity fails. A message carries a zero-based sequence number, a one-based
 physical line number, a role, optional timestamp, text, and tool names. The
-runner’s built-in registry provides OMP and Claude Code.
+runner’s built-in registry provides OMP, Claude Code, Codex, and Antigravity.
 
 ## Design rules and why
 
@@ -69,6 +73,17 @@ runner’s built-in registry provides OMP and Claude Code.
   to UTC ISO 8601. Prefer a valid message timestamp, then use the enclosing
   record's timestamp. Claude Code uses the record type when the nested role is
   missing or malformed. The index requires a nonempty string role.
+- Index Codex conversation messages and tool names from `response_item`
+  records. Skip event copies, developer and system prompts, reasoning, and
+  standalone tool output. In Antigravity, index attributable conversation
+  turns with text or tool names. Discover nested Antigravity transcripts only
+  at `<conversation-id>/.system_generated/logs/transcript.jsonl`. Also accept
+  `.jsonl` files directly under the session root, except `transcript_full.jsonl`.
+  Both adapters trim declared session IDs and skip blank candidates.
+  Antigravity uses the last ID declared on a complete record, so appending a
+  declaration produces the same session ID on an incremental refresh as on a
+  full index. If the first line declares a different ID, `mem_expand` requires
+  the committed prefix to match the stored checkpoint before reading from disk.
 - Commit searchable text and its embedding eligibility before attempting
   embeddings. Each run with an embedding engine retries missing eligible
   vectors for the selected orchestrators, including rows from unchanged files.
@@ -81,7 +96,7 @@ runner’s built-in registry provides OMP and Claude Code.
 ## CLI and background refresh
 
 ```sh
-npx multi-sub-memory index [--orchestrator <omp|claude|all>] [--json] [--cwd <path>]
+npx multi-sub-memory index [--orchestrator <omp|claude|codex|agy|all>] [--json] [--cwd <path>]
 ```
 
 The CLI defaults to `all`. Pass `--json` for a machine-readable run summary.
@@ -103,7 +118,8 @@ Refresh diagnostics use stderr.
 | `indexers.refreshIntervalMs` | `60000`. Accepts a positive integer up to `2147483647`. |
 | `indexers.omp.sessionsDir` | Optional override for the OMP session root. |
 | `indexers.claude.sessionsDir` | Optional override for the Claude Code session root. |
-| `indexers.codex.sessionsDir`, `indexers.agy.sessionsDir` | Accepted path settings reserved for later adapters. |
+| `indexers.codex.sessionsDir` | Optional override for the Codex session root. |
+| `indexers.agy.sessionsDir` | Optional override for the Antigravity session root. |
 
 For the other indexer settings, project settings override user settings per
 field, including the nested adapter options. Session roots expand a leading

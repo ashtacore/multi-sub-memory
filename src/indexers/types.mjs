@@ -221,6 +221,19 @@ export function normalizeTranscriptRole(value) {
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
+export function firstNonEmptyString(...values) {
+  return values.find((value) => typeof value === 'string' && value.length > 0);
+}
+
+export function firstNonBlankString(...values) {
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
 export function normalizeTranscriptTimestamp(value) {
   if (typeof value === 'string') {
     const timestamp = value.trim();

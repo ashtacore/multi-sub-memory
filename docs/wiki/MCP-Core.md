@@ -60,7 +60,7 @@ accepts `omp`, `claude`, `codex`, and `agy`. Use `since` with an ISO 8601
 date or timestamp to include records from that instant onward. Date-only values
 start at midnight UTC. Memories and notes use their update time. Transcript
 messages use their own timestamp when valid and the file's last index time
-otherwise. OMP and Claude Code indexing accepts ISO timestamps and epoch
+otherwise. Transcript indexing accepts ISO timestamps and epoch
 milliseconds from transcripts and stores valid values as UTC ISO 8601.
 
 FTS5 treats user input as quoted search terms and ranks candidates with BM25.
@@ -93,15 +93,22 @@ when available. Malformed JSONL lines are returned as raw text.
 The tool uses the absolute path stored in the index and opens it read-only. It
 rejects paths with traversal segments, non-regular files, and paths that pass
 through a symbolic link or Windows junction. The tool returns matching indexed
-messages with `source: "db-fallback"` if the file is missing, is shorter than
-the indexed byte offset, declares a different session ID on its first line
-(including an OMP session header's `id`), or lacks a match for its earliest
-indexed message. Matching files report `source: "disk"` and can include newly
-appended lines. The `max_chars` budget defaults to 16,000 and applies to the sum
-of the JSON lengths of individual message records, including metadata, tool
-names, and escaped text. `total_chars` reports that sum. When the next record
-exceeds the remaining budget, `truncated` is true. A partial final record is
-included if its metadata and an ellipsis fit.
+messages with `source: "db-fallback"` if the file is missing, its opened
+device and inode differ from the stored file identity, it is shorter than the
+indexed byte offset, its first line declares a different session ID (including
+session headers for OMP and Codex and conversation IDs for Antigravity), or
+its earliest or requested indexed messages differ in role, text, or ordered
+tool names. The session check trims declared IDs and ignores blank values. For
+Antigravity, if the first line declares an earlier ID than the indexed session
+ID, the tool can still read from disk when the committed prefix matches the
+stored checkpoint hash and the other file and message checks pass. Older rows
+without a stored identity still use the session and message checks.
+Matching files report `source: "disk"` and can include newly appended lines.
+The `max_chars` budget defaults to 16,000 and applies to the sum of the JSON
+lengths of individual message records, including metadata, tool names, and
+escaped text. `total_chars` reports that sum. When the next record exceeds the
+remaining budget, `truncated` is true. A partial final record is included if
+its metadata and an ellipsis fit.
 
 ## Design rules and why
 

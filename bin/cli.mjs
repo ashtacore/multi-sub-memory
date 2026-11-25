@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 import { parseArgs } from 'node:util';
+import { INDEXER_ORCHESTRATORS } from '../src/indexers/types.mjs';
 
 const plannedCommands = ['setup', 'doctor', 'dream', 'ui', 'import'];
+const indexOrchestrators = [...INDEXER_ORCHESTRATORS, 'all'];
 const args = process.argv.slice(2);
 const command = args[0] ?? 'serve';
 
@@ -32,8 +34,8 @@ async function indexTranscripts(args) {
   }
   const { cwd, orchestrator, json } = values;
   if (cwd === '') throw new Error('--cwd requires a path');
-  if (!['omp', 'claude', 'all'].includes(orchestrator)) {
-    throw new Error('--orchestrator must be omp, claude, or all');
+  if (!indexOrchestrators.includes(orchestrator)) {
+    throw new Error(`--orchestrator must be ${INDEXER_ORCHESTRATORS.join(', ')}, or all`);
   }
 
   const { loadConfig } = await import('../src/config.mjs');
@@ -64,7 +66,7 @@ async function indexTranscripts(args) {
 if (['--help', '-h', 'help'].includes(command)) {
   console.log('Usage: multi-sub-memory [command] [--cwd <path>]');
   console.log(`Commands: serve, index, ${plannedCommands.join(', ')}`);
-  console.log('Index usage: multi-sub-memory index [--orchestrator <omp|claude|all>] [--json] [--cwd <path>]');
+  console.log(`Index usage: multi-sub-memory index [--orchestrator <${indexOrchestrators.join('|')}>] [--json] [--cwd <path>]`);
 } else if (command === 'serve' || command.startsWith('-')) {
   try {
     const options = parseServeArgs(command === 'serve' ? args.slice(1) : args);

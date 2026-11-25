@@ -31,6 +31,7 @@ for (const flag of ['--help', '-h', 'help']) {
     assert.match(result.stdout, /usage:/i);
     assert.match(result.stdout, /\bserve\b/);
     assert.match(result.stdout, /\bindex\b/);
+    assert.match(result.stdout, /<omp\|claude\|codex\|agy\|all>/);
     for (const command of plannedCommands) assert.ok(result.stdout.includes(command), command);
   });
 }
@@ -92,19 +93,32 @@ test('index writes JSON summaries and respects adapter selection and --cwd', (t)
   const cwd = path.join(directory, 'project');
   const omp = path.join(directory, 'omp');
   const claude = path.join(directory, 'claude');
-  for (const folder of [cwd, omp, claude]) fs.mkdirSync(folder);
+  const codex = path.join(directory, 'codex');
+  const agy = path.join(directory, 'agy');
+  for (const folder of [cwd, omp, claude, codex, agy]) fs.mkdirSync(folder);
   fs.writeFileSync(path.join(omp, 'omp.jsonl'), JSON.stringify({
     type: 'message', message: { role: 'user', content: 'OMP fixture transcript' },
   }) + '\n');
   fs.writeFileSync(path.join(claude, 'claude.jsonl'), JSON.stringify({
     type: 'assistant', cwd, message: { content: 'Claude fixture transcript' },
   }) + '\n');
+  fs.writeFileSync(path.join(codex, 'codex.jsonl'), JSON.stringify({
+    type: 'response_item', payload: { type: 'message', role: 'user', content: 'Codex fixture transcript' },
+  }) + '\n');
+  fs.writeFileSync(path.join(agy, 'agy.jsonl'), JSON.stringify({
+    type: 'USER_INPUT', cwd, content: 'Antigravity fixture transcript',
+  }) + '\n');
   fs.writeFileSync(path.join(cwd, '.multi-sub-memory.jsonc'), JSON.stringify({
-    indexers: { omp: { sessionsDir: omp }, claude: { sessionsDir: claude } },
+    indexers: {
+      omp: { sessionsDir: omp }, claude: { sessionsDir: claude },
+      codex: { sessionsDir: codex }, agy: { sessionsDir: agy },
+    },
   }));
 
-  for (const [selection, expected] of [[undefined, ['claude', 'omp']], ['omp', ['omp']], ['claude', ['claude']]]) {
-    const dbPath = path.join(directory, (selection ?? 'all') + '.db');
+  const all = ['agy', 'claude', 'codex', 'omp'];
+  for (const selection of [undefined, 'all', ...all]) {
+    const expected = all.includes(selection) ? [selection] : all;
+    const dbPath = path.join(directory, (selection ?? 'default') + '.db');
     const args = ['index', '--json'];
     if (selection) args.push('--orchestrator', selection, '--cwd', cwd);
     const result = invoke(args, {
@@ -133,7 +147,7 @@ test('index writes JSON summaries and respects adapter selection and --cwd', (t)
 
 test('index rejects unknown, duplicate, missing, and invalid arguments', () => {
   for (const args of [
-    ['--bogus'], ['--json', '--json'], ['--cwd'], ['--orchestrator'], ['--orchestrator', 'codex'], ['extra'],
+    ['--bogus'], ['--json', '--json'], ['--cwd'], ['--orchestrator'], ['--orchestrator', 'unknown'], ['extra'],
   ]) {
     const result = invoke(['index', ...args]);
     assert.equal(result.status, 1, result.stderr);
@@ -169,6 +183,8 @@ test('serve refreshes on startup and after an append while keeping stdout quiet'
     indexers: {
       backgroundRefresh: true, refreshIntervalMs: 100,
       omp: { sessionsDir: sessions }, claude: { sessionsDir: path.join(directory, 'absent') },
+      codex: { sessionsDir: path.join(directory, 'absent-codex') },
+      agy: { sessionsDir: path.join(directory, 'absent-agy') },
     },
   }));
   openDatabase(dbPath).close();

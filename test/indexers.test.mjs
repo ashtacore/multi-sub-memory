@@ -33,7 +33,11 @@ function fixture(t) {
   const claude = path.join(root, 'claude');
   fs.mkdirSync(omp);
   fs.mkdirSync(claude);
-  const config = { indexers: { omp: { sessionsDir: omp }, claude: { sessionsDir: claude } } };
+  const config = { indexers: {
+    omp: { sessionsDir: omp }, claude: { sessionsDir: claude },
+    codex: { sessionsDir: path.join(root, 'absent-codex') },
+    agy: { sessionsDir: path.join(root, 'absent-agy') },
+  } };
   return { root, omp, claude, dbPath, db, config };
 }
 

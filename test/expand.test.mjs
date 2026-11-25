@@ -43,7 +43,7 @@ test('expansion reads original JSONL text using intersecting indexed sequence an
   const { db, directory } = fixture(t);
   const filePath = path.join(directory, 'transcript.jsonl');
   writeLines(filePath, [
-    { role: 'user', text: 'Original  request  ', timestamp, tool_names: ['fixture'] },
+    { type: 'user', timestamp, message: { role: 'user', content: 'Original  request  ', tool_names: ['fixture'] } },
     { type: 'assistant', timestamp, message: {
       role: 'assistant',
       content: [
