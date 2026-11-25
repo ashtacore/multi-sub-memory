@@ -785,3 +785,49 @@ test('memories expose project provenance and can move between projects or promot
   });
   assert.equal(conflict.status, 409, conflict.text);
 });
+
+test('memory PATCH rejects unknown project destinations without moving the memory', async (t) => {
+  const { db, cwd, projectKey, request, mutate } = await fixture(t);
+  const { memory } = await writeMemory(db, { content: 'Keep in this project' }, { defaultCwd: cwd });
+  const endpoint = '/api/memories/' + memory.id;
+  for (const destination of [cwd, 'all', 'dir:unknown']) {
+    const response = await mutate('PATCH', endpoint, { scope: 'project', project_key: destination });
+    assert.equal(response.status, 400, response.text);
+    assert.equal(response.json.error, 'Unknown project destination.');
+  }
+  const listed = await request('/api/memories');
+  assert.equal(listed.status, 200, listed.text);
+  assert.equal(listed.json.memories.find(({ id }) => id === memory.id)?.project_key, projectKey);
+});
+
+test('a registered project stays in the overview after its last memory moves to global', async (t) => {
+  const { db, cwd, projectKey, request, mutate } = await fixture(t);
+  const otherCwd = path.join(cwd, 'other-app');
+  await mkdir(otherCwd, { recursive: true });
+  const { memory } = await writeMemory(db, { content: 'Only memory in the other project', cwd: otherCwd }, { defaultCwd: cwd });
+  const otherKey = memory.project_key;
+  assert.notEqual(otherKey, projectKey);
+  const endpoint = '/api/memories/' + memory.id;
+
+  const promoted = await mutate('PATCH', endpoint, { project_key: 'global' });
+  assert.equal(promoted.status, 200, promoted.text);
+  assert.equal(promoted.json.memory.scope, 'global');
+
+  const overview = await request('/api/overview');
+  assert.equal(overview.status, 200, overview.text);
+  const otherProject = overview.json.projects.find(({ project_key }) => project_key === otherKey);
+  assert.equal(otherProject?.display_name, 'other-app');
+  assert.deepEqual(otherProject.memories, { active: 0, archived: 0, superseded: 0, total: 0 });
+  assert.equal(overview.json.global.memories.total, 1);
+
+  const restored = await mutate('PATCH', endpoint, { project_key: otherKey });
+  assert.equal(restored.status, 200, restored.text);
+  assert.equal(restored.json.memory.scope, 'project');
+  assert.equal(restored.json.memory.project_key, otherKey);
+  assert.equal(restored.json.memory.project_root, resolveProjectKey(otherCwd).projectRoot);
+
+  const updatedOverview = await request('/api/overview');
+  assert.equal(updatedOverview.status, 200, updatedOverview.text);
+  assert.equal(updatedOverview.json.projects.find(({ project_key }) => project_key === otherKey)?.memories.active, 1);
+  assert.equal(updatedOverview.json.global.memories.total, 0);
+});

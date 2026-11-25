@@ -96,8 +96,8 @@ export function resolveProjectKey(cwd = process.cwd(), { timeoutMs } = {}) {
 }
 
 function splitProjectSegments(projectRoot) {
-  const normalized = projectRoot.replaceAll('\\', '/').replace(/\/+$/, '');
-  const segments = normalized.split('/').filter(Boolean);
+  const separator = windowsAbsolutePath.test(projectRoot) ? /[\\/]/ : '/';
+  const segments = projectRoot.split(separator).filter(Boolean);
   if (!segments.length) return null;
   return {
     base: segments.at(-1),
@@ -111,7 +111,7 @@ export function formatProjectLabels(entries) {
 
   for (const { projectKey, projectRoot } of entries) {
     const parsed = typeof projectRoot === 'string' && projectRoot.trim()
-      ? splitProjectSegments(projectRoot.trim())
+      ? splitProjectSegments(projectRoot)
       : null;
     if (!parsed) {
       labels.set(projectKey, projectKey);

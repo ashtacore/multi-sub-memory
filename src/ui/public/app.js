@@ -7,6 +7,7 @@ const categories = ['ARCHITECTURE', 'CONFIG_VALUES', 'CONSTRAINTS', 'PROJECT_RUL
 const projectSelect = byId('project');
 const editMemoryProjectSelect = byId('edit-memory-dialog').querySelector('select[name="project_key"]');
 const search = byId('mem-search');
+const memSort = byId('mem-sort');
 const memoryCount = byId('mem-count');
 const notesLoadMore = byId('notes-load-more');
 const navigation = [...document.querySelectorAll('[data-view]')];
@@ -14,6 +15,7 @@ const noteStatuses = [...document.querySelectorAll('[data-status]')];
 const errors = new Map();
 const projectNames = new Map();
 const dreamResults = new Map();
+let savedMemorySort = null;
 
 function projectLabel(projectKey) {
   if (projectKey === 'global') return 'Global';
@@ -178,6 +180,22 @@ function splitSort(value) {
   return { sort, order };
 }
 
+function syncMemorySort() {
+  if (search.value.trim().length > 0) {
+    if (savedMemorySort === null) {
+      savedMemorySort = memSort.value;
+      memSort.add(new Option('Relevance', 'relevance'));
+      memSort.value = 'relevance';
+      memSort.disabled = true;
+    }
+  } else if (savedMemorySort !== null) {
+    memSort.querySelector('option[value="relevance"]').remove();
+    memSort.disabled = false;
+    memSort.value = savedMemorySort;
+    savedMemorySort = null;
+  }
+}
+
 function syncDreamMobileControls() {
   byId('dream-status-mobile').value = dreamStatus;
   byId('dream-sort-mobile').value = `${dreamSort}:${dreamOrder}`;
@@ -209,9 +227,10 @@ async function refreshView({ quiet = false, append = false } = {}) {
   const panel = byId('view-' + current);
   const params = { project_key: projectSelect.value };
   if (current === 'memories') {
+    syncMemorySort();
     Object.assign(params, {
       q: search.value, scope: byId('mem-scope').value, category: byId('mem-category').value,
-      status: byId('mem-status').value, ...splitSort(byId('mem-sort').value),
+      status: byId('mem-status').value, ...splitSort(savedMemorySort ?? memSort.value),
     });
     if (!quiet) memoryCount.textContent = 'Loading…';
   }
@@ -291,6 +310,7 @@ async function refreshView({ quiet = false, append = false } = {}) {
 }
 
 function scheduleSearch() {
+  syncMemorySort();
   clearTimeout(searchTimer);
   viewRequest?.abort();
   searchTimer = setTimeout(() => void refreshView(), 275);

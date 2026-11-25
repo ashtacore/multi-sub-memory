@@ -182,6 +182,9 @@ function overview({ db, defaultProjectKey, defaultProjectRoot, config, embedding
     projectCounts(project_key);
   }
   const roots = knownProjectRoots(db, defaultProjectKey, defaultProjectRoot);
+  for (const key of roots.keys()) {
+    if (key !== globalKey) projectCounts(key);
+  }
   const labels = formatProjectLabels([...projects.keys()].map((projectKey) => ({
     projectKey,
     projectRoot: roots.get(projectKey),
@@ -322,6 +325,13 @@ async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot,
   if (table === 'memories') {
     if (body.status === 'superseded') {
       throw new RequestError(400, 'Memories cannot be marked superseded manually.');
+    }
+    if (body.project_key !== undefined && body.project_key !== globalKey) {
+      // The catalog includes keys from existing memories, including legacy rows.
+      const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot);
+      if (body.project_key === all || !catalog.labels.has(body.project_key)) {
+        throw new RequestError(400, 'Unknown project destination.');
+      }
     }
     if (body.scope === 'global' && body.project_key !== undefined && body.project_key !== globalKey) {
       throw new RequestError(400, 'Global memories cannot have a project key.');

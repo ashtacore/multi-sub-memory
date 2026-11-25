@@ -194,3 +194,12 @@ test('formatProjectLabels uses basename and appends unique ancestor segments on 
   assert.equal(driveLevel.get('dir:c'), 'CoveCrawler (c:)');
   assert.equal(driveLevel.get('dir:d'), 'CoveCrawler (d:)');
 });
+
+test('formatProjectLabels preserves literal backslashes and whitespace in POSIX names', () => {
+  const labels = formatProjectLabels([
+    { projectKey: 'dir:backslash', projectRoot: '/work/team\\repo' },
+    { projectKey: 'dir:whitespace', projectRoot: '/work/ repo ' },
+  ]);
+  assert.equal(labels.get('dir:backslash'), 'team\\repo');
+  assert.equal(labels.get('dir:whitespace'), ' repo ');
+});

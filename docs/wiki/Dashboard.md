@@ -18,19 +18,32 @@ default browser. Stop the server with Ctrl+C.
   indexed transcript files and messages, SQLite schema health, and embedding
   status. Opening the dashboard leaves optional model initialization until
   a search or edit needs embeddings.
+- Project labels use the directory name when the root is known and add
+  parent segments to distinguish matching names. Projects without a known
+  root appear by key. Expand a memory's provenance to see its full project
+  path when available, its project key, and source metadata.
 - **Memories** supports project, scope, category, and status filters with
-  hybrid or full-text search. Cards show provenance and metadata. Edit,
-  archive, restore, and permanently delete memories, with confirmation
-  before deletion. The editor shows Superseded as the current status of
-  superseded memories, which can be edited, archived, or restored.
+  hybrid or full-text search. Sort the list by importance, creation time,
+  or update time in either direction. Search results use relevance and
+  clearing the query restores the previous list sort. Use **Project / Scope**
+  in the editor to move a memory to another project, promote it to Global,
+  or move it from Global into a project. Registered projects remain
+  available even when empty. Edit, archive, restore, and permanently
+  delete memories, with confirmation before deletion. The editor shows
+  Superseded as the current status of superseded memories, which can be
+  edited, archived, or restored.
 - **Notes** shows active, pending, and dismissed notes. Edit the text or
   surface condition, dismiss or restore a note, and confirm permanent deletions.
-  Use **Load more** to append older notes for the selected project and status.
+  Sort by creation or update time in either direction. Use **Load more**
+  to append the next page for the selected project, status, and sort.
 - Memory and note edits save only the changed fields. Saving an unchanged
   edit closes the dialog. Edits and quick status actions check the displayed
   record's revision and refresh the view when the server reports a conflict.
 - **Dreamer** shows active leases, a configuration summary, and recent run
-  history across projects. Select the launch workspace to start a run or
+  history across projects. Sort using the **Started**, **Finished**, or
+  **Run time** column headers and filter from the **Status** header.
+  Narrow displays offer the same controls above the run history.
+  Select the launch workspace to start a run or
   request a dry run. Launch the dashboard with `--cwd` to run Dreamer for
   another workspace. The dashboard reloads the launch workspace's effective
   settings and user authorization when displaying Dreamer status and before
@@ -50,13 +63,13 @@ Use `global` for global rows alone.
 | Method and path | Parameters and effects |
 |---|---|
 | `GET /api/overview` | Project and global counts, totals, default project key, embedding status, and database health |
-| `GET /api/memories` | `project_key`, `scope` (project, global, or all), `category`, `status` (active by default, archived, superseded, or all), `q`, `limit`. Filters constrain search before ranking. |
-| `PATCH /api/memories/:id` | Any of `content`, `category`, `importance` (1–5), or `status` (active or archived), plus optional `expected_updated_at`. Omit `status` to keep a memory's existing status. An explicit superseded status returns 400. Returns 409 if edited content duplicates another memory in the same project and scope. |
+| `GET /api/memories` | `project_key`, `scope` (project, global, or all), `category`, `status` (active by default, archived, superseded, or all), `q`, `limit`, `sort` (`importance`, `created_at`, or `updated_at`), and `order` (`asc` or `desc`). Filters constrain search before relevance ranking. Rows include `project_name` and a nullable `project_root`. |
+| `PATCH /api/memories/:id` | Any of `content`, `category`, `importance` (1–5), `status` (active or archived), `scope` (project or global), or `project_key` (a known project key or `global`), plus optional `expected_updated_at`. Omit `status` to keep the existing status. An explicit superseded status or unknown destination returns 400. A duplicate in the destination project and scope returns 409. |
 | `DELETE /api/memories/:id` | Permanently removes the memory and its search data |
-| `GET /api/notes` | `project_key`, `status` (active, pending, dismissed, or all by default), `limit`, and optional `cursor` |
+| `GET /api/notes` | `project_key`, `status` (active, pending, dismissed, or all by default), `limit`, `sort` (`updated_at` or `created_at`), `order` (`asc` or `desc`), and optional `cursor` |
 | `PATCH /api/notes/:id` | Any of `content`, `status`, or `surface_condition` (string or null), plus optional `expected_updated_at` |
 | `DELETE /api/notes/:id` | Permanently removes the note and its search data |
-| `GET /api/dreamer` | Active leases, fresh sanitized configuration with `config_fingerprint` and runner authorization, `runnable_project_key` for the launch workspace, and up to 50 recent runs. `project_key` filters history across projects. |
+| `GET /api/dreamer` | Active leases, fresh sanitized configuration with `config_fingerprint` and runner authorization, `runnable_project_key` for the launch workspace, and up to 50 runs. History supports `project_key`, `status`, `sort` (`started_at`, `finished_at`, or `duration`), and `order` (`asc` or `desc`). |
 | `POST /api/dreamer/run` | Requires the launch workspace's `project_key`. Accepts optional boolean `dry_run` and string `expected_config_fingerprint`. A fingerprint mismatch returns 409 before contacting the runner. Returns the run result or a skip reason. |
 
 Record PATCH routes use the supplied fields to update the stored row. Send
@@ -64,10 +77,10 @@ Record PATCH routes use the supplied fields to update the stored row. Send
 An invalid revision field returns 400. A stale revision returns 409 and leaves
 the row untouched.
 
-Notes sort by `updated_at` descending and then `id` descending. The response
-contains `notes` and `next_cursor`. Pass the cursor back with the same filters
-to continue from the last note on the current page. A null cursor marks the
-last page. Malformed cursors return 400.
+Notes default to `updated_at` descending. Ties sort by `id` in the selected
+direction. The response contains `notes` and `next_cursor`. Pass the cursor
+back with the same filters and sort to continue from the last note on the
+current page. A null cursor marks the last page. Malformed cursors return 400.
 
 ## Design rules and why
 
