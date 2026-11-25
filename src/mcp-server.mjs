@@ -5,11 +5,15 @@ import { formatBootstrap } from './bootstrap.mjs';
 import { loadConfig } from './config.mjs';
 import { openDatabase } from './db.mjs';
 import { createEmbeddingEngine } from './embeddings.mjs';
+import { expandSession } from './expand.mjs';
 import {
   MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
   archiveMemory, dismissNote, getMemory, listMemories, readNotes,
   updateMemory, updateNote, writeMemory, writeNote,
 } from './memory-service.mjs';
+import { hybridSearch, SEARCH_ORCHESTRATORS, SEARCH_SCOPES, SEARCH_SOURCES } from './search.mjs';
+
+export { expandSession, hybridSearch };
 
 const cwdField = z.string().min(1).describe('Workspace directory. Defaults to the server workspace.').optional();
 const recordFields = {
@@ -108,6 +112,32 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
   }, toolHandler(({ cwd, token_budget, include_notes }) => formatBootstrap(db, {
     cwd, defaultCwd, config, tokenBudget: token_budget, includeNotes: include_notes,
   }), ({ text }) => text));
+
+  server.registerTool('mem_search', {
+    description: 'Search memories, handoff notes, and indexed transcript messages. Use a transcript hit’s session_id, file_id, and seq to expand it.',
+    inputSchema: {
+      query: z.string(),
+      cwd: cwdField,
+      sources: z.array(z.enum(SEARCH_SOURCES)).optional(),
+      scope: z.enum(SEARCH_SCOPES).optional(),
+      orchestrators: z.array(z.enum(SEARCH_ORCHESTRATORS)).optional(),
+      since: z.string().describe('Include records at or after this ISO 8601 date or timestamp.').optional(),
+      limit: z.number().describe('Defaults to 10 and is clamped to 1–50.').optional(),
+    },
+  }, toolHandler((input) => hybridSearch(db, { ...input, ...context })));
+
+  server.registerTool('mem_expand', {
+    description: 'Read an indexed session by ID, optionally selecting a file ID and an inclusive message or line range.',
+    inputSchema: {
+      session_id: z.string().trim().min(1),
+      file_id: z.number().int().positive().optional(),
+      start_seq: z.number().int().nonnegative().optional(),
+      end_seq: z.number().int().nonnegative().optional(),
+      line_start: z.number().int().positive().optional(),
+      line_end: z.number().int().positive().optional(),
+      max_chars: z.number().int().positive().describe('Combined JSON length of returned message records. Defaults to 16,000 characters.').optional(),
+    },
+  }, toolHandler((input) => expandSession(db, input)));
 
   return server;
 }

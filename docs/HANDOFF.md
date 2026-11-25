@@ -1,17 +1,15 @@
-Last updated: 2026-11-23 19:23 UTC
+Last updated: 2026-11-24 14:02 UTC
 
 ## Current state
 
-- [Issue #3](https://github.com/ashtacore/multi-sub-memory/issues/3) (universal stdio MCP server, shared memory/note service, `mem_memory`, `mem_note`, and `mem_bootstrap` tools, CLI `serve --cwd` wiring, and integration tests) is implemented, verified (`npm test`: 64 passed, 4 skipped, 0 failed; `npm pack --dry-run`: 11 files), independently reviewed (**PASS**), and committed locally on `feat/3-mcp-core`.
-- [MCP core](wiki/MCP-Core.md) documents the stdio lifecycle, tools, non-blocking embeddings, UUIDv7 IDs, bounded project-key caching, and token-budgeted bootstrap formatting.
-- Built on top of the [Issue #2](https://github.com/ashtacore/multi-sub-memory/issues/2) storage and embedding layer (`b2b0463`).
+- [PR #15](https://github.com/ashtacore/multi-sub-memory/pull/15) implements the search and expansion tools for [Issue #4](https://github.com/ashtacore/multi-sub-memory/issues/4) on `feat/4-search-expand` (stacked on `feat/3-mcp-core`).
+- Addressed all peer-review findings with regression tests: OMP session header rotation checks, serialized JSON-length `max_chars` budgets including metadata/tool names, and skipping query embedding / reporting `fts-only` when no usable stored vectors match active filters and known model/dimensions. Updated the [MCP core guide](wiki/MCP-Core.md). Verified with `node --test --test-concurrency=4 "test/**/*.test.mjs"` (102 passed, 7 skipped, 0 failed).
 
 ## Next actions
 
-1. Continue Phase 1 with [Issue #4](https://github.com/ashtacore/multi-sub-memory/issues/4) (`mem_search` hybrid FTS5 + vector search).
-2. Fan out Phase 2/3/4/5 ready lanes once Phase 1 dependencies are met (`#5` + `#7`, then `#6` + `#8` + `#9`, then `#10` + `#11`).
-3. Present local PR-ready summaries and request explicit approval before pushing, creating PRs, or mutating GitHub Project #5 statuses.
+1. Complete owner review and merge approval for Phase 1 PRs (`#2`, `#3`, `#4` / PR #15).
+2. Start the ready Phase 2 through Phase 5 lanes once Phase 1 is integrated.
 
 ## Blockers
 
-- None currently. Live ONNX model download/inference remains unverified in offline unit tests (optional dependency omitted during `npm ci --omit=optional`; embedding tests use a local fixture engine).
+- Live ONNX download and inference remain outside offline fixture coverage. On Windows, file symlink coverage requires Developer Mode or elevation. Junction coverage is separate.

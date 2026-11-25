@@ -170,6 +170,9 @@ export function createEmbeddingEngine(options = {}) {
         return null;
       }
     },
+    getExpectedDims() {
+      return expectedDims;
+    },
     getStatus() {
       const dims = expectedDims ?? DEFAULT_EMBEDDING_DIMS;
       return { enabled, available, mode: available ? 'onnx' : 'fts-only', model, dims, ...(reason ? { reason } : {}) };
