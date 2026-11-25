@@ -11,3 +11,4 @@ Use this wiki for durable project knowledge. [GitHub Issues](https://github.com/
 | [Startup hooks](Startup-Hooks.md) | Optional OMP and Claude Code hooks and MCP instructions for Codex and Antigravity |
 | [Indexers](Indexers.md) | Incremental transcript indexing for OMP, Claude Code, Codex, and Antigravity, plus background refresh |
 | [Dreamer](Dreamer.md) | Memory consolidation, runner configuration, and automatic cadence |
+| [Importers](Importers.md) | Read-only migration from Magic Context, OMP mnemopi, and Markdown checklists |
