@@ -44,8 +44,8 @@ function tempDirectory(t) {
   return directory;
 }
 
-async function fixture(t, { defaultCwd = initGit(tempDirectory(t)), embeddingEngine, config } = {}) {
-  const db = openDatabase(':memory:');
+async function fixture(t, { defaultCwd = initGit(tempDirectory(t)), embeddingEngine, config, dbPath = ':memory:' } = {}) {
+  const db = openDatabase(dbPath);
   const server = createMcpServer({ db, config, defaultCwd, embeddingEngine });
   const client = new Client({ name: 'fixture', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -186,6 +186,34 @@ test('MCP search counts fused hits once and excludes candidates outside the resu
   assert.equal(dashboardSearch.results.length, 2);
   assert.equal(access('memories', saved.id).access_count, 2);
   assert.equal(access('notes', handoff.id).access_count, 1);
+});
+
+test('MCP rolls back access counts when another writer deletes a selected row', async (t) => {
+  for (const [tool, args] of [['mem_search', { query: 'tracking' }], ['mem_bootstrap', {}]]) {
+    const dbPath = path.join(tempDirectory(t), 'access.sqlite');
+    await t.test(tool, async (t) => {
+      const { db, memory, note, expectError } = await fixture(t, { dbPath });
+      const { memory: saved } = await memory('write', { content: 'Tracking memory' });
+      const handoff = await note('write', { content: 'Tracking note' });
+      db.prepare('UPDATE memories SET last_accessed_at = NULL WHERE id = ?').run(saved.id);
+      const writer = openDatabase(dbPath);
+      t.after(() => writer.close());
+      const deleteNote = writer.prepare('DELETE FROM notes WHERE id = ?');
+      const exec = db.exec.bind(db);
+      t.mock.method(db, 'exec', (sql) => {
+        if (sql === 'BEGIN IMMEDIATE') {
+          // Both hits have been selected. Commit the deletion before the access write starts.
+          assert.equal(deleteNote.run(handoff.id).changes, 1);
+        }
+        return exec(sql);
+      });
+
+      await expectError(tool, args, /selected memory or note was removed/i);
+      const access = db.prepare('SELECT access_count, last_accessed_at FROM memories WHERE id = ?').get(saved.id);
+      assert.deepEqual({ ...access }, { access_count: 0, last_accessed_at: null });
+      assert.equal(db.prepare('SELECT id FROM notes WHERE id = ?').get(handoff.id), undefined);
+    });
+  }
 });
 
 test('MCP search uses the server workspace and accepts source and date filters', async (t) => {

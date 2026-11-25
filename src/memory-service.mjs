@@ -126,24 +126,37 @@ export function inWriteTransaction(db, write) {
   }
 }
 
-export function recordAccess(db, { memories = [], notes = [] }) {
+function updateAccess(db, { memories = [], notes = [] }) {
   const updated = { memories: new Map(), notes: new Map() };
-  if (!memories.length && !notes.length) return updated;
-
-  inWriteTransaction(db, () => {
-    const now = Date.now();
-    for (const [table, ids] of [['memories', memories], ['notes', notes]]) {
-      if (!ids.length) continue;
-      const rows = db.prepare(`
-        UPDATE ${table} SET access_count = access_count + 1,
-          last_accessed_at = MAX(COALESCE(last_accessed_at, 0), ?)
-        WHERE id IN (SELECT value FROM json_each(?))
-        RETURNING id, last_accessed_at, access_count
-      `).all(now, JSON.stringify(ids));
-      for (const { id, ...stats } of rows) updated[table].set(id, stats);
+  const now = Date.now();
+  for (const [table, ids] of [['memories', memories], ['notes', notes]]) {
+    if (!ids.length) continue;
+    const rows = db.prepare(`
+      UPDATE ${table} SET access_count = access_count + 1,
+        last_accessed_at = MAX(COALESCE(last_accessed_at, 0), ?)
+      WHERE id IN (SELECT value FROM json_each(?))
+      RETURNING id, last_accessed_at, access_count
+    `).all(now, JSON.stringify(ids));
+    const statsById = updated[table];
+    for (const { id, ...stats } of rows) statsById.set(id, stats);
+    if (ids.some((id) => !statsById.has(id))) {
+      throw new Error('A selected memory or note was removed. Retry the request.');
     }
-  });
+  }
   return updated;
+}
+
+export function recordAccess(db, { memories = [], notes = [] }) {
+  if (!memories.length && !notes.length) return { memories: new Map(), notes: new Map() };
+  return inWriteTransaction(db, () => updateAccess(db, { memories, notes }));
+}
+
+export function readWithAccess(db, table, select) {
+  return inWriteTransaction(db, () => {
+    const records = select();
+    const updated = updateAccess(db, { [table]: records.map(({ id }) => id) })[table];
+    return records.map((row) => ({ ...row, ...updated.get(row.id) }));
+  });
 }
 
 export async function storeEmbedding(db, memory, engine, fallbackModel) {

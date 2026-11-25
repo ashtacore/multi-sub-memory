@@ -168,5 +168,9 @@ its metadata and an ellipsis fit.
   result without waiting for model loading or inference. Store a new embedding
   only if inference succeeds and the stored text still matches. See [storage and embeddings](Storage-and-Embeddings.md).
 - Reserve stdout for MCP protocol messages. Send process diagnostics to stderr.
+- Select and count memory get and list results and note read results in one
+  write transaction. If a row selected by search or bootstrap disappears
+  before counting, roll back all access updates for that call and return a
+  retryable tool error.
 - Keep host startup hooks read-only and fail-open. The MCP server requires no
   host message mutations or pre-request gates.

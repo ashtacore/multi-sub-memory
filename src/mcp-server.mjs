@@ -9,7 +9,7 @@ import { expandSession } from './expand.mjs';
 import { runIndexers } from './indexers/runner.mjs';
 import {
   MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
-  archiveMemory, dismissNote, getMemory, listMemories, readNotes, recordAccess,
+  archiveMemory, dismissNote, getMemory, listMemories, readNotes, readWithAccess, recordAccess,
   updateMemory, updateNote, writeMemory, writeNote,
 } from './memory-service.mjs';
 import { hybridSearch, SEARCH_ORCHESTRATORS, SEARCH_SCOPES, SEARCH_SOURCES } from './search.mjs';
@@ -44,11 +44,6 @@ function toolHandler(run, format = JSON.stringify) {
   };
 }
 
-function trackRead(db, table, records) {
-  const updated = recordAccess(db, { [table]: records.map(({ id }) => id) })[table];
-  return records.map((row) => ({ ...row, ...updated.get(row.id) }));
-}
-
 export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
   const server = new McpServer({ name: 'multi-sub-memory', version: '0.1.0' });
   const context = { config, embeddingEngine, defaultCwd };
@@ -77,10 +72,12 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       case 'archive':
         requireId(input);
         return archiveMemory(db, input);
-      case 'get':
-        return trackRead(db, 'memories', [getMemory(db, requireId(input))])[0];
+      case 'get': {
+        const id = requireId(input);
+        return readWithAccess(db, 'memories', () => [getMemory(db, id)])[0];
+      }
       case 'list':
-        return trackRead(db, 'memories', listMemories(db, input, context));
+        return readWithAccess(db, 'memories', () => listMemories(db, input, context));
     }
   }));
 
@@ -98,7 +95,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       case 'write':
         return writeNote(db, input, context);
       case 'read':
-        return trackRead(db, 'notes', readNotes(db, input, context));
+        return readWithAccess(db, 'notes', () => readNotes(db, input, context));
       case 'update':
         requireId(input);
         if (input.status === 'all') throw new Error('Note status cannot be all for update');
