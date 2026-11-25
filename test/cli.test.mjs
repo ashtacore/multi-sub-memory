@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { hashNormalizedContent, openDatabase } from '../src/db.mjs';
 import { normalizePath, resolveProjectKey } from '../src/project-id.mjs';
+import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
 const plannedCommands = [];
@@ -86,7 +87,7 @@ test('default and explicit serve exit cleanly on closed stdin', (t) => {
       input: '',
       env: {
         ...process.env,
-        MULTI_SUB_MEMORY_CONFIG: path.join(directory, 'absent-config.jsonc'),
+        MULTI_SUB_MEMORY_CONFIG: path.join(directory, 'absent-config.yaml'),
         MULTI_SUB_MEMORY_DB: ':memory:',
         MULTI_SUB_MEMORY_NO_EMBEDDINGS: '1',
       },
@@ -151,7 +152,8 @@ test('unknown commands report an error and help hint on stderr', () => {
 function dreamCliFixture(t) {
   const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'multi-sub-memory-cli-dream-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const configPath = path.join(directory, 'settings.jsonc');
+  initGit(directory);
+  const configPath = path.join(directory, 'settings.yaml');
   const dbPath = path.join(directory, 'memory.db');
   const env = {
     ...process.env, MULTI_SUB_MEMORY_CONFIG: configPath,
@@ -174,6 +176,7 @@ test('dream --dry-run --json loads project config and records a proposal through
   const { directory, configPath, dbPath, env } = dreamCliFixture(t);
   const project = path.join(directory, 'workspace');
   fs.mkdirSync(project);
+  initGit(project);
   const requests = [];
   const plan = { summary: 'Fixture proposal', operations: [{ type: 'add', content: 'Document fixture conventions' }] };
   const server = http.createServer(async (req, res) => {
@@ -188,9 +191,9 @@ test('dream --dry-run --json loads project config and records a proposal through
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
   fs.writeFileSync(configPath, JSON.stringify({ dreamer: { http: { baseUrl } } }));
-  fs.writeFileSync(path.join(project, '.multi-sub-memory.jsonc'), JSON.stringify({
+  writeProjectConfig(configPath, project, {
     dreamer: { enabled: true, mode: 'http', http: { model: 'fixture' } },
-  }));
+  });
   const seed = openDatabase(dbPath);
   try {
     const { lastInsertRowid } = seed.prepare(`
@@ -302,7 +305,7 @@ test('plain dream --dry-run prints proposed operations with an empty summary and
 
 test('the detached Dreamer command uses the indexed project key and keeps stdout empty', async (t) => {
   const { directory, configPath, dbPath, env } = dreamCliFixture(t);
-  const projectKey = 'dir:indexed-fixture';
+  const { projectKey } = resolveProjectKey(directory);
   const server = http.createServer((req, res) => {
     req.resume();
     res.end(JSON.stringify({ choices: [{ message: { content: '{"summary":"Fixture","operations":[]}' } }] }));
@@ -311,11 +314,7 @@ test('the detached Dreamer command uses the indexed project key and keeps stdout
   await once(server, 'listening');
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
-  fs.writeFileSync(configPath, JSON.stringify({ dreamer: { http: { baseUrl } } }));
-  env.MULTI_SUB_MEMORY_AUTO_DREAM_CONTEXT = JSON.stringify({
-    dbPath,
-    projectKey,
-    embedding: { enabled: false },
+  writeProjectConfig(configPath, directory, {
     dreamer: {
       enabled: true,
       mode: 'http',
@@ -323,6 +322,7 @@ test('the detached Dreamer command uses the indexed project key and keeps stdout
       cadence: { mode: 'auto', minIntervalHours: 1, minNewMemories: 0 },
     },
   });
+  env.MULTI_SUB_MEMORY_AUTO_DREAM_CONTEXT = JSON.stringify({ dbPath, projectKey });
   const { stdout, stderr } = await promisify(execFile)(process.execPath, [cliPath, 'dream'], {
     cwd: directory, env, windowsHide: true, timeout: 10_000,
   });
@@ -342,6 +342,7 @@ test('manual and detached Dreamer select the target project and isolate runners 
   const target = path.join(directory, 'target');
   const sessionsDir = path.join(directory, 'sessions');
   fs.mkdirSync(target);
+  initGit(target);
   fs.mkdirSync(sessionsDir);
   const script = path.join(directory, 'cwd fixture.mjs');
   fs.writeFileSync(script, 'console.log(JSON.stringify({ summary: process.cwd(), operations: [] }));');
@@ -349,9 +350,9 @@ test('manual and detached Dreamer select the target project and isolate runners 
     dreamer: { mode: 'cli', cli: { orchestrator: 'codex', command: process.execPath, args: [script] } },
     indexers: { omp: { sessionsDir } },
   }));
-  fs.writeFileSync(path.join(target, '.multi-sub-memory.jsonc'), JSON.stringify({
+  writeProjectConfig(configPath, target, {
     dreamer: { enabled: true, cadence: { mode: 'auto', minNewMemories: 0 } },
-  }));
+  });
   fs.writeFileSync(path.join(sessionsDir, 'fixture.jsonl'), [
     JSON.stringify({ type: 'session', id: 'fixture', cwd: target }),
     JSON.stringify({ type: 'message', message: { role: 'user', content: 'Fixture transcript' } }),
@@ -418,6 +419,7 @@ test('index writes JSON summaries and respects adapter selection and --cwd', (t)
   const codex = path.join(directory, 'codex');
   const agy = path.join(directory, 'agy');
   for (const folder of [cwd, omp, claude, codex, agy]) fs.mkdirSync(folder);
+  initGit(cwd);
   fs.writeFileSync(path.join(omp, 'omp.jsonl'), JSON.stringify({
     type: 'message', message: { role: 'user', content: 'OMP fixture transcript' },
   }) + '\n');
@@ -430,12 +432,13 @@ test('index writes JSON summaries and respects adapter selection and --cwd', (t)
   fs.writeFileSync(path.join(agy, 'agy.jsonl'), JSON.stringify({
     type: 'USER_INPUT', cwd, content: 'Antigravity fixture transcript',
   }) + '\n');
-  fs.writeFileSync(path.join(cwd, '.multi-sub-memory.jsonc'), JSON.stringify({
+  const configPath = path.join(directory, 'config.yaml');
+  writeProjectConfig(configPath, cwd, {
     indexers: {
       omp: { sessionsDir: omp }, claude: { sessionsDir: claude },
       codex: { sessionsDir: codex }, agy: { sessionsDir: agy },
     },
-  }));
+  });
 
   const all = ['agy', 'claude', 'codex', 'omp'];
   for (const selection of [undefined, 'all', ...all]) {
@@ -447,7 +450,7 @@ test('index writes JSON summaries and respects adapter selection and --cwd', (t)
       cwd: selection ? directory : cwd,
       env: {
         ...process.env,
-        MULTI_SUB_MEMORY_CONFIG: path.join(directory, 'absent-config.jsonc'),
+        MULTI_SUB_MEMORY_CONFIG: configPath,
         MULTI_SUB_MEMORY_DB: dbPath,
         MULTI_SUB_MEMORY_NO_EMBEDDINGS: '1',
       },
@@ -481,7 +484,7 @@ test('index rejects unknown, duplicate, missing, and invalid arguments', () => {
 test('index honors the global indexer switch', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-cli-disabled-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const configPath = path.join(directory, 'config.jsonc');
+  const configPath = path.join(directory, 'config.yaml');
   fs.writeFileSync(configPath, JSON.stringify({ indexers: { enabled: false } }));
   const result = invoke(['index', '--json'], {
     cwd: directory,
@@ -499,7 +502,7 @@ test('serve refreshes on startup and after an append while keeping stdout quiet'
   const file = path.join(sessions, 'refresh.jsonl');
   const entry = (content) => JSON.stringify({ type: 'message', message: { role: 'user', content } }) + '\n';
   fs.writeFileSync(file, entry('First refresh fixture'));
-  const configPath = path.join(directory, 'config.jsonc');
+  const configPath = path.join(directory, 'config.yaml');
   const dbPath = path.join(directory, 'refresh.db');
   fs.writeFileSync(configPath, JSON.stringify({
     indexers: {

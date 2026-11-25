@@ -12,6 +12,7 @@ import { runSetup } from '../src/cli/setup.mjs';
 import { DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, expandHome, loadConfig, readConfigLayer, writeConfig } from '../src/config.mjs';
 import { openDatabase } from '../src/db.mjs';
 import { writeMemory } from '../src/memory-service.mjs';
+import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-setup-'));
@@ -134,11 +135,14 @@ test('setup preserves JSON bytes outside new MCP fields across registration and 
 test('setup saves user defaults without promoting project or environment overrides', async (t) => {
   const { options, errors } = fixture(t);
   const { cwd, homeDir, env } = options;
-  const projectPath = path.join(cwd, '.multi-sub-memory.jsonc');
-  writeConfig(projectPath, {
+  initGit(cwd);
+  const userConfigPath = expandHome(DEFAULT_CONFIG_PATH, homeDir);
+  const project = {
     dbPath: 'project.db', embedding: { enabled: false, model: 'project-model' },
     dreamer: { enabled: true, mode: 'http', http: { baseUrl: 'https://example.test/v1', model: 'fixture' } },
-  });
+  };
+  writeProjectConfig(userConfigPath, cwd, project);
+  const { projects } = readConfigLayer(userConfigPath);
   env.MULTI_SUB_MEMORY_DB = 'environment.db';
   env.MULTI_SUB_MEMORY_NO_EMBEDDINGS = 'yes';
   env.MULTI_SUB_MEMORY_EMBEDDING_MODEL = 'environment-model';
@@ -149,6 +153,7 @@ test('setup saves user defaults without promoting project or environment overrid
     dbPath,
     embedding: { enabled: true },
     dreamer: { enabled: false, mode: 'disabled' },
+    projects,
   });
   assert.ok(fs.existsSync(dbPath));
   assert.equal(fs.existsSync(path.join(cwd, 'project.db')), false);
@@ -239,7 +244,7 @@ test('setup reserves the settings lock and its SQLite sidecar paths', async (t) 
   for (const suffix of ['', '-wal', '-shm', '-journal']) {
     await t.test('.lock' + suffix, async (t) => {
       const { options, errors } = fixture(t);
-      const configPath = path.join(options.cwd, 'settings.jsonc');
+      const configPath = path.join(options.cwd, 'settings.yaml');
       const dbPath = configPath + '.lock' + suffix;
       assert.equal(await runSetup(['--yes', '--host', 'none', '--no-embeddings', '--db', dbPath,
         '--config', configPath], options), 1);
@@ -252,8 +257,8 @@ test('setup reserves the settings lock and its SQLite sidecar paths', async (t) 
 test('setup rejects a dangling settings symlink chain that points to the database path', async (t) => {
   const { options, errors } = fixture(t);
   const dbPath = path.join(options.cwd, 'missing', 'memory.db');
-  const configPath = path.join(options.cwd, 'settings.jsonc');
-  const intermediate = path.join(options.cwd, 'intermediate.jsonc');
+  const configPath = path.join(options.cwd, 'settings.yaml');
+  const intermediate = path.join(options.cwd, 'intermediate.yaml');
   try {
     fs.symlinkSync(intermediate, configPath, 'file');
     fs.symlinkSync(dbPath, intermediate, 'file');
@@ -281,7 +286,7 @@ test('setup preserves settings created, edited or removed during the embedding p
   ]) {
     await t.test(change, async (t) => {
       const { options, errors } = fixture(t);
-      const configPath = path.join(options.cwd, 'settings.jsonc');
+      const configPath = path.join(options.cwd, 'settings.yaml');
       if (original !== undefined) fs.writeFileSync(configPath, original);
       const embed = t.mock.fn(async () => {
         if (replacement === undefined) fs.unlinkSync(configPath);
@@ -335,7 +340,7 @@ const holdSettingsLock = `
 
 test('setup preserves settings while another process holds the settings lock', { timeout: 20000 }, async (t) => {
   const { options, errors } = fixture(t);
-  const configPath = path.join(options.cwd, 'settings.jsonc');
+  const configPath = path.join(options.cwd, 'settings.yaml');
   const lockPath = configPath + '.lock';
   const original = '{"bootstrap":{"tokenBudget":1000}}\r\n';
   fs.writeFileSync(configPath, original);
@@ -352,7 +357,7 @@ test('setup preserves settings while another process holds the settings lock', {
 
 test('setup can save after the lock holder is killed', { timeout: 20000 }, async (t) => {
   const { options, errors } = fixture(t);
-  const configPath = path.join(options.cwd, 'settings.jsonc');
+  const configPath = path.join(options.cwd, 'settings.yaml');
   const lockPath = configPath + '.lock';
   const dbPath = path.join(options.cwd, 'recovered.db');
   writeConfig(configPath, { bootstrap: { tokenBudget: 1000 } });
@@ -372,7 +377,7 @@ test('concurrent setup processes preserve the first commit when the other snapsh
   { timeout: 20000 }, async (t) => {
     const { options, errors } = fixture(t);
     const { cwd, homeDir } = options;
-    const configPath = path.join(cwd, 'settings.jsonc');
+    const configPath = path.join(cwd, 'settings.yaml');
     const firstDb = path.join(cwd, 'first.db');
     const secondDb = path.join(cwd, 'second.db');
     writeConfig(configPath, { embedding: { enabled: true } });
@@ -409,7 +414,8 @@ test('concurrent setup processes preserve the first commit when the other snapsh
 test('setup skips embedding inference when --no-embeddings overrides the probe', async (t) => {
   const { options, errors, output } = fixture(t);
   const { cwd, homeDir } = options;
-  writeConfig(path.join(cwd, '.multi-sub-memory.jsonc'), { embedding: { enabled: true } });
+  initGit(cwd);
+  writeProjectConfig(expandHome(DEFAULT_CONFIG_PATH, homeDir), cwd, { embedding: { enabled: true } });
   const embed = t.mock.fn(async () => new Float32Array([1]));
   const createEmbeddingEngine = t.mock.fn(() => ({ embed }));
 
@@ -435,7 +441,7 @@ test('non-interactive setup writes all three Dreamer modes', async (t) => {
       '--cadence-interval-hours', '1.5', '--cadence-min-memories', '0']],
   ];
   for (const [mode, flags] of scenarios) {
-    const userConfigPath = path.join(cwd, mode + '.jsonc');
+    const userConfigPath = path.join(cwd, mode + '.yaml');
     assert.equal(await runSetup(['-y', '--host', 'none', '--no-embeddings', '--config', userConfigPath,
       '--dreamer-mode', mode, ...flags], options), 0, errors());
     const { dreamer } = loadConfig({ ...options, userConfigPath });
@@ -453,7 +459,7 @@ test('non-interactive setup writes all three Dreamer modes', async (t) => {
 
 test('setup binds the Dreamer HTTP key only to the chosen endpoint', async (t) => {
   const { options, errors } = fixture(t);
-  const configPath = path.join(options.cwd, 'settings.jsonc');
+  const configPath = path.join(options.cwd, 'settings.yaml');
   writeConfig(configPath, {
     dreamer: { mode: 'http', enabled: true, http: {
       baseUrl: 'https://first.example.test/v1', model: 'fixture', apiKeyEnv: 'FIRST_KEY',
@@ -485,7 +491,7 @@ test('setup warns when the configured Dreamer command is only a relative path or
     commands.push(shim);
   }
   for (const [index, command] of commands.entries()) {
-    assert.equal(await runSetup(['-y', '--host', 'none', '--no-embeddings', '--config', path.join(cwd, index + '.jsonc'),
+    assert.equal(await runSetup(['-y', '--host', 'none', '--no-embeddings', '--config', path.join(cwd, index + '.yaml'),
       '--dreamer-mode', 'cli', '--cli-orchestrator', 'omp', '--cli-command', command], options), 0, errors());
   }
   assert.equal((output().match(/Dreamer requires a native executable .* on PATH or an absolute executable path/g) ?? []).length,
@@ -574,6 +580,7 @@ test('setup installs, loads, and removes the managed OMP loader', async (t) => {
   const dbPath = expandHome(DEFAULT_DB_PATH, options.homeDir);
   const db = openDatabase(dbPath);
   try {
+    initGit(options.cwd);
     await writeMemory(db, { content: 'Installed loader fixture', cwd: options.cwd });
   } finally {
     db.close();
@@ -678,6 +685,7 @@ test('setup appends and removes a Claude startup hook with byte-preserving edits
   const dbPath = expandHome(DEFAULT_DB_PATH, options.homeDir);
   const db = openDatabase(dbPath);
   try {
+    initGit(options.cwd);
     await writeMemory(db, { content: 'Installed Claude hook fixture', cwd: options.cwd });
   } finally {
     db.close();
@@ -860,9 +868,9 @@ test('hook-only Claude uninstall protects absent database files and sidecars fro
     ['user config with an invalid unrelated field', 'settings.json', ({ backup, user }) => {
       fs.writeFileSync(user, JSON.stringify({ dbPath: backup, embedding: false }));
     }],
-    ['project config and rollback sidecar', 'settings.json-journal', ({ options, settings }) => {
-      fs.writeFileSync(path.join(options.cwd, '.multi-sub-memory.jsonc'),
-        JSON.stringify({ dbPath: pathToFileURL(settings.slice(0, -'-journal'.length)).href }));
+    ['repository YAML override and rollback sidecar', 'settings.json-journal', ({ options, settings, user }) => {
+      initGit(options.cwd);
+      writeProjectConfig(user, options.cwd, { dbPath: pathToFileURL(settings.slice(0, -'-journal'.length)).href });
     }],
   ];
   for (const [name, settingsName, configure] of cases) {
@@ -870,7 +878,7 @@ test('hook-only Claude uninstall protects absent database files and sidecars fro
       const { options, errors } = fixture(subtest);
       const settings = path.join(options.cwd, settingsName);
       const backup = settings + '.bak';
-      const user = path.join(options.cwd, 'config.jsonc');
+      const user = path.join(options.cwd, 'config.yaml');
       options.env.MULTI_SUB_MEMORY_CONFIG = user;
       const original = Buffer.from(JSON.stringify({
         hooks: { SessionStart: [{ matcher: '', hooks: [{

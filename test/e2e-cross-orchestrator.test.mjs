@@ -27,9 +27,10 @@ function worktrees(root) {
   git('init', '--template=');
   git('-c', 'user.name=Fixture Author', '-c', 'user.email=fixture@example.com',
     'commit', '--allow-empty', '--no-gpg-sign', '-m', 'Synthetic workspace');
+  git('remote', 'add', 'origin', 'https://example.test/Fixtures/Worktree.git');
   git('worktree', 'add', '--detach', repoB);
   const { projectKey } = resolveProjectKey(repoA);
-  assert.match(projectKey, /^git:/);
+  assert.equal(projectKey, 'example.test/fixtures/worktree');
   assert.equal(resolveProjectKey(repoB).projectKey, projectKey);
   return { repoA, repoB, projectKey };
 }
@@ -101,7 +102,7 @@ test('Codex, Antigravity, OMP and Claude share worktree memory, transcripts, and
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const { repoA, repoB, projectKey } = worktrees(root);
   const dbPath = path.join(root, 'memory.db');
-  const configPath = path.join(root, 'config.jsonc');
+  const configPath = path.join(root, 'config.yaml');
   const inheritedEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(?:MULTI_SUB_MEMORY_|GIT_|HOME$|USERPROFILE$)/i.test(key)));
   const env = {

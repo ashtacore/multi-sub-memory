@@ -57,7 +57,13 @@ export function importMnemopi(options) {
             row.project_path, row.project_key, row.project, legacyMetadata.project_key, legacyMetadata.project_path,
           ].find((value) => typeof value === 'string' && value.trim().length > 0)
             ?? (defaultScope === 'project' ? bank : null);
-          const project = resolveLegacyProjectKey(rawProject, { projectMap, defaultScope });
+          const project = resolveLegacyProjectKey(rawProject, { projectMap, defaultScope, config: options.config });
+          if (project.unresolved) {
+            result.memoriesSkippedUnresolved++;
+            result.errors.push({ source: 'mnemopi', kind: 'memory', id: row.id ?? null,
+              message: 'Unresolved project-scoped mnemopi memory. Map its project with --project-map and rerun.' });
+            continue;
+          }
           const inserted = importMemoryRecord(targetDb, {
             ...project, ...legacyTimestamps(row), content, status, metadata,
             category: mapCategory(row.category ?? legacyMetadata.category),

@@ -4,7 +4,6 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_CONFIG_PATH, expandHome } from '../config.mjs';
-import { resolveProjectKey } from '../project-id.mjs';
 import { HOSTS } from './hosts.mjs';
 
 export function parseOptions(argv, commandOptions) {
@@ -28,14 +27,13 @@ export function cliContext(values, options) {
   const homeDir = path.resolve(cwd, expandHome(values.home ?? options.homeDir ?? os.homedir(), options.homeDir));
   const resolvePath = (value) => path.resolve(cwd, expandHome(value, homeDir));
   const userConfigPath = resolvePath(values.config ?? (env.MULTI_SUB_MEMORY_CONFIG || DEFAULT_CONFIG_PATH));
-  const projectConfigPath = path.join(resolveProjectKey(cwd).projectRoot, '.multi-sub-memory.jsonc');
   const hostConfigPaths = { ...options.hostConfigPaths };
   for (const host of Object.keys(HOSTS)) {
     if (values[host + '-config'] !== undefined) hostConfigPaths[host] = values[host + '-config'];
   }
   const ompExtensionsDir = values['omp-extensions-dir'] ?? options.ompExtensionsDir;
   const claudeSettingsPath = values['claude-settings'] ?? options.claudeSettingsPath;
-  return { env, cwd, homeDir, userConfigPath, projectConfigPath, resolvePath, hostConfigPaths,
+  return { env, cwd, homeDir, userConfigPath, resolvePath, hostConfigPaths,
     ompExtensionsDir, claudeSettingsPath };
 }
 
@@ -55,6 +53,6 @@ export function configErrorMessage(error) {
     const fields = new Set(cause.issues.map(({ path }) => path.join('.') || 'root'));
     return 'Invalid config fields: ' + [...fields].join(', ');
   }
-  if (cause instanceof SyntaxError) return 'Invalid JSONC syntax';
+  if (cause instanceof SyntaxError) return 'Invalid YAML syntax';
   return error.message;
 }

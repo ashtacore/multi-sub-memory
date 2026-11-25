@@ -4,7 +4,7 @@ import { DEFAULT_EMBEDDING_MODEL } from '../embeddings.mjs';
 import {
   generateId, invalidateEmbedding, inWriteTransaction, MEMORY_CATEGORIES, storeEmbedding,
 } from '../memory-service.mjs';
-import { resolveProjectKey } from '../project-id.mjs';
+import { resolveConfigProject } from '../config.mjs';
 import { createDreamRedactor, createDreamRunner, sanitizeDreamError, validateDreamPlan } from './runners.mjs';
 import { lastCompletedDream, shouldTriggerAutoDream } from './trigger.mjs';
 
@@ -255,7 +255,7 @@ export async function runDream({
   leaseTtlMs = DEFAULT_DREAM_LEASE_TTL_MS, now = Date.now, automatic = false,
   userDreamer, userConfigPath, homeDir, env = process.env,
 }) {
-  projectKey ??= resolveProjectKey(cwd).projectKey;
+  projectKey ??= resolveConfigProject(cwd, config).projectKey;
   const settings = config?.dreamer;
   if (!runner && (!settings?.enabled || settings.mode === 'disabled')) {
     return { skipped: true, reason: 'disabled', projectKey };
@@ -300,7 +300,7 @@ export async function runDream({
         leaseError = error;
       }
     }, Math.max(1, Math.min(2 ** 31 - 1, Math.floor(leaseTtlMs / 2)))).unref();
-    const run = runner ?? createDreamRunner(config, { userDreamer, userConfigPath, homeDir, env });
+    const run = runner ?? createDreamRunner(config, { userDreamer, userConfigPath, homeDir, env, cwd });
     const { memories, transcriptCount, userPrompt, transcriptCursor } = readDreamPrompt(db, projectKey,
       includeTranscripts, run.promptBudget, runnerName);
     memoriesReviewed = memories.size;

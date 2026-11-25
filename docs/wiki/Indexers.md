@@ -18,9 +18,8 @@ Discovery recursively finds regular `.jsonl` files, skips symbolic links and
 Windows junctions, and yields no files for a missing root. All adapters accept
 string content and text blocks. The filename stem is the last fallback for a
 missing session ID. The runner resolves project identity from the working
-directory, so linked Git worktrees share the key derived from `git-common-dir`.
-If there is no working directory or existing project key, the transcript’s
-parent directory provides the project identity. See
+directory using the same [repository identity](MCP-Core.md#project-identity)
+as memories. New transcripts without a Git workspace use the global key. See
 [Transcript formats](../transcript-formats.md) for record mappings and synthetic
 examples.
 
@@ -101,12 +100,12 @@ npx multi-sub-memory index [--orchestrator <omp|claude|codex|agy|all>] [--json] 
 
 The CLI defaults to `all`. Pass `--json` for a machine-readable run summary.
 `--cwd` selects the workspace used for project configuration. Each transcript
-still gets its project key from its own session metadata or directory fallback.
+still gets its project key from its own workspace metadata, including the
+adapter's directory inference when available.
 
-Set `indexers.backgroundRefresh` to `true` in the user config to schedule a
-refresh on MCP startup and repeat it at `indexers.refreshIntervalMs`. Project
-config may disable automatic refresh. If project config selects `dbPath`,
-automatic refresh is disabled unless `MULTI_SUB_MEMORY_DB` overrides that path.
+Set `indexers.backgroundRefresh` to `true` in the global YAML settings or a
+repository entry to schedule a refresh on MCP startup and repeat it at
+`indexers.refreshIntervalMs`.
 Refresh timers do not keep the process alive. Shutdown stops scheduling work
 and waits for in-flight refresh work to drain before closing the database.
 Refresh diagnostics use stderr.
@@ -124,14 +123,14 @@ the indexed messages.
 | Config key | Default and behavior |
 |---|---|
 | `indexers.enabled` | `true`. Set it to `false` to disable both CLI indexing and background refresh. |
-| `indexers.backgroundRefresh` | `false`. Automatic indexing requires user-level authorization. |
+| `indexers.backgroundRefresh` | `false`. Set to `true` to refresh automatically. |
 | `indexers.refreshIntervalMs` | `60000`. Accepts a positive integer up to `2147483647`. |
 | `indexers.omp.sessionsDir` | Optional override for the OMP session root. |
 | `indexers.claude.sessionsDir` | Optional override for the Claude Code session root. |
 | `indexers.codex.sessionsDir` | Optional override for the Codex session root. |
 | `indexers.agy.sessionsDir` | Optional override for the Antigravity session root. |
 
-For the other indexer settings, project settings override user settings per
+Repository settings override global settings per
 field, including the nested adapter options. Session roots expand a leading
 `~` to the current home directory. See [MCP core](MCP-Core.md) for search and
 expansion parameters and [storage and embeddings](Storage-and-Embeddings.md)

@@ -313,7 +313,7 @@ export async function hybridSearch(db, options = {}) {
   const sinceMs = since === undefined ? undefined : parseSince(since);
   const maxLimit = memoryFilters ? MAX_LIST_LIMIT : MAX_SEARCH_LIMIT;
   const limit = Math.max(1, Math.min(maxLimit, Math.trunc(options.limit ?? DEFAULT_SEARCH_LIMIT)));
-  const projectKey = options.projectKey ?? resolveCachedProjectKey(cwd ?? defaultCwd).projectKey;
+  const projectKey = options.projectKey ?? resolveCachedProjectKey(cwd ?? defaultCwd, options.config, { optional: true })?.projectKey ?? 'global';
   const trimmedQuery = typeof query === 'string' ? query.trim() : '';
   const result = { mode: 'fts-only', query: trimmedQuery, scope, project_key: projectKey, results: [] };
   if (!trimmedQuery || !sources.length || orchestrators?.length === 0) return result;

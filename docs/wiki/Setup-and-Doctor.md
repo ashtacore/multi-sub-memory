@@ -2,7 +2,33 @@
 
 Run `npx -y multi-sub-memory setup` to choose a database path, select MCP hosts, and configure Dreamer. Setup initializes the SQLite schema and checks WAL and FTS5. With the optional Transformers.js dependency installed, setup tries an ONNX embedding and reports its dimensions. The first run may download the model. Choose FTS-only mode to skip inference and model downloads.
 
-For scripted setup, pass `--yes` and the choices you want to apply. For example, `npx -y multi-sub-memory setup --yes --host none --no-embeddings --dreamer-mode disabled` initializes storage without registering any hosts. Use `--db` and `--config` to specify paths. By default, setup saves settings in `~/.config/multi-sub-memory/config.jsonc` with owner-only permissions on POSIX. Setup saves choices from flags or prompts, with defaults taken from existing user settings and built-in values. Project settings and environment overrides apply to effective configuration. When using a custom settings path with `serve`, set `MULTI_SUB_MEMORY_CONFIG` in that process's environment.
+For scripted setup, pass `--yes` and the choices you want to apply. For example, `npx -y multi-sub-memory setup --yes --host none --no-embeddings --dreamer-mode disabled` initializes storage without registering any hosts. Use `--db` and `--config` to specify paths. By default, setup saves settings in `~/.config/multi-sub-memory/config.yaml` with owner-only permissions on POSIX. Setup saves choices from flags or prompts, with defaults taken from existing user settings and built-in values. Entries under `projects` and environment overrides apply to effective configuration. When using a custom settings path with `serve`, set `MULTI_SUB_MEMORY_CONFIG` in that process's environment.
+
+## Repository settings
+
+The user-owned YAML file contains global defaults and optional entries keyed by
+normalized repository identity. Settings are applied in order from built-in
+defaults to global YAML, the matching project entry, and supported environment
+overrides. Nested settings such as Dreamer cadence and indexer directories merge
+field by field. Outside a Git workspace, commands use the global settings.
+
+```yaml
+bootstrap:
+  tokenBudget: 2500
+projects:
+  github.com/example/upstream:
+    bootstrap:
+      tokenBudget: 1800
+  github.com/example/fork:
+    forkMode: origin
+    dreamer:
+      enabled: false
+```
+
+A checkout with both remotes uses the upstream key by default. Set
+`forkMode: origin` on the origin repository's entry to select that key and its
+settings only for checkouts with that origin. Use the `local:<hash>` key for a
+repository without a usable remote. See [project identity](MCP-Core.md#project-identity).
 
 ## MCP registration
 
@@ -33,7 +59,7 @@ Run `npx -y multi-sub-memory doctor` to check Node.js, SQLite with FTS5, layered
 
 The embedding check passes in FTS-only mode when embeddings are disabled. When embeddings are enabled, doctor probes ONNX inference using only local model files and the existing cache. It reports `expectedDims` when the model's dimensions are known and `observedDims` after successful inference. If the optional dependency is missing or local inference fails, doctor warns and reports FTS-only mode. Setup can download and verify an uncached model.
 
-Add `--test-dreamer` to probe an enabled backend. HTTP mode sends a GET request to `/models` under the configured base URL. Doctor sends a bearer token only when both the effective base URL and API key variable name match the user settings. A project URL override stops inheritance of the user key name, and doctor warns when it probes a pair outside the user settings. CLI mode checks executable availability without launching the orchestrator. Run either command with `--help` for its full flag list.
+Add `--test-dreamer` to probe an enabled backend. HTTP mode sends a GET request to `/models` under the configured base URL. Doctor uses the effective endpoint and sends a bearer token when the effective settings name an environment variable with a value. A repository endpoint override drops the inherited key binding unless its YAML entry explicitly sets one. CLI mode checks executable availability without launching the orchestrator. Run either command with `--help` for its full flag list.
 
 ## Design rules and why
 

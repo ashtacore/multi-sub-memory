@@ -4,12 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { parseDocument, stringify } from 'yaml';
 import { z } from 'zod';
 import { INDEXER_ORCHESTRATORS } from './indexers/types.mjs';
-import { resolveProjectKey } from './project-id.mjs';
+import { isProjectKey, resolveProjectKey } from './project-id.mjs';
 
 export const DEFAULT_DB_PATH = '~/.local/share/multi-sub-memory/memory.db';
-export const DEFAULT_CONFIG_PATH = '~/.config/multi-sub-memory/config.jsonc';
+export const DEFAULT_CONFIG_PATH = '~/.config/multi-sub-memory/config.yaml';
 export const DEFAULT_EMBEDDING_ENABLED = true;
 
 const defaults = {
@@ -100,6 +101,14 @@ const configLayerSchema = configFields.extend({
   indexers: indexersSchema.partial(),
 }).partial();
 
+const projectLayerSchema = configLayerSchema.extend({
+  forkMode: z.enum(['origin', 'upstream']).optional(),
+});
+const fileSchema = configLayerSchema.extend({
+  projects: z.record(z.string().refine(isProjectKey, 'Expected a repository project key'), projectLayerSchema).optional(),
+});
+const configSources = new WeakMap();
+
 export function expandHome(inputPath, homeDir = os.homedir()) {
   if (inputPath === '~') return homeDir;
   if (inputPath.startsWith('~/')) return path.join(homeDir, inputPath.slice(2));
@@ -150,61 +159,11 @@ export function effectiveDatabaseFilePath(dbPath, { cwd = process.cwd(), homeDir
   }
 }
 
-export function stripJsonc(text) {
-  const output = [];
-  let inString = false;
-  let escaped = false;
-  let previousToken;
-  let trailingComma = -1;
-
-  for (let index = text[0] === '\uFEFF' ? 1 : 0; index < text.length; index++) {
-    const character = text[index];
-    const next = text[index + 1];
-
-    if (inString) {
-      output.push(character);
-      if (escaped) escaped = false;
-      else if (character === '\\') escaped = true;
-      else if (character === '"') inString = false;
-      continue;
-    }
-
-    if (character === '/' && next === '/') {
-      index += 2;
-      while (index < text.length && text[index] !== '\n' && text[index] !== '\r') index++;
-      index--;
-      continue;
-    }
-
-    if (character === '/' && next === '*') {
-      // Leave whitespace so a comment cannot splice separate JSON tokens.
-      output.push(' ');
-      index += 2;
-      while (index < text.length && !(text[index] === '*' && text[index + 1] === '/')) {
-        if (text[index] === '\n' || text[index] === '\r') output.push(text[index]);
-        index++;
-      }
-      if (index === text.length) throw new SyntaxError('Unterminated block comment');
-      index++;
-      continue;
-    }
-
-    if (character === '"') inString = true;
-    if (!' \t\r\n'.includes(character)) {
-      if ((character === '}' || character === ']') && trailingComma !== -1) {
-        output[trailingComma] = '';
-      }
-      const canFollowValue = previousToken && !'{[:,'.includes(previousToken);
-      trailingComma = character === ',' && canFollowValue ? output.length : -1;
-      previousToken = character;
-    }
-    output.push(character);
-  }
-  return output.join('');
-}
-
-export function parseJsonc(text) {
-  return JSON.parse(stripJsonc(text));
+export function parseYaml(text) {
+  const document = parseDocument(text, { stringKeys: true });
+  const issue = document.errors[0] ?? document.warnings[0];
+  if (issue) throw new SyntaxError('Invalid YAML syntax', { cause: issue });
+  return document.contents === null ? {} : document.toJS({ maxAliasCount: 100 });
 }
 
 export function readConfigText(configPath) {
@@ -219,7 +178,7 @@ export function readConfigText(configPath) {
 export function parseConfigLayer(text, configPath) {
   if (text === undefined) return {};
   try {
-    return configLayerSchema.parse(parseJsonc(text));
+    return fileSchema.parse(parseYaml(text));
   } catch (error) {
     throw new Error('Invalid config at ' + configPath + '\n' + error.message, { cause: error });
   }
@@ -251,52 +210,63 @@ export function resolveUserConfigPath({ userConfigPath, env = process.env, homeD
 
 export function assertDreamerTrust(dreamer, { userDreamer, ...configOptions } = {}) {
   const { mode, http, cli } = dreamer;
-  if (mode !== 'cli' && mode !== 'http') return;
-  const trusted = userDreamer === undefined ? readConfigLayer(resolveUserConfigPath(configOptions)).dreamer : userDreamer;
-  if (mode === 'http') {
-    const trustedHttp = trusted?.http;
-    if (!trustedHttp?.baseUrl || http?.baseUrl !== trustedHttp.baseUrl
-      || (http.apiKeyEnv !== undefined && http.apiKeyEnv !== trustedHttp.apiKeyEnv)) {
-      throw new Error('Dreamer HTTP endpoint and API key must be authorized in user settings');
-    }
-  } else {
-    const trustedCli = trusted?.cli;
-    if (trusted?.mode !== 'cli' || !cli || cli.orchestrator !== trustedCli?.orchestrator
-      || cli.command !== trustedCli?.command || !isDeepStrictEqual(cli.args, trustedCli?.args)) {
-      throw new Error('Dreamer CLI orchestrator, command, and arguments must be authorized in user settings');
-    }
+  const trusted = userDreamer === undefined ? loadConfig(configOptions).dreamer : userDreamer;
+  if (mode === 'http' && (!trusted?.http?.baseUrl || http?.baseUrl !== trusted.http.baseUrl
+    || http.apiKeyEnv !== trusted.http.apiKeyEnv)) {
+    throw new Error('Dreamer HTTP endpoint and API key must be authorized in user settings');
+  }
+  if (mode === 'cli' && (trusted?.mode !== 'cli' || cli?.orchestrator !== trusted.cli?.orchestrator
+    || cli?.command !== trusted.cli?.command || !isDeepStrictEqual(cli?.args, trusted.cli?.args))) {
+    throw new Error('Dreamer CLI orchestrator, command, and arguments must be authorized in user settings');
   }
 }
 
+export function resolveConfigProject(cwd, config, options = {}) {
+  return resolveProjectKey(cwd, { projects: configSources.get(config)?.projects, ...options });
+}
+
+export function bootstrapTokenBudget(config, projectKey) {
+  const user = configSources.get(config);
+  return user
+    ? user.projects?.[projectKey]?.bootstrap?.tokenBudget ?? user.bootstrap?.tokenBudget ?? defaults.bootstrap.tokenBudget
+    : config?.bootstrap?.tokenBudget ?? defaults.bootstrap.tokenBudget;
+}
+
 export function loadConfig(options = {}) {
-  const { cwd, projectRoot, env = process.env, homeDir = os.homedir() } = options;
-  const userConfigPath = resolveUserConfigPath(options);
-  const projectConfigPath = options.projectConfigPath
-    ?? path.join(projectRoot ?? resolveProjectKey(cwd).projectRoot, '.multi-sub-memory.jsonc');
+  return resolveEffectiveConfig(options, false).config;
+}
+
+export function loadWorkspaceConfig(options = {}) {
+  return resolveEffectiveConfig(options, true);
+}
+
+function resolveEffectiveConfig(options, includeProject) {
+  const { cwd, env = process.env, homeDir = os.homedir(), requireProject = false, timeoutMs } = options;
   const user = options.userConfigData === undefined
-    ? readConfigLayer(userConfigPath)
-    : configLayerSchema.parse(options.userConfigData);
-  const project = readConfigLayer(projectConfigPath);
+    ? readConfigLayer(resolveUserConfigPath(options))
+    : fileSchema.parse(options.userConfigData);
+  const project = includeProject || requireProject || Object.keys(user.projects ?? {}).length
+    ? resolveProjectKey(cwd, { projects: user.projects, optional: !requireProject, timeoutMs })
+    : undefined;
+  const layer = user.projects?.[project?.projectKey] ?? {};
   const overrides = environmentLayer(env);
-  const indexers = { ...defaults.indexers, ...user.indexers, ...project.indexers };
-  const projectSelectsDatabase = project.dbPath !== undefined && overrides.dbPath === undefined;
-  indexers.backgroundRefresh = user.indexers?.backgroundRefresh === true
-    && project.indexers?.backgroundRefresh !== false && !projectSelectsDatabase;
+  const indexers = { ...defaults.indexers, ...user.indexers, ...layer.indexers };
   for (const orchestrator of INDEXER_ORCHESTRATORS) {
-    const adapter = { ...defaults.indexers[orchestrator], ...user.indexers?.[orchestrator], ...project.indexers?.[orchestrator] };
+    const adapter = { ...defaults.indexers[orchestrator], ...user.indexers?.[orchestrator], ...layer.indexers?.[orchestrator] };
     if (adapter.sessionsDir !== undefined) adapter.sessionsDir = expandHome(adapter.sessionsDir, homeDir);
     indexers[orchestrator] = adapter;
   }
 
   const config = ConfigSchema.parse({
-    dbPath: overrides.dbPath ?? project.dbPath ?? user.dbPath ?? defaults.dbPath,
-    embedding: { ...defaults.embedding, ...user.embedding, ...project.embedding, ...overrides.embedding },
-    bootstrap: { ...defaults.bootstrap, ...user.bootstrap, ...project.bootstrap },
-    dreamer: mergeDreamer(user.dreamer, project.dreamer),
+    dbPath: overrides.dbPath ?? layer.dbPath ?? user.dbPath ?? defaults.dbPath,
+    embedding: { ...defaults.embedding, ...user.embedding, ...layer.embedding, ...overrides.embedding },
+    bootstrap: { ...defaults.bootstrap, ...user.bootstrap, ...layer.bootstrap },
+    dreamer: mergeDreamer(user.dreamer, layer.dreamer),
     indexers,
   });
   config.dbPath = expandHome(config.dbPath, homeDir);
-  return config;
+  configSources.set(config, user);
+  return { config, project };
 }
 
 export function resolveConfigDestination(configPath) {
@@ -379,7 +349,7 @@ function mergeDreamer(user = {}, project = {}) {
 }
 
 export function writeConfig(configPath, configData, options = {}) {
-  const config = configLayerSchema.parse(configData);
+  const config = fileSchema.parse(configData);
   const resolvedPath = expandHome(configPath, options.homeDir);
   const destination = resolveConfigDestination(resolvedPath);
 
@@ -391,7 +361,7 @@ export function writeConfig(configPath, configData, options = {}) {
     if (error.code !== 'ENOENT') throw error;
   }
 
-  writeTextAtomically(destination, JSON.stringify(config, null, 2) + '\n', options.mode ?? existingMode);
+  writeTextAtomically(destination, stringify(config), options.mode ?? existingMode);
 }
 
 export function writeTextAtomically(resolvedPath, text, mode = 0o600) {

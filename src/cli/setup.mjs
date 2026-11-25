@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import {
-  DEFAULT_DB_PATH, DEFAULT_EMBEDDING_ENABLED, effectiveDatabaseFilePath, loadConfig, parseConfigLayer, parseJsonc,
+  DEFAULT_DB_PATH, DEFAULT_EMBEDDING_ENABLED, effectiveDatabaseFilePath, loadConfig, parseConfigLayer, parseYaml,
   readConfigText, resolveConfigDestination, writeConfig,
 } from '../config.mjs';
 import { createEmbeddingEngine } from '../embeddings.mjs';
@@ -112,15 +112,15 @@ function pathKey(file) {
 }
 
 function removalDatabasePaths(context) {
-  const { env, userConfigPath, projectConfigPath } = context;
+  const { env, userConfigPath } = context;
   const candidates = [DEFAULT_DB_PATH, env.MULTI_SUB_MEMORY_DB];
-  for (const file of new Set([userConfigPath, projectConfigPath])) {
-    try {
-      // The database path can still be valid when another setting fails validation.
-      candidates.push(parseJsonc(fs.readFileSync(file, 'utf8'))?.dbPath);
-    } catch {
-      // Missing or unreadable settings do not hide the other path candidates.
-    }
+  try {
+    // Database paths can still be valid when another setting fails validation.
+    const settings = parseYaml(readConfigText(userConfigPath) ?? '');
+    candidates.push(settings?.dbPath);
+    for (const project of Object.values(settings?.projects ?? {})) candidates.push(project?.dbPath);
+  } catch {
+    // Missing or unreadable settings do not hide the other path candidates.
   }
   try {
     candidates.push(loadConfig(context).dbPath);
@@ -144,7 +144,6 @@ function checkPaths(dbPaths, context, hosts, hookHosts = [], settingsPath) {
     ...hostPaths.map((file) => file + '.bak'),
     ...hookHosts.flatMap((host) => hookConfigPaths(host, context)),
   ];
-  if (context.projectConfigPath !== context.userConfigPath) paths.push(context.projectConfigPath);
   const keys = paths.map((file) => pathKey(resolveConfigDestination(file)));
   const dbDestinations = dbPaths.map((file) => resolveConfigDestination(file));
   // The saved and effective paths may share a database or corresponding sidecars.
@@ -296,6 +295,11 @@ export async function runSetup(argv = [], options = {}) {
     const dbPaths = [dbPath];
     const effectiveDbPath = effectiveDatabaseFilePath(effective.dbPath, context);
     if (effectiveDbPath !== undefined && effectiveDbPath !== dbPath) dbPaths.push(effectiveDbPath);
+    for (const project of Object.values(draft.projects ?? {})) {
+      if (project.dbPath === undefined) continue;
+      const file = effectiveDatabaseFilePath(project.dbPath, context);
+      if (file !== undefined) dbPaths.push(file);
+    }
     checkPaths(dbPaths, context, hosts, hookHosts, settingsPath);
     const registration = hosts.map((host) => {
       try {

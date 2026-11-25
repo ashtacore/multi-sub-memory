@@ -2,11 +2,28 @@
 
 Run `multi-sub-memory` or `multi-sub-memory serve` as a stdio MCP server. Set
 `--cwd <path>` to choose the server's default workspace. Clients can override
-it with `cwd` when a tool needs a project key. Linked Git worktrees share a
-project key and use their own workspace names in bootstrap output.
+it with `cwd` when a tool needs a project key. Project memory and note writes
+require a Git workspace. Outside Git, the server can still write and list
+global memories, read global notes with `include_global`, and search.
 
-The server loads configuration and opens the shared SQLite database at startup.
-It closes the MCP transport and its own database connection when stdin ends or
+## Project identity
+
+The server prefers the `upstream` remote and falls back to `origin`. SSH and
+HTTPS spellings of the same repository share a lowercase
+`host/owner/repo` key. Separate clones and linked worktrees share that key
+regardless of their checkout directory. Bootstrap uses the current workspace's
+name in its output.
+
+For a repository without a usable remote, the key is `local:` followed by the
+first 16 hexadecimal characters of the SHA-256 hash of its normalized Git
+common directory. Linked worktrees share that directory. Adding a usable
+remote selects the remote key for subsequent operations. Configure a diverged
+fork under its `origin` key in the global YAML file.
+[Repository settings](Setup-and-Doctor.md#repository-settings)
+
+The server loads the global YAML file and opens the effective SQLite database
+for the launch workspace at startup. Tool calls that specify another workspace
+still use that database. It closes the MCP transport and its own database connection when stdin ends or
 closes, the transport closes, or it receives SIGINT or SIGTERM. It leaves a
 caller-supplied database connection open.
 

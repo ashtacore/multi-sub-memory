@@ -10,11 +10,13 @@ import { acquireLease, hashNormalizedContent, MIGRATIONS, openDatabase, releaseL
 import { archiveMemory, writeMemory, writeNote } from '../src/memory-service.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
 import { allowedLoopbackGuards, startDashboardServer } from '../src/ui/server.mjs';
+import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
-async function fixture(t, { dreamer, env = {}, embeddingEngine } = {}) {
+async function fixture(t, { dreamer, env = {}, embeddingEngine, gitWorkspace = true } = {}) {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'multi-sub-memory-ui-'));
+  if (gitWorkspace) initGit(cwd);
   const dbPath = path.join(cwd, 'dashboard.db');
-  const userConfigPath = path.join(cwd, 'config.jsonc');
+  const userConfigPath = path.join(cwd, 'config.yaml');
   let db;
   let dashboard;
   t.after(async () => {
@@ -37,7 +39,7 @@ async function fixture(t, { dreamer, env = {}, embeddingEngine } = {}) {
     return db;
   }
   await restart(env);
-  const { projectKey } = resolveProjectKey(cwd);
+  const projectKey = resolveProjectKey(cwd, { optional: true })?.projectKey ?? null;
 
   function request(pathname, { method = 'GET', body, rawBody, headers, authorized = false, setHost = true } = {}) {
     const payload = body === undefined ? rawBody : JSON.stringify(body);
@@ -206,7 +208,9 @@ test('overview disambiguates colliding project directory names with parent segme
   const firstDir = path.join(cwd, 'Programming', 'GameDev', 'CoveCrawler');
   const secondDir = path.join(cwd, 'Programming', 'CoveCrawler');
   await mkdir(firstDir, { recursive: true });
+  initGit(firstDir);
   await mkdir(secondDir, { recursive: true });
+  initGit(secondDir);
   await writeMemory(db, { cwd: firstDir, content: 'GameDev CoveCrawler memory' });
   await writeMemory(db, { cwd: secondDir, content: 'Programming CoveCrawler memory' });
 
@@ -472,6 +476,20 @@ test('Dreamer reports disabled and validates manual run input', async (t) => {
   assert.deepEqual(result.json, { projectKey, skipped: true, reason: 'disabled' });
 });
 
+test('dashboard can browse global data outside Git and exposes no runnable Dreamer project', async (t) => {
+  const { request, mutate } = await fixture(t, { gitWorkspace: false, dreamer: {
+    enabled: true, mode: 'http', http: { baseUrl: 'https://runner.example.test/v1', model: 'fixture' },
+  } });
+  const overview = await request('/api/overview');
+  assert.equal(overview.status, 200);
+  assert.equal(overview.json.default_project_key, null);
+  const status = await request('/api/dreamer');
+  assert.equal(status.status, 200);
+  assert.equal(status.json.runnable_project_key, null);
+  assert.equal(status.json.config.authorized, false);
+  assert.equal((await mutate('POST', '/api/dreamer/run', { project_key: 'example.test/owner/repo' })).status, 400);
+});
+
 test('Dreamer browses other workspaces and runs only for the launch workspace with current settings', async (t) => {
   let runnerCalls = 0;
   const runner = createServer((req, res) => {
@@ -489,7 +507,8 @@ test('Dreamer browses other workspaces and runs only for the launch workspace wi
   const { cwd, db, projectKey, userConfigPath, request, mutate } = await fixture(t, { dreamer });
   const otherCwd = path.join(cwd, 'other-workspace');
   await mkdir(otherCwd);
-  await writeFile(path.join(otherCwd, '.multi-sub-memory.jsonc'), JSON.stringify({ dreamer: { enabled: false } }));
+  initGit(otherCwd);
+  writeProjectConfig(userConfigPath, otherCwd, { dreamer: { enabled: false } });
   const { projectKey: otherProjectKey } = resolveProjectKey(otherCwd);
   assert.notEqual(otherProjectKey, projectKey);
   assert.equal(loadConfig({ cwd: otherCwd, userConfigPath, env: {} }).dreamer.enabled, false);
@@ -507,7 +526,7 @@ test('Dreamer browses other workspaces and runs only for the launch workspace wi
     assert.deepEqual(response.json, { error: 'Dreamer can only run for the workspace this dashboard was launched in' });
   }
 
-  await writeFile(path.join(cwd, '.multi-sub-memory.jsonc'), JSON.stringify({ dreamer: { enabled: false } }));
+  writeProjectConfig(userConfigPath, cwd, { dreamer: { enabled: false } });
   const disabledInfo = await request('/api/dreamer');
   assert.equal(disabledInfo.status, 200, disabledInfo.text);
   assert.equal(disabledInfo.json.config.enabled, false);
@@ -601,9 +620,9 @@ test('Dreamer uses fresh authorization, redacts secrets, and records a dry run w
   assert.notEqual(unauthorized.json.config.config_fingerprint, info.json.config.config_fingerprint);
   const revoked = await mutate('POST', endpoint, { ...body, expected_config_fingerprint: info.json.config.config_fingerprint });
   assert.equal(revoked.status, 409, revoked.text);
-  const rejected = await mutate('POST', endpoint, body);
-  assert.equal(rejected.status, 500);
-  assert.ok(!rejected.text.includes(secret));
+  const disabled = await mutate('POST', endpoint, body);
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.json.reason, 'disabled');
   assert.equal(received.length, 0);
   await writeFile(userConfigPath, JSON.stringify({ dbPath, dreamer }));
 
@@ -640,7 +659,7 @@ test('Dreamer uses fresh authorization, redacts secrets, and records a dry run w
   const dryRun = history.json.runs.find((run) => run.id === result.json.runId);
   assert.equal(dryRun.status, 'dry-run');
   assert.equal(dryRun.summary, storedRun.summary);
-  assert.ok(history.json.runs.some(({ id, status }) => id !== 'legacy' && status === 'failed'));
+  assert.ok(history.json.runs.some(({ id, status }) => id !== 'legacy' && status === 'dry-run'));
   const legacy = history.json.runs.find(({ id }) => id === 'legacy');
   const sanitized = 'Bearer [redacted], https://[REDACTED]@example.invalid/v1?format=[REDACTED]&AcCeSs_ToKeN=[REDACTED]'
     + '&%61pi_key=[REDACTED]&session_id=[REDACTED]#result, '
@@ -707,6 +726,7 @@ test('memories expose project provenance and can move between projects or promot
   const { db, cwd, projectKey, request, mutate } = await fixture(t);
   const otherCwd = path.join(path.dirname(cwd), 'other-app');
   await mkdir(otherCwd, { recursive: true });
+  initGit(otherCwd);
   const { memory: projectMem } = await writeMemory(db, {
     content: 'Project memory to move', category: 'ARCHITECTURE', importance: 4,
   }, { defaultCwd: cwd });
@@ -790,7 +810,7 @@ test('memory PATCH rejects unknown project destinations without moving the memor
   const { db, cwd, projectKey, request, mutate } = await fixture(t);
   const { memory } = await writeMemory(db, { content: 'Keep in this project' }, { defaultCwd: cwd });
   const endpoint = '/api/memories/' + memory.id;
-  for (const destination of [cwd, 'all', 'dir:unknown']) {
+  for (const destination of [cwd, 'all', 'example.test/unknown/repo']) {
     const response = await mutate('PATCH', endpoint, { scope: 'project', project_key: destination });
     assert.equal(response.status, 400, response.text);
     assert.equal(response.json.error, 'Unknown project destination.');
@@ -804,6 +824,7 @@ test('a registered project stays in the overview after its last memory moves to 
   const { db, cwd, projectKey, request, mutate } = await fixture(t);
   const otherCwd = path.join(cwd, 'other-app');
   await mkdir(otherCwd, { recursive: true });
+  initGit(otherCwd);
   const { memory } = await writeMemory(db, { content: 'Only memory in the other project', cwd: otherCwd }, { defaultCwd: cwd });
   const otherKey = memory.project_key;
   assert.notEqual(otherKey, projectKey);
@@ -832,7 +853,7 @@ test('a registered project stays in the overview after its last memory moves to 
   assert.equal(updatedOverview.json.global.memories.total, 0);
 
   // A project known only from a transcript_files row with project_root = NULL is also a valid move target.
-  const transcriptOnlyKey = 'dir:transcriptonly0001';
+  const transcriptOnlyKey = 'example.test/fixtures/transcript-only';
   db.prepare(`
     INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, project_root, mtime_ms, byte_offset, last_indexed_at)
     VALUES ('null-root.jsonl', 'codex', 'session-null-root', ?, NULL, 1, 0, 1)

@@ -4,6 +4,7 @@ Record significant accepted architecture and project-wide design decisions here.
 
 | ADR | Decision |
 |---|---|
+| [0001](Decisions/0001-repository-identity-and-global-config.md) | Repository identity and global configuration |
 
 ## Template
 

@@ -18,10 +18,10 @@ default browser. Stop the server with Ctrl+C.
   indexed transcript files and messages, SQLite schema health, and embedding
   status. Opening the dashboard leaves optional model initialization until
   a search or edit needs embeddings.
-- Project labels use the directory name when the root is known and add
-  parent segments to distinguish matching names. Projects without a known
-  root appear by key. Expand a memory's provenance to see its full project
-  path when available, its project key, and source metadata.
+- Remote projects use the repository name as their label. Name collisions add
+  the owner and, when needed, the host. Local Git projects use the directory
+  name and add parent segments for collisions. Expand a memory's provenance to
+  see its project path when available, its project key, and source metadata.
 - **Memories** supports project, scope, category, and status filters with
   hybrid or full-text search. Sort the list by importance, creation time,
   or update time in either direction. Search results use relevance and
@@ -45,10 +45,11 @@ default browser. Stop the server with Ctrl+C.
   Narrow displays offer the same controls above the run history.
   Select the launch workspace to start a run or
   request a dry run. Launch the dashboard with `--cwd` to run Dreamer for
-  another workspace. The dashboard reloads the launch workspace's effective
-  settings and user authorization when displaying Dreamer status and before
-  executing a run. If the runner configuration changes between those requests,
-  the run is rejected and the dashboard refreshes the panel.
+  another workspace. The dashboard reloads the global YAML file when displaying
+  Dreamer status and before executing a run. If the runner configuration changes
+  between requests, the run is rejected and the dashboard refreshes the panel.
+  A Git workspace is required to run Dreamer. Restart the dashboard after a
+  change to the launch workspace's repository identity.
   Both run modes use the restricted CLI presets and an empty temporary working
   directory for CLI runners. A dry run can send data to the authorized runner
   and records the proposal without changing memories.

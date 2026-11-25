@@ -14,6 +14,7 @@ import { createCliLlmRunner, createDreamRunner, createHttpLlmRunner, extractJson
 import { runIndexers } from '../src/indexers/runner.mjs';
 import { writeMemory } from '../src/memory-service.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
+import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
 const projectKey = 'fixture-project';
 const prompt = { systemPrompt: 'Fixture system message', userPrompt: 'Fixture user message' };
@@ -692,12 +693,12 @@ function workspaceFixture(t) {
     db.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
-  const configOptions = { userConfigPath: path.join(root, 'user.jsonc'), env: {} };
+  const configOptions = { userConfigPath: path.join(root, 'user.yaml'), env: {} };
   function workspace(name, settings) {
     const cwd = path.join(root, name);
     fs.mkdirSync(cwd);
-    const configPath = path.join(cwd, '.multi-sub-memory.jsonc');
-    fs.writeFileSync(configPath, JSON.stringify(settings));
+    initGit(cwd);
+    if (Object.keys(settings).length) writeProjectConfig(configOptions.userConfigPath, cwd, settings);
     return { cwd, projectKey: resolveProjectKey(cwd).projectKey, config: loadConfig({ cwd, ...configOptions }) };
   }
   const launched = [];
@@ -906,7 +907,7 @@ test('Claude indexes an inferred workspace without triggering Dreamer for that w
   assert.deepEqual(launched.map(({ projectKey }) => projectKey), [target.projectKey]);
 });
 
-test('project HTTP credentials fail closed in the factory, engine, and automatic trigger', async (t) => {
+test('repository YAML authorizes a Dreamer HTTP endpoint and its explicitly selected key', async (t) => {
   const { db, configOptions, workspace, launched, spawnDream } = workspaceFixture(t);
   const requests = [];
   const baseUrl = await serve(t, (req, res) => {
@@ -915,90 +916,29 @@ test('project HTTP credentials fail closed in the factory, engine, and automatic
   });
   const apiKeyEnv = 'FIXTURE_DREAM_KEY';
   configOptions.env[apiKeyEnv] = 'fixture-credential';
-  fs.writeFileSync(configOptions.userConfigPath, JSON.stringify({
-    dreamer: { http: { baseUrl: 'http://127.0.0.1:1/v1', apiKeyEnv } },
-  }));
   const settings = autoConfig(0).dreamer;
-  const { cwd, config, projectKey } = workspace('untrusted-http', {
+  const { cwd, config, projectKey } = workspace('project-http', {
     dreamer: { ...settings, http: { ...settings.http, baseUrl, apiKeyEnv } },
   });
-  const unauthorized = /HTTP endpoint and API key must be authorized in user settings/;
-  assert.throws(() => createDreamRunner(config, configOptions), unauthorized);
-  await assert.rejects(runDream({ db, config, projectKey, ...configOptions }), unauthorized);
+  const untrusted = { dreamer: { ...config.dreamer, http: { ...config.dreamer.http, baseUrl: 'https://other.test/v1' } } };
+  assert.throws(() => createDreamRunner(untrusted, { ...configOptions, cwd }), /HTTP endpoint and API key must be authorized/);
+  assert.equal((await runDream({ db, config, projectKey, cwd, dryRun: true, ...configOptions })).status, 'dry-run');
+  assert.deepEqual(requests, ['Bearer fixture-credential']);
   assert.equal(maybeTriggerAutoDream({
     db, config, cwd, projectKey, reloadProjectConfig: true, configOptions, spawnImpl: spawnDream,
-  }), false);
-  assert.deepEqual(requests, []);
-  assert.deepEqual(launched, []);
-
-  fs.writeFileSync(configOptions.userConfigPath, JSON.stringify({ dreamer: { http: { baseUrl, apiKeyEnv } } }));
-  const result = await runDream({ db, config, projectKey, ...configOptions });
-  assert.equal(result.status, 'completed');
-  assert.deepEqual(requests, ['Bearer fixture-credential']);
+  }), true);
+  assert.deepEqual(launched.map((entry) => entry.projectKey), [projectKey]);
 });
 
-test('an unapproved project keyless HTTP endpoint receives no request or detached launch', async (t) => {
-  const { db, configOptions, workspace, launched, spawnDream } = workspaceFixture(t);
-  const requests = [];
-  const baseUrl = await serve(t, (req, res) => {
-    requests.push(req.headers.authorization);
-    res.end(JSON.stringify(completion()));
-  });
-  const settings = autoConfig(0).dreamer;
-  const { cwd, projectKey } = workspace('untrusted-keyless-http', {
-    dreamer: { ...settings, http: { ...settings.http, baseUrl } },
-  });
-  const unauthorized = /HTTP endpoint and API key must be authorized in user settings/;
-  for (const userDreamer of [
-    {},
-    { http: { baseUrl: settings.http.baseUrl, apiKeyEnv: 'FIXTURE_DREAM_KEY' } },
-  ]) {
-    fs.writeFileSync(configOptions.userConfigPath, JSON.stringify({ dreamer: userDreamer }));
-    const config = loadConfig({ cwd, ...configOptions });
-    assert.equal(config.dreamer.http.apiKeyEnv, undefined);
-    assert.throws(() => createDreamRunner(config, configOptions), unauthorized);
-    await assert.rejects(runDream({ db, config, projectKey, ...configOptions }), unauthorized);
-    assert.equal(maybeTriggerAutoDream({
-      db, config, cwd, projectKey, reloadProjectConfig: true, configOptions, spawnImpl: spawnDream,
-    }), false);
-  }
-  assert.deepEqual(requests, []);
-  assert.deepEqual(launched, []);
-
-  fs.writeFileSync(configOptions.userConfigPath, JSON.stringify({ dreamer: { http: { baseUrl } } }));
-  const config = loadConfig({ cwd, ...configOptions });
-  assert.equal((await runDream({ db, config, projectKey, ...configOptions })).status, 'completed');
-  assert.deepEqual(requests, [undefined]);
-});
-
-test('project-only CLI mode and overrides cannot launch a process or a detached run', async (t) => {
-  const { root, db, configOptions, workspace, launched, spawnDream } = workspaceFixture(t);
-  const marker = path.join(root, 'launched.txt');
-  const script = path.join(root, 'marker.mjs');
-  fs.writeFileSync(script, `
-    import fs from 'node:fs';
-    fs.writeFileSync(${JSON.stringify(marker)}, 'unexpected launch');
-    console.log(${JSON.stringify(JSON.stringify(emptyPlan))});
-  `);
+test('repository YAML authorizes CLI runners and rejects changed executable arguments', async (t) => {
+  const { root, db, configOptions, workspace } = workspaceFixture(t);
+  const script = path.join(root, 'runner.mjs');
+  fs.writeFileSync(script, 'console.log(JSON.stringify({ summary: "Fixture runner", operations: [] }));');
   const cli = { orchestrator: 'codex', command: process.execPath, args: [script] };
-  const cadence = autoConfig(0).dreamer.cadence;
-  const target = workspace('untrusted-cli', { dreamer: { enabled: true, mode: 'cli', cli, cadence } });
-  const unauthorized = /CLI orchestrator, command, and arguments must be authorized in user settings/;
-  for (const trusted of [
-    {},
-    { mode: 'cli', cli: { ...cli, command: 'trusted-executable' } },
-    { mode: 'cli', cli: { ...cli, args: ['trusted-fixture.mjs'] } },
-  ]) {
-    fs.writeFileSync(configOptions.userConfigPath, JSON.stringify({ dreamer: trusted }));
-    const config = loadConfig({ cwd: target.cwd, ...configOptions });
-    assert.throws(() => createDreamRunner(config, configOptions), unauthorized);
-    await assert.rejects(runDream({ db, config, projectKey: target.projectKey, ...configOptions }), unauthorized);
-    assert.equal(maybeTriggerAutoDream({
-      db, config, cwd: target.cwd, projectKey: target.projectKey, configOptions, spawnImpl: spawnDream,
-    }), false);
-  }
-  assert.equal(fs.existsSync(marker), false);
-  assert.deepEqual(launched, []);
+  const { cwd, config, projectKey } = workspace('project-cli', { dreamer: { enabled: true, mode: 'cli', cli } });
+  const changed = { dreamer: { ...config.dreamer, cli: { ...cli, args: ['unexpected.mjs'] } } };
+  assert.throws(() => createDreamRunner(changed, { ...configOptions, cwd }), /CLI orchestrator, command, and arguments must be authorized/);
+  assert.equal((await runDream({ db, config, projectKey, cwd, ...configOptions })).summary, 'Fixture runner');
 });
 
 test('a native CLI runner starts with a serialized prompt from many long memories', async (t) => {
@@ -1112,13 +1052,12 @@ test('the last completed Dreamer run cannot satisfy its own automatic memory thr
 });
 
 test('opportunistic trigger skips held leases and spawns a quiet detached child with the indexed project key', (t) => {
-  const { root, db, dbPath, configOptions } = workspaceFixture(t);
-  const config = { ...autoConfig(0), dbPath: 'fixture.db' };
-  fs.writeFileSync(configOptions.userConfigPath, JSON.stringify({ dreamer: { http: config.dreamer.http } }));
+  const { db, dbPath, configOptions, workspace } = workspaceFixture(t);
+  const { cwd, config, projectKey } = workspace('auto', { ...autoConfig(0), dbPath: 'fixture.db' });
   const calls = [];
   const child = Object.assign(new EventEmitter(), { pid: 123, unref: () => calls.push('unref') });
   const spawnImpl = (...args) => { calls.push(args); return child; };
-  const options = { db, config, projectKey, cwd: root, configOptions, spawnImpl, cliPath: 'fixture-cli.mjs' };
+  const options = { db, config, projectKey, cwd, configOptions, spawnImpl, cliPath: 'fixture-cli.mjs' };
   acquireLease(db, 'dream:' + projectKey, 'active', 600_000);
   assert.equal(maybeTriggerAutoDream(options), false);
   assert.deepEqual(calls, []);
@@ -1130,9 +1069,9 @@ test('opportunistic trigger skips held leases and spawns a quiet detached child 
   assert.equal(spawnOptions.detached, true);
   assert.equal(spawnOptions.stdio, 'ignore');
   assert.equal(spawnOptions.windowsHide, true);
-  assert.equal(spawnOptions.cwd, root);
+  assert.equal(spawnOptions.cwd, cwd);
   assert.deepEqual(JSON.parse(spawnOptions.env.MULTI_SUB_MEMORY_AUTO_DREAM_CONTEXT), {
-    dbPath, dreamer: config.dreamer, projectKey,
+    dbPath, projectKey,
   });
   assert.equal(unref, 'unref');
   assert.doesNotThrow(() => child.emit('error', new Error('fixture async spawn failure')));

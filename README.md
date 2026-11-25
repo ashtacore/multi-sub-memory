@@ -8,6 +8,7 @@ The five Phase 1 MCP Core tools are `mem_memory`, `mem_note`, `mem_bootstrap`,
 ## Requirements
 
 - Node.js `^22.16.0 || >=24.0.0` (24/26+ recommended) with built-in `node:sqlite` and FTS5 support
+- Git for project-scoped memories and notes
 - Pure ESM (`.mjs`), zero build step, `npx`-installable
 
 ## Repository map
@@ -22,6 +23,8 @@ The five Phase 1 MCP Core tools are `mem_memory`, `mem_note`, `mem_bootstrap`,
 
 Run `npx -y multi-sub-memory setup` to initialize storage and register your MCP
 host, then run `npx -y multi-sub-memory doctor` to check the configuration.
+Settings live in `~/.config/multi-sub-memory/config.yaml`. Project memories and
+notes use the Git repository's identity, so clones and worktrees can share them.
 See [Setup and doctor](docs/wiki/Setup-and-Doctor.md) for scripted setup and
 diagnostics, and the [MCP core guide](docs/wiki/MCP-Core.md) for tool actions and
 workspace selection.

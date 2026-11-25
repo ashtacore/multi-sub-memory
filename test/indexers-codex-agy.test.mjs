@@ -375,7 +375,7 @@ test('MCP searches four formats in one Git project and expands Codex and Antigra
     'commit', '--allow-empty', '--no-gpg-sign', '-m', 'Fixture commit');
   git(main, 'worktree', 'add', '--detach', linked);
   const projectKey = resolveProjectKey(main).projectKey;
-  assert.match(projectKey, /^git:/);
+  assert.match(projectKey, /^local:/);
 
   const codexText = '  Quartz map\n  Preserve the indentation.  ';
   const agyText = '  Quartz legend\n  Preserve the indentation.  ';

@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { expandHome } from '../config.mjs';
-import { resolveProjectKey } from '../project-id.mjs';
+import { expandHome, resolveConfigProject } from '../config.mjs';
 import {
   clampImportance, createImportState, emptyImportResult, hasTable, importMemoryRecord, importNoteRecord, legacyTimestamps,
   mapCategory, openReadOnlySnapshot, parseLegacyMetadata, resolveLegacyProjectKey,
@@ -40,7 +39,7 @@ function sessionCwd(sessionPath, dbPath, homeDir, protectedPaths) {
   }
 }
 
-function sessionProjects(db, dbPath, homeDir, protectedPaths) {
+function sessionProjects(db, dbPath, homeDir, protectedPaths, config) {
   const lookup = new Map();
   const workspaces = new Map();
   if (!hasTable(db, 'session_projects')) return lookup;
@@ -49,8 +48,9 @@ function sessionProjects(db, dbPath, homeDir, protectedPaths) {
     const cwd = row.cwd ?? row.repo_path ?? row.root_path;
     const workspace = typeof cwd === 'string' && cwd.trim() ? cwd : sessionCwd(sessionPath, dbPath, homeDir, protectedPaths);
     if (!workspace) continue;
-    if (!workspaces.has(workspace)) workspaces.set(workspace, resolveProjectKey(workspace).projectKey);
+    if (!workspaces.has(workspace)) workspaces.set(workspace, resolveConfigProject(workspace, config, { optional: true })?.projectKey);
     const projectKey = workspaces.get(workspace);
+    if (!projectKey) continue;
     for (const key of [row.project_path, row.project_key, row.session_id]) {
       const alias = String(key ?? '').trim();
       if (alias && !lookup.has(alias)) lookup.set(alias, projectKey);
@@ -71,7 +71,7 @@ export function withMagicContextSource(options, useSource) {
     snapshot.close();
   }
   try {
-    const sessionProjectLookup = sessionProjects(snapshot.db, dbPath, options.homeDir, protectedPaths);
+    const sessionProjectLookup = sessionProjects(snapshot.db, dbPath, options.homeDir, protectedPaths, options.config);
     return useSource({ snapshot, sessionProjectLookup, protectedPaths, close });
   } finally {
     close();
@@ -102,7 +102,7 @@ export function importMagicContext(options, source) {
       const project = [row.project_path, row.project_key, row.project].find((value) => String(value ?? '').trim());
       const scope = String(row.scope ?? '').trim().toLowerCase();
       const explicitScope = scope === 'project' || scope === 'global' ? scope : undefined;
-      return resolveLegacyProjectKey(project, { projectMap, sessionProjectLookup, sessionId, explicitScope });
+      return resolveLegacyProjectKey(project, { projectMap, sessionProjectLookup, sessionId, explicitScope, config: options.config });
     };
     if (hasTable(db, 'memories')) {
       for (const row of db.prepare('SELECT * FROM memories').iterate()) {

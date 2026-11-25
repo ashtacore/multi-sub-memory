@@ -1,6 +1,6 @@
 # Startup hooks
 
-OMP and Claude Code can load the shared bootstrap summary automatically. Hooks are opt-in and use the same layered configuration and token budget as `mem_bootstrap`. See [MCP core](MCP-Core.md) for the summary format and tools.
+OMP and Claude Code can load the shared bootstrap summary automatically. Hooks are opt-in and use the same repository overrides in the global YAML file and token budget as `mem_bootstrap`. See [MCP core](MCP-Core.md) for the summary format and tools.
 
 | Host | Startup integration | Default installation |
 |---|---|---|
@@ -23,5 +23,5 @@ Remove hooks with `multi-sub-memory setup --uninstall-hooks omp`, `--uninstall-h
 - Hooks use the same `formatBootstrap` formatter as MCP. Startup defaults to a 500 ms deadline, including stdin and stdout for Claude Code. The Git probe and SQLite lock wait use the remaining time. The Claude command runs bootstrap in a child process so it can exit if native I/O stalls.
 - Hooks resolve plain database paths and file-backed SQLite URIs with supported `mode`, `cache`, and `psow` values. Repeated parameters and unsupported options leave startup context unchanged.
 - Hooks check the database header before opening SQLite and use private snapshots for both rollback and WAL databases. Read-only lock probes bracket the copy, and the formatter opens only the snapshot. A failed probe, a change to the source files during copying, or an observed rollback journal causes the hook to skip the snapshot. The snapshot directory is created only when a copy is needed, and the Claude process registers exit cleanup before starting the worker process.
-- Missing storage, invalid configuration, expired reads, SQLite errors, and empty results leave startup context unchanged. OMP retains each session's first result, including an empty result, across session switches in the same extension instance.
+- Non-Git workspaces, missing storage, invalid configuration, expired reads, SQLite errors, and empty results leave startup context unchanged. OMP retains each session's first result, including an empty result, across session switches in the same extension instance.
 - Use only the OMP `before_agent_start` listener and Claude Code `SessionStart` for this integration. The hooks leave conversation messages and the provider request lifecycle untouched.

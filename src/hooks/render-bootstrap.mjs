@@ -31,7 +31,7 @@ export async function renderHookBootstrap(options = {}) {
   try {
     const {
       cwd, env = process.env, homeDir = os.homedir(), timeoutMs = 500,
-      userConfigPath, projectConfigPath, useChildProcess = false,
+      userConfigPath, useChildProcess = false,
     } = options;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return '';
     const deadline = performance.now() + Math.min(timeoutMs, maxTimerDelay);
@@ -42,7 +42,7 @@ export async function renderHookBootstrap(options = {}) {
     });
     work = (async () => {
       if (performance.now() >= deadline) return '';
-      const data = { cwd, env, homeDir, userConfigPath, projectConfigPath, temporaryDirectory };
+      const data = { cwd, env, homeDir, userConfigPath, temporaryDirectory };
       // Closing a raw database descriptor on POSIX can release SQLite locks held in the same process.
       // The CLI also needs a child because Node joins worker threads during process exit.
       if (useChildProcess || process.platform !== 'win32') {

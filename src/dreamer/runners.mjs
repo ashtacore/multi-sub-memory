@@ -298,7 +298,7 @@ export function createCliLlmRunner({
 export function createDreamRunner(config, overrides = {}) {
   const { enabled, mode, http, cli } = config?.dreamer ?? {};
   const { userDreamer, userConfigPath, homeDir, ...runnerOptions } = overrides;
-  const trust = { userDreamer, userConfigPath, homeDir, env: runnerOptions.env };
+  const trust = { userDreamer, userConfigPath, homeDir, env: runnerOptions.env, cwd: runnerOptions.cwd };
   if (!enabled || mode === 'disabled') throw new Error('Dreamer is disabled');
   if (mode === 'http' && http) {
     const options = { ...http, ...runnerOptions };
