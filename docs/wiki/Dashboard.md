@@ -100,12 +100,14 @@ projects:
       - ~/worktrees/repo-review
 ```
 
-Successful manual runs, including dry runs, update the project registry with
-the selected checkout. The dashboard prefers that recorded path across
-restarts while it still belongs to the repository and exists on disk. If the
-recorded path is unavailable, it tries configured paths in YAML order, then
-recently indexed paths and the launch workspace. Configured projects remain
-selectable when none of their checkouts exist.
+Successful manual runs, including dry runs, remember the selected checkout
+and other discovered checkouts in a `<database>.dreamer-checkouts.json` file
+beside the active SQLite database. The dashboard prefers the last selected
+checkout across restarts while it exists and still belongs to the repository.
+It then tries the registry path, configured paths in YAML order, remembered
+paths, recently indexed paths, and the launch workspace. The dashboard
+verifies each candidate against the filesystem and Git before offering it.
+Configured projects remain selectable when none of their checkouts exist.
 
 ## HTTP API
 

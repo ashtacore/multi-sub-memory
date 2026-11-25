@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer, request as httpRequest } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -571,7 +571,7 @@ test('Dreamer rejects unknown checkouts and uses the launch workspace settings b
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM dream_runs').get().count, 0);
 });
 
-test('global dashboard runs Dreamer in verified checkouts and prefers the last-used checkout', async (t) => {
+test('global Dreamer preserves a registry-only checkout after using a configured checkout and restarting', async (t) => {
   const models = [];
   const runner = createServer(async (req, res) => {
     const chunks = [];
@@ -605,6 +605,7 @@ test('global dashboard runs Dreamer in verified checkouts and prefers the last-u
   const nonRoot = path.join(configured, 'subdir');
   await mkdir(nonRoot);
   const register = db.prepare('INSERT INTO projects (project_key, project_root, updated_at) VALUES (?, ?, ?)');
+  register.run(projectKey, registered, Date.now());
   register.run(missingKey, missing, Date.now());
   const dreamer = {
     enabled: true, mode: 'http',
@@ -614,10 +615,11 @@ test('global dashboard runs Dreamer in verified checkouts and prefers the last-u
     dbPath,
     dreamer,
     projects: {
-      [projectKey]: { checkouts: [registered, configured, another, missing, nonRoot], dreamer: { http: { model: 'shared-model' } } },
+      [projectKey]: { checkouts: [configured, another, missing, nonRoot], dreamer: { http: { model: 'shared-model' } } },
       [anotherKey]: { checkouts: [another] },
     },
   });
+  const configBeforeRun = await readFile(userConfigPath, 'utf8');
 
   const overview = await request('/api/overview');
   assert.equal(overview.status, 200, overview.text);
@@ -640,23 +642,25 @@ test('global dashboard runs Dreamer in verified checkouts and prefers the last-u
   assert.equal((await mutate('POST', endpoint, { project_key: missingKey, dry_run: true })).status, 400);
   assert.deepEqual(models, []);
 
-  for (const checkout of [registered, configured]) {
-    const response = await mutate('POST', endpoint, {
-      project_key: projectKey, checkout, dry_run: true,
-      expected_config_fingerprint: info.json.config.config_fingerprint,
-    });
-    assert.equal(response.status, 200, response.text);
-    assert.equal(response.json.status, 'dry-run');
-  }
+  const response = await mutate('POST', endpoint, {
+    project_key: projectKey, checkout: configured, dry_run: true,
+    expected_config_fingerprint: info.json.config.config_fingerprint,
+  });
+  assert.equal(response.status, 200, response.text);
+  assert.equal(response.json.status, 'dry-run');
   assert.deepEqual((await status(projectKey)).json.checkouts, [configured, registered]);
   const defaultRun = await mutate('POST', endpoint, { project_key: anotherKey, dry_run: true });
   assert.equal(defaultRun.status, 200, defaultRun.text);
   assert.equal(defaultRun.json.status, 'dry-run');
-  assert.deepEqual(models, ['shared-model', 'shared-model', 'default-model']);
+  assert.deepEqual(models, ['shared-model', 'default-model']);
 
   const reopenedDb = await restart({});
   assert.equal(reopenedDb.prepare('SELECT project_root FROM projects WHERE project_key = ?').get(projectKey).project_root,
     configured);
+  const checkoutState = JSON.parse(await readFile(dbPath + '.dreamer-checkouts.json', 'utf8'));
+  assert.equal(checkoutState[projectKey].lastCheckout, configured);
+  assert.deepEqual(new Set(checkoutState[projectKey].checkouts), new Set([registered, configured]));
+  assert.equal(await readFile(userConfigPath, 'utf8'), configBeforeRun);
   assert.deepEqual((await status(projectKey)).json.checkouts, [configured, registered]);
 
   await rm(configured, { recursive: true, force: true });

@@ -9,11 +9,12 @@ import {
   MissingProjectDestinationError,
   NOTE_COMMENT_PREVIEW_LENGTH, NoteValidationError, SameNoteStatusError, StaleRecordError, addNoteComment,
   decodeNoteCursor, deleteNote, deleteNoteComment, encodeNoteCursor, listNoteComments, listTags,
-  memoryTags, normalizeTag, recordProject, TagValidationError,
+  memoryTags, normalizeTag, TagValidationError,
   updateMemory, updateNote, updateNoteComment,
 } from '../memory-service.mjs';
 import { formatProjectLabels, normalizePath, resolveProjectKey } from '../project-id.mjs';
 import { hybridSearch } from '../search.mjs';
+import { createCheckoutState } from './checkout-state.mjs';
 
 const all = 'all';
 const globalKey = GLOBAL_PROJECT_KEY;
@@ -161,15 +162,18 @@ function userSettings(context) {
 }
 
 function projectCheckouts(context, settings, projectKey) {
-  const { db, defaultProjectKey, defaultProjectRoot, configOptions } = context;
+  const { db, defaultProjectKey, defaultProjectRoot, configOptions, checkoutState } = context;
+  const remembered = checkoutState.get(projectKey);
   const registered = db.prepare('SELECT project_root FROM projects WHERE project_key = ?').get(projectKey);
   const transcripts = db.prepare(`
     SELECT project_root FROM transcript_files WHERE project_key = ? AND project_root IS NOT NULL
     GROUP BY project_root ORDER BY MAX(last_indexed_at) DESC
   `).all(projectKey);
   const candidates = new Set([
+    remembered.lastCheckout,
     registered?.project_root,
     ...(settings.projects?.[projectKey]?.checkouts ?? []),
+    ...remembered.checkouts,
     ...transcripts.map(({ project_root }) => project_root),
     projectKey === defaultProjectKey ? defaultProjectRoot : null,
   ]);
@@ -592,12 +596,18 @@ async function startDream(context, req) {
     db, config, projectKey, cwd: checkout, embeddingEngine, dryRun: Boolean(body.dry_run),
     ...configOptions, userDreamer: config.dreamer,
   });
-  if (!result.skipped) recordProject(db, projectKey, checkout, Date.now());
+  if (!result.skipped) {
+    try {
+      context.checkoutState.record(projectKey, checkout, checkouts);
+    } catch {
+      throw new RequestError(500, 'Dreamer finished, but the dashboard could not save checkout history.');
+    }
+  }
   return redactDream(result);
 }
 
 export function createApi(context) {
-  context = { ...context, fingerprintKey: randomBytes(32) };
+  context = { ...context, fingerprintKey: randomBytes(32), checkoutState: createCheckoutState(context.db) };
   return async function api(req, pathname, params) {
     if (req.method === 'GET') {
       if (pathname === '/api/overview') return overview(context);
