@@ -208,7 +208,7 @@ export async function updateMemory(db, input, context = {}) {
   }
   const needsDefaultProject = input.scope === 'project' && input.project_key === undefined;
   const targetProject = needsDefaultProject
-    ? projectIdentityFor('project', input, context)
+    ? context.defaultProject ?? projectIdentityFor('project', input, context)
     : { projectKey: input.project_key ?? GLOBAL_PROJECT_KEY, projectRoot: null };
   const targetProjectKey = targetProject.projectKey;
   let result;

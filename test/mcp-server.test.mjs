@@ -533,8 +533,8 @@ test('MCP selects YAML identity and bootstrap settings for the requested Git che
   const main = initGit(tempDirectory(t));
   const fork = initGit(tempDirectory(t));
   const clone = initGit(tempDirectory(t));
-  const upstream = 'example.test/team/fixture';
-  const forkKey = 'example.test/fork/fixture';
+  const upstream = 'example.test/Team/Fixture';
+  const forkKey = 'example.test/Fork/Fixture';
   git(main, 'remote', 'add', 'origin', 'https://example.test/Team/Fixture.git');
   git(clone, 'remote', 'add', 'origin', 'git@example.test:Team/Fixture.git');
   git(fork, 'remote', 'add', 'upstream', 'ssh://git@example.test/Team/Fixture');

@@ -73,7 +73,10 @@ Use `global` for global rows alone.
 | `GET /api/dreamer` | Active leases, fresh sanitized configuration with `config_fingerprint` and runner authorization, `runnable_project_key` for the launch workspace, and up to 50 runs. History supports `project_key`, `status`, `sort` (`started_at`, `finished_at`, or `duration`), and `order` (`asc` or `desc`). |
 | `POST /api/dreamer/run` | Requires the launch workspace's `project_key`. Accepts optional boolean `dry_run` and string `expected_config_fingerprint`. A fingerprint mismatch returns 409 before contacting the runner. Returns the run result or a skip reason. |
 
-Record PATCH routes use the supplied fields to update the stored row. Send
+Record PATCH routes use the supplied fields to update the stored row.
+When a PATCH changes a global memory to project scope and omits
+`project_key`, the dashboard uses its launch repository. Outside a Git
+workspace the request needs an explicit project destination. Send
 `expected_updated_at` as the string form of the record's `updated_at` value.
 An invalid revision field returns 400. A stale revision returns 409 and leaves
 the row untouched.

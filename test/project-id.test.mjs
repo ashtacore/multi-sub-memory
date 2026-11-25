@@ -146,8 +146,27 @@ test('normalizes remote transports across clones and prefers upstream with an ex
   assert.equal(resolveProjectKey(clone).projectKey, upstream);
   assert.equal(resolveProjectKey(fork, { forkMode: 'origin' }).projectKey, 'github.com/fork/repo');
   assert.equal(resolveProjectKey(fork, { projects: { 'github.com/fork/repo': { forkMode: 'origin' } } }).projectKey, 'github.com/fork/repo');
-  git(clone, 'remote', 'set-url', 'origin', 'https://git.example.test/Owner/Repo.git');
-  assert.equal(resolveProjectKey(clone).projectKey, 'git.example.test/owner/repo');
+  git(clone, 'remote', 'set-url', 'origin', 'git@GITHUB.com:/OWNER/rePO.git');
+  assert.equal(resolveProjectKey(clone).projectKey, upstream);
+});
+
+test('preserves non-default ports and repository path casing on other hosts', (t) => {
+  const repo = tempDirectory(t);
+  git(repo, 'init', '--template=');
+  git(repo, 'remote', 'add', 'origin', 'https://GIT.example.test:8443/team/Repo.git');
+  assert.equal(resolveProjectKey(repo).projectKey, 'git.example.test:8443/team/Repo');
+  for (const [remote, key] of [
+    ['https://git.example.test:9443/team/Repo.git', 'git.example.test:9443/team/Repo'],
+    ['https://git.example.test:8443/team/repo.git', 'git.example.test:8443/team/repo'],
+    ['https://git.example.test:443/team/Repo.git', 'git.example.test/team/Repo'],
+    ['http://git.example.test:80/team/Repo.git', 'git.example.test/team/Repo'],
+    ['ssh://git@GIT.example.test:22/team/Repo.git', 'git.example.test/team/Repo'],
+    ['git+ssh://git@GIT.example.test:22/team/Repo.git', 'git.example.test/team/Repo'],
+    ['git@GIT.example.test:/team/Repo.git', 'git.example.test/team/Repo'],
+  ]) {
+    git(repo, 'remote', 'set-url', 'origin', remote);
+    assert.equal(resolveProjectKey(repo).projectKey, key);
+  }
 });
 
 test('remote project labels use the shortest distinguishing suffix', () => {

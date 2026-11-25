@@ -311,7 +311,7 @@ function notes({ db }, params) {
   };
 }
 
-async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot, embeddingEngine, cwd }, req, table, id) {
+async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot, embeddingEngine }, req, table, id) {
   const noun = table === 'memories' ? 'Memory' : 'Note';
   if (req.method === 'DELETE') {
     if (!db.prepare('DELETE FROM ' + table + ' WHERE id = ?').run(id).changes) {
@@ -340,10 +340,14 @@ async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot,
       throw new RequestError(400, 'Project memories require a non-global project key.');
     }
   }
+  const defaultProject = defaultProjectKey ? { projectKey: defaultProjectKey, projectRoot: defaultProjectRoot } : undefined;
+  if (table === 'memories' && body.scope === 'project' && body.project_key === undefined && !defaultProject) {
+    throw new RequestError(400, 'Select a project destination or launch the dashboard in a Git workspace.');
+  }
   try {
     if (table === 'memories') {
       const memory = await updateMemory(db, { ...body, id }, {
-        defaultCwd: cwd, embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt,
+        defaultProject, embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt,
       });
       const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, [memory.project_key]);
       return { memory: attachMemoryProject(memory, catalog) };

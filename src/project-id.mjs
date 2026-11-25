@@ -78,7 +78,9 @@ function gitDirectory(cwd, deadline, option) {
   return directory ? path.resolve(cwd, directory) : undefined;
 }
 
-const remoteKeyPattern = /^[a-z0-9][a-z0-9.-]*(?:\/[a-z0-9_.~-]+){2,}$/;
+const remoteKeyPattern = /^[a-z0-9][a-z0-9.-]*(?::\d{1,5})?(?:\/[A-Za-z0-9_.~-]+){2,}$/;
+const caseInsensitiveHosts = new Set(['github.com', 'gitlab.com', 'bitbucket.org', 'dev.azure.com']);
+const defaultPorts = new Map([['http:', '80'], ['https:', '443'], ['ssh:', '22'], ['git+ssh:', '22']]);
 
 export function isProjectKey(value) {
   if (typeof value !== 'string') return false;
@@ -88,11 +90,13 @@ export function isProjectKey(value) {
 
 function normalizeRemoteKey(remote) {
   if (!remote || windowsAbsolutePath.test(remote)) return undefined;
-  const scp = /^([^/@:]+@)?([^/:]+):([^/].*)$/.exec(remote);
-  const parsed = URL.parse(scp ? 'ssh://' + (scp[1] ?? '') + scp[2] + '/' + scp[3] : remote);
-  if (!parsed || !['ssh:', 'http:', 'https:', 'git:'].includes(parsed.protocol)) return undefined;
-  const repository = parsed.pathname.replace(/\/+$/, '').replace(/\.git$/i, '');
-  const key = (parsed.hostname + repository).toLowerCase();
+  const scp = /^(?:[^/@:]+@)?([^/:]+):((?!\/\/).+)$/.exec(remote);
+  const parsed = URL.parse(scp ? 'ssh://' + scp[1] + '/' + scp[2].replace(/^\//, '') : remote);
+  if (!parsed || (!defaultPorts.has(parsed.protocol) && parsed.protocol !== 'git:')) return undefined;
+  const hostname = parsed.hostname.toLowerCase();
+  const port = parsed.port && parsed.port !== defaultPorts.get(parsed.protocol) ? ':' + parsed.port : '';
+  const repository = caseInsensitiveHosts.has(hostname) ? parsed.pathname.toLowerCase() : parsed.pathname;
+  const key = hostname + port + repository.replace(/\/+$/, '').replace(/\.git$/, '');
   return isProjectKey(key) ? key : undefined;
 }
 

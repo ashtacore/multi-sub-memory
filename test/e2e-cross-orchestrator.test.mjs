@@ -30,7 +30,7 @@ function worktrees(root) {
   git('remote', 'add', 'origin', 'https://example.test/Fixtures/Worktree.git');
   git('worktree', 'add', '--detach', repoB);
   const { projectKey } = resolveProjectKey(repoA);
-  assert.equal(projectKey, 'example.test/fixtures/worktree');
+  assert.equal(projectKey, 'example.test/Fixtures/Worktree');
   assert.equal(resolveProjectKey(repoB).projectKey, projectKey);
   return { repoA, repoB, projectKey };
 }

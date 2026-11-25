@@ -8,11 +8,13 @@ global memories, read global notes with `include_global`, and search.
 
 ## Project identity
 
-The server prefers the `upstream` remote and falls back to `origin`. SSH and
-HTTPS spellings of the same repository share a lowercase
-`host/owner/repo` key. Separate clones and linked worktrees share that key
-regardless of their checkout directory. Bootstrap uses the current workspace's
-name in its output.
+The server prefers the `upstream` remote and falls back to `origin`. A remote
+key uses a lowercase host name and retains any non-default port, as in
+`git.example.test:8443/team/Repo`. Repository path casing is preserved except
+on `github.com`, `gitlab.com`, `bitbucket.org`, and `dev.azure.com`, where it
+is folded to lowercase. SSH and HTTPS remotes with the same normalized host and path
+share a key, as do separate clones and linked worktrees of that repository.
+Bootstrap uses the current workspace's name in its output.
 
 For a repository without a usable remote, the key is `local:` followed by the
 first 16 hexadecimal characters of the SHA-256 hash of its normalized Git

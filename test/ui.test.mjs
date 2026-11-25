@@ -5,12 +5,12 @@ import { createServer, request as httpRequest } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { loadConfig } from '../src/config.mjs';
+import { loadConfig, writeConfig } from '../src/config.mjs';
 import { acquireLease, hashNormalizedContent, MIGRATIONS, openDatabase, releaseLease } from '../src/db.mjs';
 import { archiveMemory, writeMemory, writeNote } from '../src/memory-service.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
 import { allowedLoopbackGuards, startDashboardServer } from '../src/ui/server.mjs';
-import { initGit, writeProjectConfig } from './git-fixtures.mjs';
+import { fixtureGit, initGit, writeProjectConfig } from './git-fixtures.mjs';
 
 async function fixture(t, { dreamer, env = {}, embeddingEngine, gitWorkspace = true } = {}) {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'multi-sub-memory-ui-'));
@@ -477,7 +477,7 @@ test('Dreamer reports disabled and validates manual run input', async (t) => {
 });
 
 test('dashboard can browse global data outside Git and exposes no runnable Dreamer project', async (t) => {
-  const { request, mutate } = await fixture(t, { gitWorkspace: false, dreamer: {
+  const { db, request, mutate } = await fixture(t, { gitWorkspace: false, dreamer: {
     enabled: true, mode: 'http', http: { baseUrl: 'https://runner.example.test/v1', model: 'fixture' },
   } });
   const overview = await request('/api/overview');
@@ -488,6 +488,12 @@ test('dashboard can browse global data outside Git and exposes no runnable Dream
   assert.equal(status.json.runnable_project_key, null);
   assert.equal(status.json.config.authorized, false);
   assert.equal((await mutate('POST', '/api/dreamer/run', { project_key: 'example.test/owner/repo' })).status, 400);
+
+  const { memory } = await writeMemory(db, { content: 'Global fixture', scope: 'global' });
+  const response = await mutate('PATCH', '/api/memories/' + memory.id, { scope: 'project' });
+  assert.equal(response.status, 400, response.text);
+  assert.match(response.json.error, /Select a project destination/);
+  assert.equal(db.prepare('SELECT project_key FROM memories WHERE id = ?').get(memory.id).project_key, 'global');
 });
 
 test('Dreamer browses other workspaces and runs only for the launch workspace with current settings', async (t) => {
@@ -804,6 +810,29 @@ test('memories expose project provenance and can move between projects or promot
     expected_updated_at: String(dupSource.updated_at),
   });
   assert.equal(conflict.status, 409, conflict.text);
+});
+
+test('scope-only memory PATCH uses the launch fork and preserves existing project assignments', async (t) => {
+  const { cwd, dbPath, userConfigPath, request, mutate, restart } = await fixture(t);
+  fixtureGit(cwd, 'remote', 'add', 'upstream', 'https://example.test/Team/Repo.git');
+  fixtureGit(cwd, 'remote', 'add', 'origin', 'https://example.test:8443/Fork/Repo.git');
+  const forkKey = 'example.test:8443/Fork/Repo';
+  const upstreamKey = 'example.test/Team/Repo';
+  writeConfig(userConfigPath, { dbPath, embedding: { enabled: false }, projects: { [forkKey]: { forkMode: 'origin' } } });
+  const db = await restart({});
+  assert.equal((await request('/api/overview')).json.default_project_key, forkKey);
+  const { memory } = await writeMemory(db, { content: 'Global fixture to move', scope: 'global' });
+  const response = await mutate('PATCH', '/api/memories/' + memory.id, { scope: 'project' });
+  assert.equal(response.status, 200, response.text);
+  assert.equal(response.json.memory.project_key, forkKey);
+  assert.equal(response.json.memory.project_root, resolveProjectKey(cwd).projectRoot);
+  assert.equal(db.prepare('SELECT project_key FROM memories WHERE id = ?').get(memory.id).project_key, forkKey);
+
+  const { memory: upstream } = await writeMemory(db, { content: 'Existing upstream fixture', cwd });
+  assert.equal(upstream.project_key, upstreamKey);
+  const existing = await mutate('PATCH', '/api/memories/' + upstream.id, { scope: 'project' });
+  assert.equal(existing.status, 200, existing.text);
+  assert.equal(existing.json.memory.project_key, upstreamKey);
 });
 
 test('memory PATCH rejects unknown project destinations without moving the memory', async (t) => {
