@@ -656,7 +656,7 @@ test('global Dreamer preserves a registry-only checkout after using a configured
 
   const reopenedDb = await restart({});
   assert.equal(reopenedDb.prepare('SELECT project_root FROM projects WHERE project_key = ?').get(projectKey).project_root,
-    configured);
+    registered);
   const checkoutState = JSON.parse(await readFile(dbPath + '.dreamer-checkouts.json', 'utf8'));
   assert.equal(checkoutState[projectKey].lastCheckout, configured);
   assert.deepEqual(new Set(checkoutState[projectKey].checkouts), new Set([registered, configured]));

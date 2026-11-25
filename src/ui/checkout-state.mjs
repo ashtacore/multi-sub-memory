@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { writeTextAtomically } from '../config.mjs';
-import { inWriteTransaction, recordProject } from '../memory-service.mjs';
+import { inWriteTransaction } from '../memory-service.mjs';
 
 function readState(file) {
   try {
@@ -49,9 +49,7 @@ export function createCheckoutState(db) {
         const checkouts = new Set([...verifiedCheckouts, ...previous.checkouts]);
         if (registered?.project_root) checkouts.add(registered.project_root);
         state.set(projectKey, { lastCheckout: checkout, checkouts: [...checkouts] });
-        // Preserve the registry path in the sidecar before replacing it.
         if (sidecar) writeTextAtomically(sidecar, JSON.stringify(Object.fromEntries(state)) + '\n');
-        recordProject(db, projectKey, checkout, Date.now());
       });
     },
   };
