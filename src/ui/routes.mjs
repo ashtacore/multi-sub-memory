@@ -121,7 +121,7 @@ function knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, extraKey
   const roots = knownProjectRoots(db, defaultProjectKey, defaultProjectRoot);
   const keys = new Set(roots.keys());
   if (defaultProjectKey && defaultProjectKey !== globalKey) keys.add(defaultProjectKey);
-  for (const table of ['memories', 'notes', 'dream_runs']) {
+  for (const table of ['memories', 'notes', 'dream_runs', 'transcript_files']) {
     for (const { project_key } of db.prepare('SELECT DISTINCT project_key FROM ' + table).all()) {
       if (project_key && project_key !== globalKey) keys.add(project_key);
     }

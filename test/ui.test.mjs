@@ -830,4 +830,21 @@ test('a registered project stays in the overview after its last memory moves to 
   assert.equal(updatedOverview.status, 200, updatedOverview.text);
   assert.equal(updatedOverview.json.projects.find(({ project_key }) => project_key === otherKey)?.memories.active, 1);
   assert.equal(updatedOverview.json.global.memories.total, 0);
+
+  // A project known only from a transcript_files row with project_root = NULL is also a valid move target.
+  const transcriptOnlyKey = 'dir:transcriptonly0001';
+  db.prepare(`
+    INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, project_root, mtime_ms, byte_offset, last_indexed_at)
+    VALUES ('null-root.jsonl', 'codex', 'session-null-root', ?, NULL, 1, 0, 1)
+  `).run(transcriptOnlyKey);
+  const overviewWithTranscript = await request('/api/overview');
+  assert.equal(overviewWithTranscript.status, 200, overviewWithTranscript.text);
+  assert.ok(overviewWithTranscript.json.projects.some(({ project_key }) => project_key === transcriptOnlyKey));
+  const movedToTranscriptOnly = await mutate('PATCH', endpoint, {
+    project_key: transcriptOnlyKey,
+    expected_updated_at: String(restored.json.memory.updated_at),
+  });
+  assert.equal(movedToTranscriptOnly.status, 200, movedToTranscriptOnly.text);
+  assert.equal(movedToTranscriptOnly.json.memory.project_key, transcriptOnlyKey);
+  assert.equal(movedToTranscriptOnly.json.memory.project_root, null);
 });
