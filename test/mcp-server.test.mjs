@@ -15,12 +15,28 @@ import { loadConfig } from '../src/config.mjs';
 import { estimateTokens, formatBootstrap } from '../src/bootstrap.mjs';
 import { openDatabase } from '../src/db.mjs';
 import { decodeFloat32Vector } from '../src/embeddings.mjs';
-import { createMcpServer } from '../src/mcp-server.mjs';
+import { createMcpServer, hybridSearch } from '../src/mcp-server.mjs';
+import { updateMemory, updateNote } from '../src/memory-service.mjs';
 import { initGit } from './git-fixtures.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
 const toolNames = ['mem_bootstrap', 'mem_expand', 'mem_memory', 'mem_note', 'mem_search'];
 const uuidV7Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function assertTrackedRead(actual, previous) {
+  const assertRecord = (row, before) => {
+    const { access_count, last_accessed_at } = row;
+    assert.ok(access_count > before.access_count);
+    assert.ok(last_accessed_at >= before.last_accessed_at);
+    assert.deepEqual(row, { ...before, access_count, last_accessed_at });
+  };
+  if (Array.isArray(previous)) {
+    assert.equal(actual.length, previous.length);
+    actual.forEach((row, index) => assertRecord(row, previous[index]));
+  } else {
+    assertRecord(actual, previous);
+  }
+}
 
 function tempDirectory(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-mcp-'));
@@ -90,6 +106,86 @@ test('MCP advertises the five core tools and validates action inputs', async (t)
   await expectError('mem_memory', { action: 'write', content: 'Fixture', scope: 'all' }, /scope/);
   await expectError('mem_note', { action: 'write', content: 'Fixture', status: 'dismissed' }, /status/);
   await expectError('mem_bootstrap', { token_budget: 0 }, /token_budget/);
+});
+
+test('MCP access metadata starts at creation and tracks only returned get, list and note reads', async (t) => {
+  const { db, memory, note, expectError } = await fixture(t);
+  const started = Date.now();
+  const saved = (await memory('write', { content: 'First memory', importance: 5 })).memory;
+  const omitted = (await memory('write', { content: 'Second memory' })).memory;
+  const handoff = await note('write', { content: 'Pending handoff', status: 'pending' });
+  const active = await note('write', { content: 'Active handoff' });
+  for (const row of [saved, omitted, handoff, active]) {
+    assert.equal(row.access_count, 0);
+    assert.equal(row.last_accessed_at, row.created_at);
+    assert.ok(row.last_accessed_at >= started && row.last_accessed_at <= Date.now());
+  }
+
+  const future = Date.now() + 60_000;
+  db.prepare('UPDATE memories SET last_accessed_at = ? WHERE id = ?').run(future, saved.id);
+  db.prepare('UPDATE notes SET last_accessed_at = NULL WHERE id = ?').run(handoff.id);
+  const totalChanges = db.prepare('SELECT total_changes() AS total');
+  const before = totalChanges.get().total;
+
+  const get = await memory('get', { id: saved.id });
+  assert.deepEqual(get, { ...saved, access_count: 1, last_accessed_at: future });
+  assert.deepEqual(await memory('list', { limit: 1 }), [{ ...get, access_count: 2 }]);
+  const [read] = await note('read', { status: 'pending', include_global: true });
+  assert.ok(read.last_accessed_at >= started && read.last_accessed_at <= Date.now());
+  assert.deepEqual(read, { ...handoff, access_count: 1, last_accessed_at: read.last_accessed_at });
+  await expectError('mem_memory', { action: 'get', id: 'missing' }, /not found/);
+  assert.equal(totalChanges.get().total - before, 3, 'the access writes leave FTS shadow tables untouched');
+  assert.equal(db.prepare('SELECT access_count FROM memories WHERE id = ?').get(omitted.id).access_count, 0);
+  assert.equal(db.prepare('SELECT access_count FROM notes WHERE id = ?').get(active.id).access_count, 0);
+});
+
+test('access metadata is read-only in MCP and service updates', async (t) => {
+  const { db, memory, note, expectError } = await fixture(t);
+  const saved = (await memory('write', { content: 'Fixture memory' })).memory;
+  const handoff = await note('write', { content: 'Fixture note' });
+  for (const field of ['last_accessed_at', 'access_count']) {
+    const patch = { content: 'Unauthorized edit', [field]: 5 };
+    for (const [tool, { id }] of [['mem_memory', saved], ['mem_note', handoff]]) {
+      await expectError(tool, { action: 'write', ...patch }, new RegExp(field));
+      await expectError(tool, { action: 'update', id, ...patch }, new RegExp(field));
+    }
+    await assert.rejects(updateMemory(db, { id: saved.id, ...patch }), /Unknown field/);
+    assert.throws(() => updateNote(db, { id: handoff.id, ...patch }), /Unknown field/);
+  }
+  for (const [table, record] of [['memories', saved], ['notes', handoff]]) {
+    const row = db.prepare(`SELECT content, last_accessed_at, access_count FROM ${table} WHERE id = ?`).get(record.id);
+    assert.deepEqual({ ...row }, { content: record.content, last_accessed_at: record.last_accessed_at, access_count: 0 });
+  }
+});
+
+test('MCP search counts fused hits once and excludes candidates outside the result limit', async (t) => {
+  const embeddingEngine = {
+    embed: () => Float32Array.of(1, 0),
+    getStatus: () => ({ model: 'fixture-model' }),
+  };
+  const { db, defaultCwd, memory, note, search } = await fixture(t, { embeddingEngine });
+  const saved = (await memory('write', { content: 'Distinct tracking token' })).memory;
+  const handoff = await note('write', { content: 'Distinct tracking token note' });
+  await setImmediate();
+
+  const first = await search({ query: 'Distinct', limit: 1 });
+  assert.equal(first.mode, 'hybrid');
+  assert.equal(first.results.length, 1);
+  assert.deepEqual([first.results[0].source, first.results[0].id], ['memory', saved.id]);
+  assert.ok(first.results[0].score > 1 / 61);
+  const access = (table, id) => db.prepare(`SELECT access_count, updated_at FROM ${table} WHERE id = ?`).get(id);
+  assert.deepEqual({ ...access('memories', saved.id) }, { access_count: 1, updated_at: saved.updated_at });
+  assert.equal(access('notes', handoff.id).access_count, 0);
+
+  const second = await search({ query: 'Distinct', limit: 2 });
+  assert.deepEqual(second.results.map(({ id }) => id), [saved.id, handoff.id]);
+  assert.equal(access('memories', saved.id).access_count, 2);
+  assert.deepEqual({ ...access('notes', handoff.id) }, { access_count: 1, updated_at: handoff.updated_at });
+
+  const dashboardSearch = await hybridSearch(db, { query: 'Distinct', defaultCwd });
+  assert.equal(dashboardSearch.results.length, 2);
+  assert.equal(access('memories', saved.id).access_count, 2);
+  assert.equal(access('notes', handoff.id).access_count, 1);
 });
 
 test('MCP search uses the server workspace and accepts source and date filters', async (t) => {
@@ -172,7 +268,7 @@ test('memory writes deduplicate, merge metadata, and reactivate archived or supe
   assert.equal(first.memory.importance, 3);
   db.prepare('UPDATE memories SET last_dreamed_at = 1 WHERE id = ?').run(id);
   assert.equal(Object.hasOwn(first.memory, 'last_dreamed_at'), false);
-  assert.deepEqual(await memory('get', { id }), first.memory);
+  assertTrackedRead(await memory('get', { id }), first.memory);
   db.prepare('UPDATE memories SET updated_at = 0 WHERE id = ?').run(id);
 
   const duplicate = await memory('write', {
@@ -188,15 +284,15 @@ test('memory writes deduplicate, merge metadata, and reactivate archived or supe
   assert.equal(duplicate.memory.source_orchestrator, 'fixture-host');
   assert.equal(duplicate.memory.source_session_id, 'fixture-session');
   assert.deepEqual(duplicate.memory.metadata, { a: 1, b: 2, nesting: { new: true } });
-  assert.deepEqual(await memory('list'), [duplicate.memory]);
+  assertTrackedRead(await memory('list'), [duplicate.memory]);
 
   const replacement = (await memory('write', { content: 'Use the replacement fixture' })).memory;
   for (const supersededBy of [undefined, replacement.id]) {
     const archived = await memory('archive', { id, superseded_by: supersededBy });
     assert.equal(archived.status, supersededBy ? 'superseded' : 'archived');
     assert.equal(archived.superseded_by, supersededBy ?? null);
-    assert.deepEqual(await memory('list', { status: archived.status }), [archived]);
-    assert.deepEqual(await memory('list'), [replacement]);
+    assertTrackedRead(await memory('list', { status: archived.status }), [archived]);
+    assertTrackedRead(await memory('list'), [replacement]);
 
     const reactivated = await memory('write', { content: 'REMEMBER the fixture', metadata: { c: 3 } });
     assert.equal(reactivated.deduplicated, true);
@@ -218,15 +314,15 @@ test('marking a memory as superseded requires an existing successor with a diffe
   const { id } = original;
 
   await expectError('mem_memory', { action: 'archive', id, superseded_by: 'missing' }, /not found for superseded_by/);
-  assert.deepEqual(await memory('get', { id }), original);
+  assertTrackedRead(await memory('get', { id }), original);
   await expectError('mem_memory', { action: 'archive', id, superseded_by: id }, /cannot supersede itself/);
-  assert.deepEqual(await memory('get', { id }), original);
+  assertTrackedRead(await memory('get', { id }), original);
   await expectError('mem_memory', { action: 'update', id, status: 'superseded' }, /archive with superseded_by/);
-  assert.deepEqual(await memory('get', { id }), original);
+  assertTrackedRead(await memory('get', { id }), original);
 
   const archived = await memory('archive', { id });
   await expectError('mem_memory', { action: 'update', id, status: 'superseded' }, /archive with superseded_by/);
-  assert.deepEqual(await memory('get', { id }), archived);
+  assertTrackedRead(await memory('get', { id }), archived);
 
   const successor = (await memory('write', { content: 'Successor fixture' })).memory;
   const superseded = await memory('archive', { id, superseded_by: successor.id });
@@ -236,7 +332,7 @@ test('marking a memory as superseded requires an existing successor with a diffe
   assert.equal(updated.category, 'DECISIONS');
   assert.equal(updated.status, 'superseded');
   assert.equal(updated.superseded_by, successor.id);
-  assert.deepEqual(await memory('get', { id }), updated);
+  assertTrackedRead(await memory('get', { id }), updated);
 });
 
 test('memory update and list preserve project boundaries, filters, and uniqueness', async (t) => {
@@ -247,13 +343,13 @@ test('memory update and list preserve project boundaries, filters, and uniquenes
   assert.notEqual(local.id, global.id);
   assert.equal(global.project_key, 'global');
   assert.equal(global.metadata, null);
-  assert.deepEqual(await memory('list'), [global, local]);
-  assert.deepEqual(await memory('list', { cwd: other }), [global]);
-  assert.deepEqual(await memory('list', { scope: 'project', category: 'CONSTRAINTS' }), [local]);
-  assert.deepEqual(await memory('list', { scope: 'global' }), [global]);
-  assert.deepEqual(await memory('list', { limit: 0 }), [global]);
+  assertTrackedRead(await memory('list'), [global, local]);
+  assertTrackedRead(await memory('list', { cwd: other }), [global]);
+  assertTrackedRead(await memory('list', { scope: 'project', category: 'CONSTRAINTS' }), [local]);
+  assertTrackedRead(await memory('list', { scope: 'global' }), [global]);
+  assertTrackedRead(await memory('list', { limit: 0 }), [global]);
   await expectError('mem_memory', { action: 'update', id: local.id, scope: 'global' }, /conflicts/);
-  assert.deepEqual(await memory('get', { id: local.id }), local);
+  assertTrackedRead(await memory('get', { id: local.id }), local);
 
   const moved = await memory('update', {
     id: local.id, content: 'Updated rule', category: 'DECISIONS',
@@ -271,14 +367,14 @@ test('memory update and list preserve project boundaries, filters, and uniquenes
   assert.notEqual(restored.project_key, local.project_key);
   assert.equal(restored.scope, 'project');
   assert.equal(restored.metadata, null);
-  assert.deepEqual(await memory('list', { scope: 'project', cwd: other }), [restored]);
-  assert.deepEqual(await memory('list', { scope: 'project' }), []);
+  assertTrackedRead(await memory('list', { scope: 'project', cwd: other }), [restored]);
+  assertTrackedRead(await memory('list', { scope: 'project' }), []);
 
   const blocker = (await memory('write', { content: 'Conflicting rule', cwd: other })).memory;
   await expectError('mem_memory', { action: 'update', id: blocker.id, content: ' UPDATED RULE ' }, /conflicts/);
   await expectError('mem_memory', { action: 'update', id: blocker.id, content: '  ' }, /blank/);
   const archived = await memory('update', { id: blocker.id, status: 'archived' });
-  assert.deepEqual(await memory('list', { cwd: other, status: 'archived' }), [archived]);
+  assertTrackedRead(await memory('list', { cwd: other, status: 'archived' }), [archived]);
 });
 
 test('embeddings follow content changes and failures leave searchable text', async (t) => {
@@ -387,8 +483,8 @@ test('notes read by status and project, update their condition, and dismiss by i
   assert.equal(pending.source_orchestrator, 'fixture-host');
   assert.equal(pending.source_session_id, 'fixture-session');
   assert.equal(pending.surface_condition, 'During review');
-  assert.deepEqual(await note('read'), [active, pending]);
-  assert.deepEqual(await note('read', { status: 'pending' }), [pending]);
+  assertTrackedRead(await note('read'), [active, pending]);
+  assertTrackedRead(await note('read', { status: 'pending' }), [pending]);
 
   db.prepare(`
     INSERT INTO notes (id, project_key, status, content, created_at, updated_at)
@@ -396,7 +492,7 @@ test('notes read by status and project, update their condition, and dismiss by i
   `).run();
   assert.deepEqual((await note('read', { include_global: true })).map(({ id }) => id),
     [active.id, 'fixture-global-note', pending.id]);
-  assert.deepEqual(await note('read', { status: 'active' }), [active]);
+  assertTrackedRead(await note('read', { status: 'active' }), [active]);
 
   const updated = await note('update', { id: pending.id, content: 'Inspect the fixture', surface_condition: null });
   assert.equal(updated.surface_condition, null);
@@ -406,9 +502,9 @@ test('notes read by status and project, update their condition, and dismiss by i
   await expectError('mem_note', { action: 'update', id: pending.id, content: '' }, /blank/);
   const dismissed = await note('dismiss', { id: active.id });
   assert.equal(dismissed.status, 'dismissed');
-  assert.deepEqual(await note('read', { status: 'dismissed' }), [dismissed]);
-  assert.deepEqual(await note('read'), [updated]);
-  assert.deepEqual(await note('read', { status: 'all' }), [updated, dismissed]);
+  assertTrackedRead(await note('read', { status: 'dismissed' }), [dismissed]);
+  assertTrackedRead(await note('read'), [updated]);
+  assertTrackedRead(await note('read', { status: 'all' }), [updated, dismissed]);
   assert.equal((await note('update', { id: pending.id, status: 'active' })).status, 'active');
   const search = db.prepare('SELECT content FROM notes_fts WHERE notes_fts MATCH ?');
   assert.equal(search.get('Inspect').content, 'Inspect the fixture');
@@ -478,6 +574,10 @@ test('bootstrap renders deterministic sections and enforces a whole-item token b
   }
   const median = elapsed.sort((a, b) => a - b)[1];
   assert.ok(median < 50, `Median warm bootstrap took ${median.toFixed(1)} ms`);
+  assert.deepEqual(db.prepare('SELECT access_count FROM memories ORDER BY content').all().map(({ access_count }) => access_count),
+    [0, 3, 5, 5]);
+  assert.deepEqual(db.prepare('SELECT access_count FROM notes ORDER BY content').all().map(({ access_count }) => access_count),
+    [0, 2, 4]);
 });
 
 test('bootstrap accepts a budget that fits a complete short note', async (t) => {
@@ -506,8 +606,8 @@ test('memory update moves a global memory to a previously unused Git workspace',
   assert.equal(moved.id, global.id);
   assert.equal(moved.scope, 'project');
   assert.match(moved.project_key, /^local:/);
-  assert.deepEqual(await memory('list', { scope: 'project', cwd: workspace }), [moved]);
-  assert.deepEqual(await memory('list'), []);
+  assertTrackedRead(await memory('list', { scope: 'project', cwd: workspace }), [moved]);
+  assertTrackedRead(await memory('list'), []);
 });
 
 test('linked Git worktrees share memories through MCP', async (t) => {
@@ -526,7 +626,7 @@ test('linked Git worktrees share memories through MCP', async (t) => {
   const summary = await bootstrap({ cwd: linked });
   assert.ok(summary.includes(`<project-memory project="linked tree" key="${written.project_key}">`));
   assert.ok(summary.includes(`- ${written.content}\n`));
-  assert.deepEqual(await memory('list', { cwd: linked }), [written]);
+  assertTrackedRead(await memory('list', { cwd: linked }), [written]);
 });
 
 test('MCP selects YAML identity and bootstrap settings for the requested Git checkout', async (t) => {
@@ -549,8 +649,8 @@ test('MCP selects YAML identity and bootstrap settings for the requested Git che
   const { db, memory, bootstrap } = await fixture(t, { defaultCwd: main, config });
   const written = (await memory('write', { content: 'Shared remote memory' })).memory;
   assert.equal(written.project_key, upstream);
-  assert.deepEqual(await memory('list', { cwd: clone }), [written]);
-  assert.deepEqual(await memory('list', { cwd: fork }), []);
+  assertTrackedRead(await memory('list', { cwd: clone }), [written]);
+  assertTrackedRead(await memory('list', { cwd: fork }), []);
   const separate = (await memory('write', { content: 'Separate fork memory', cwd: fork })).memory;
   assert.equal(separate.project_key, forkKey);
   assert.match(await bootstrap({ cwd: fork }), /Separate fork memory/);
@@ -568,7 +668,7 @@ test('MCP supports global memories outside Git and rejects project memory and no
 
   const global = (await memory('write', { scope: 'global', content: 'Global fixture' })).memory;
   assert.equal(global.project_key, 'global');
-  assert.deepEqual(await memory('list'), [global]);
+  assertTrackedRead(await memory('list'), [global]);
   assert.equal((await search({ query: 'fixture' })).results.length, 1);
 
   initGit(defaultCwd);

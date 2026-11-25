@@ -7,7 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { loadConfig, writeConfig } from '../src/config.mjs';
 import { acquireLease, hashNormalizedContent, MIGRATIONS, openDatabase, releaseLease } from '../src/db.mjs';
-import { archiveMemory, writeMemory, writeNote } from '../src/memory-service.mjs';
+import { archiveMemory, recordAccess, writeMemory, writeNote } from '../src/memory-service.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
 import { allowedLoopbackGuards, startDashboardServer } from '../src/ui/server.mjs';
 import { fixtureGit, initGit, writeProjectConfig } from './git-fixtures.mjs';
@@ -314,6 +314,16 @@ test('record PATCHes reject stale revisions and preserve fields omitted by parti
     const endpoint = '/api/' + table + '/' + record.id;
     const read = () => ({ ...db.prepare('SELECT * FROM ' + table + ' WHERE id = ?').get(record.id) });
     const expected_updated_at = String(record.updated_at);
+    recordAccess(db, { [table]: [record.id] });
+    const afterAccess = read();
+    assert.equal(afterAccess.updated_at, record.updated_at);
+    assert.equal(afterAccess.access_count, 1);
+    for (const field of ['last_accessed_at', 'access_count']) {
+      const attemptedEdit = await mutate('PATCH', endpoint, { ...change, expected_updated_at, [field]: 5 });
+      assert.equal(attemptedEdit.status, 400, attemptedEdit.text);
+      assert.deepEqual(attemptedEdit.json, { error: 'Unexpected field' });
+      assert.deepEqual(read(), afterAccess);
+    }
     const invalid = await mutate('PATCH', endpoint, { ...change, expected_updated_at: record.updated_at });
     assert.equal(invalid.status, 400, invalid.text);
     assert.equal((await mutate('PATCH', endpoint, { ...change, expected_updated_at: ' ' })).status, 400);

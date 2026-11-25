@@ -126,10 +126,15 @@ function validateReferences(operations, memories) {
   return referenced;
 }
 
+function reviewedState(row) {
+  return JSON.stringify(row, (key, value) =>
+    key === 'last_accessed_at' || key === 'access_count' ? undefined : value);
+}
+
 function prepareOperations(db, projectKey, operations, memories, referenced) {
   const findById = db.prepare('SELECT * FROM memories WHERE id = ?');
   for (const id of referenced) {
-    if (JSON.stringify(findById.get(id)) !== JSON.stringify(memories.get(id))) {
+    if (reviewedState(findById.get(id)) !== reviewedState(memories.get(id))) {
       throw new Error('A reviewed memory changed while Dreamer was planning');
     }
   }
@@ -160,7 +165,7 @@ function prepareOperations(db, projectKey, operations, memories, referenced) {
     if (target?.status === 'active' && !memories.has(target.id)) {
       throw new Error('Dream merge target is outside the reviewed active project memories');
     }
-    if (target && memories.has(target.id) && JSON.stringify(target) !== JSON.stringify(memories.get(target.id))) {
+    if (target && memories.has(target.id) && reviewedState(target) !== reviewedState(memories.get(target.id))) {
       throw new Error('A reviewed merge target changed while Dreamer was planning');
     }
     projectedHashes.set(hash, target ?? {});
@@ -180,12 +185,17 @@ function mergeDreamMetadata(previousJson, dreamPatch) {
 function applyOperations(db, { projectKey, runId, memories, prepared, txNow }) {
   const insert = db.prepare(`
     INSERT INTO memories (id, project_key, scope, category, content, normalized_hash, importance,
-      source_orchestrator, metadata_json, created_at, updated_at)
-    VALUES (?, ?, 'project', ?, ?, ?, ?, 'dreamer', ?, ?, ?)
+      source_orchestrator, metadata_json, created_at, updated_at, last_accessed_at, access_count)
+    VALUES (?, ?, 'project', ?, ?, ?, ?, 'dreamer', ?, ?, ?, ?, ?)
   `);
   const merge = db.prepare(`
     UPDATE memories SET content = ?, category = ?, importance = ?, status = 'active', superseded_by = NULL,
-      source_orchestrator = 'dreamer', source_session_id = NULL, metadata_json = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ?
+      source_orchestrator = 'dreamer', source_session_id = NULL, metadata_json = ?, updated_at = MAX(?, updated_at + 1),
+      last_accessed_at = ?, access_count = ? WHERE id = ?
+  `);
+  const mergeAccess = db.prepare(`
+    SELECT MAX(last_accessed_at) AS last_accessed_at, SUM(access_count) AS access_count
+    FROM memories WHERE id IN (SELECT value FROM json_each(?)) OR id = ?
   `);
   const supersede = db.prepare(`
     UPDATE memories SET status = 'superseded', superseded_by = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ?
@@ -208,11 +218,12 @@ function applyOperations(db, { projectKey, runId, memories, prepared, txNow }) {
         const metadata = mergeDreamMetadata(target?.metadata_json, {
           ...runMetadata, merged_from: op.source_ids, merge_reason: op.reason,
         });
+        const { last_accessed_at, access_count } = mergeAccess.get(JSON.stringify(op.source_ids), target?.id ?? null);
         if (target) {
-          merge.run(op.content, category, importance, metadata, txNow, id);
+          merge.run(op.content, category, importance, metadata, txNow, last_accessed_at, access_count, id);
           if (target.content !== op.content) invalidateEmbedding(db, id);
         } else {
-          insert.run(id, projectKey, category, op.content, hash, importance, metadata, txNow, txNow);
+          insert.run(id, projectKey, category, op.content, hash, importance, metadata, txNow, txNow, last_accessed_at, access_count);
         }
         for (const sourceId of op.source_ids) {
           if (sourceId !== id) supersede.run(id, txNow, sourceId);
@@ -241,7 +252,7 @@ function applyOperations(db, { projectKey, runId, memories, prepared, txNow }) {
       case 'add': {
         const id = generateId();
         const metadata = JSON.stringify({ ...runMetadata, reason: op.reason });
-        insert.run(id, projectKey, op.category ?? 'GENERAL', op.content, hash, op.importance ?? 3, metadata, txNow, txNow);
+        insert.run(id, projectKey, op.category ?? 'GENERAL', op.content, hash, op.importance ?? 3, metadata, txNow, txNow, null, 0);
         pendingEmbeddings.push({ id, content: op.content });
         break;
       }

@@ -12,7 +12,7 @@ import { acquireLease, hashNormalizedContent, openDatabase, releaseLease } from 
 import { maybeTriggerAutoDream, runDream, shouldTriggerAutoDream } from '../src/dreamer/engine.mjs';
 import { createCliLlmRunner, createDreamRunner, createHttpLlmRunner, extractJsonPlan } from '../src/dreamer/runners.mjs';
 import { runIndexers } from '../src/indexers/runner.mjs';
-import { writeMemory } from '../src/memory-service.mjs';
+import { recordAccess, writeMemory } from '../src/memory-service.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
 import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
@@ -300,6 +300,7 @@ test('dry run records the proposed plan and leaves memories and embeddings untou
   addMemory(db, 'a');
   addMemory(db, 'b');
   addMemory(db, 'c');
+  recordAccess(db, { memories: ['a', 'b'] });
   const operations = [
     { type: 'merge', source_ids: ['a', 'b'], content: 'Consolidated fixture' },
     { type: 'archive', id: 'c', reason: 'Retired fixture' },
@@ -328,6 +329,7 @@ test('engine applies all four operations and embeds committed content, with exac
   addTranscript(db);
   for (const id of ['a', 'b', 'c', 'd']) addMemory(db, id);
   addMemory(db, 'global', { scope: 'global' });
+  db.exec("UPDATE memories SET last_accessed_at = 500, access_count = 3 WHERE id = 'a'");
   const operations = [
     { type: 'merge', source_ids: ['a', 'b'], content: 'Consolidated fixture', reason: 'Duplicate facts' },
     { type: 'archive', id: 'c', reason: 'Retired fixture' },
@@ -359,6 +361,8 @@ test('engine applies all four operations and embeds committed content, with exac
   assert.equal(memory('b').superseded_by, merged.id);
   assert.equal(merged.status, 'active');
   assert.equal(merged.source_orchestrator, 'dreamer');
+  assert.equal(merged.last_accessed_at, 500);
+  assert.equal(merged.access_count, 3);
   assert.deepEqual(JSON.parse(merged.metadata_json), {
     dream_run_id: result.runId, merged_from: ['a', 'b'], merge_reason: 'Duplicate facts',
   });
@@ -388,6 +392,11 @@ test('merge reuses either a source or an existing archived row with the same nor
   addMemory(db, 'c');
   addMemory(db, 'd');
   addMemory(db, 'e', { content: 'Fixture target', status: 'archived' });
+  db.exec(`
+    UPDATE memories SET last_accessed_at = 100, access_count = 1 WHERE id = 'a';
+    UPDATE memories SET last_accessed_at = 200, access_count = 2 WHERE id = 'b';
+    UPDATE memories SET last_accessed_at = 400, access_count = 4 WHERE id = 'e';
+  `);
   await dream(() => resultFor([
     { type: 'merge', source_ids: ['a', 'b'], content: 'fixture  A' },
     { type: 'merge', source_ids: ['c', 'd'], content: 'Fixture target' },
@@ -399,6 +408,31 @@ test('merge reuses either a source or an existing archived row with the same nor
   assert.equal(memory('d').superseded_by, 'e');
   assert.equal(memory('e').status, 'active');
   assert.equal(memory('e').superseded_by, null);
+  assert.equal(memory('a').last_accessed_at, 200);
+  assert.equal(memory('a').access_count, 3);
+  assert.equal(memory('e').last_accessed_at, 400);
+  assert.equal(memory('e').access_count, 4);
+});
+
+test('Dreamer includes accesses recorded during planning and preserves null for untouched sources', async (t) => {
+  const { db, dream, memory } = fixture(t);
+  for (const id of ['a', 'b', 'target', 'c', 'd']) addMemory(db, id);
+  const pending = Promise.withResolvers();
+  const running = dream(() => pending.promise);
+
+  recordAccess(db, { memories: ['a', 'target'] });
+  recordAccess(db, { memories: ['a'] });
+  const latest = Math.max(memory('a').last_accessed_at, memory('target').last_accessed_at);
+  pending.resolve(resultFor([
+    { type: 'merge', source_ids: ['a', 'b'], content: 'target' },
+    { type: 'merge', source_ids: ['c', 'd'], content: 'Untouched sources' },
+  ]));
+  assert.equal((await running).status, 'completed');
+  assert.equal(memory('target').access_count, 3);
+  assert.equal(memory('target').last_accessed_at, latest);
+  const merged = memory(memory('c').superseded_by);
+  assert.equal(merged.access_count, 0);
+  assert.equal(merged.last_accessed_at, null);
 });
 
 test('automatic Dreamer preserves array metadata on update, archive, and merge target reuse', async (t) => {

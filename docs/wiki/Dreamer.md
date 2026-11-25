@@ -87,6 +87,10 @@ array. Optional Markdown fences around the JSON are accepted.
 - Dreamer adds provenance to existing metadata on updates, archives, and
   reused merge targets. It keeps arrays, scalar values, and explicit JSON `null`
   under `user_metadata`. Absent metadata receives only provenance.
+- A merge sums the sources' access counts and keeps their latest access
+  timestamp, or a null timestamp if none was recorded. The transaction reads
+  current access metadata and includes a reused target exactly once. Accesses
+  during planning keep the plan valid and contribute to the merge.
 - The changes and completed run record commit in one SQLite transaction.
   Changed text invalidates its old vector in the transaction. Dreamer writes
   replacement vectors after commit when embeddings are available. A planning

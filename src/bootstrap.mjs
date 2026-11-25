@@ -1,5 +1,7 @@
 import { bootstrapTokenBudget } from './config.mjs';
-import { MEMORY_CATEGORIES, resolveCachedProjectKey, selectMemories, selectNotes } from './memory-service.mjs';
+import {
+  MEMORY_CATEGORIES, recordAccess, resolveCachedProjectKey, selectMemories, selectNotes,
+} from './memory-service.mjs';
 
 export function estimateTokens(text) {
   return Math.ceil(text.length / 4);
@@ -31,18 +33,18 @@ function section(opening, closing, items, label) {
     minimumLength: Math.min(fullLength, wrapperLength + omittedLine(items.length).length),
     render(budget) {
       let used = wrapperLength;
-      let included = 0;
+      const included = [];
       const groups = new Map();
-      for (const { heading, line } of items) {
+      for (const { id, heading, line } of items) {
         const headingLength = heading && !groups.has(heading) ? heading.length + 1 : 0;
         const nextLength = used + headingLength + line.length;
-        if (fullLength > budget && nextLength + omittedLine(items.length - included - 1).length > budget) {
+        if (fullLength > budget && nextLength + omittedLine(items.length - included.length - 1).length > budget) {
           continue;
         }
         if (!groups.has(heading)) groups.set(heading, []);
         groups.get(heading).push(line);
         used = nextLength;
-        included++;
+        included.push(id);
       }
       const lines = [];
       for (const heading of [...MEMORY_CATEGORIES.map((category) => `### ${category}`), '']) {
@@ -51,7 +53,7 @@ function section(opening, closing, items, label) {
         if (heading) lines.push(`${heading}\n`);
         lines.push(group.join(''));
       }
-      lines.push(omittedLine(items.length - included));
+      lines.push(omittedLine(items.length - included.length));
       return { text: opening + lines.join('') + closing, included };
     },
   };
@@ -69,15 +71,15 @@ export function formatBootstrap(db, options = {}) {
   const memorySection = section(
     `<project-memory project="${escapeXml(displayName)}" key="${escapeXml(projectKey)}">\n`,
     '</project-memory>',
-    memories.map(({ category, content }) => ({ heading: `### ${category}`, line: `- ${onOneLine(content)}\n` })),
+    memories.map(({ id, category, content }) => ({ id, heading: `### ${category}`, line: `- ${onOneLine(content)}\n` })),
     'memories',
   );
   const noteSection = notes.length ? section(
     '<active-notes>\n',
     '</active-notes>',
-    notes.map(({ content, status, surface_condition }) => {
+    notes.map(({ id, content, status, surface_condition }) => {
       const condition = surface_condition ? ` (surface when: ${onOneLine(surface_condition)})` : '';
-      return { heading: '', line: `- [${status}] ${onOneLine(content)}${condition}\n` };
+      return { id, heading: '', line: `- [${status}] ${onOneLine(content)}${condition}\n` };
     }),
     'notes',
   ) : null;
@@ -91,19 +93,22 @@ export function formatBootstrap(db, options = {}) {
 
   const renderedMemories = memorySection.render(characterBudget - noteReserve);
   let text = renderedMemories.text;
-  let includedNotes = 0;
+  let includedNotes = [];
   if (noteSection) {
     const noteBudget = characterBudget - text.length - 1;
     const renderedNotes = noteSection.render(noteBudget);
     text += `\n${renderedNotes.text}`;
     includedNotes = renderedNotes.included;
   }
+  if (options.recordAccess === true) {
+    recordAccess(db, { memories: renderedMemories.included, notes: includedNotes });
+  }
   return {
     text, projectKey, displayName,
-    includedMemories: renderedMemories.included,
-    omittedMemories: memories.length - renderedMemories.included,
-    includedNotes,
-    omittedNotes: notes.length - includedNotes,
+    includedMemories: renderedMemories.included.length,
+    omittedMemories: memories.length - renderedMemories.included.length,
+    includedNotes: includedNotes.length,
+    omittedNotes: notes.length - includedNotes.length,
     estimatedTokens: estimateTokens(text),
     tokenBudget,
   };

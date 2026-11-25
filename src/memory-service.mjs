@@ -33,6 +33,12 @@ function checkRevision(row, expectedUpdatedAt) {
   }
 }
 
+function rejectAccessFields(input) {
+  for (const field of ['last_accessed_at', 'access_count']) {
+    if (Object.hasOwn(input, field)) throw new Error(`Unknown field: ${field}`);
+  }
+}
+
 export function resolveCachedProjectKey(cwd, config, options) {
   return resolveConfigProject(cwd, config, { ...options, cache: true });
 }
@@ -120,6 +126,26 @@ export function inWriteTransaction(db, write) {
   }
 }
 
+export function recordAccess(db, { memories = [], notes = [] }) {
+  const updated = { memories: new Map(), notes: new Map() };
+  if (!memories.length && !notes.length) return updated;
+
+  inWriteTransaction(db, () => {
+    const now = Date.now();
+    for (const [table, ids] of [['memories', memories], ['notes', notes]]) {
+      if (!ids.length) continue;
+      const rows = db.prepare(`
+        UPDATE ${table} SET access_count = access_count + 1,
+          last_accessed_at = MAX(COALESCE(last_accessed_at, 0), ?)
+        WHERE id IN (SELECT value FROM json_each(?))
+        RETURNING id, last_accessed_at, access_count
+      `).all(now, JSON.stringify(ids));
+      for (const { id, ...stats } of rows) updated[table].set(id, stats);
+    }
+  });
+  return updated;
+}
+
 export async function storeEmbedding(db, memory, engine, fallbackModel) {
   if (!engine) return 0;
   try {
@@ -156,14 +182,14 @@ export async function writeMemory(db, input, context = {}) {
     const row = db.prepare(`
       INSERT INTO memories (
         id, project_key, scope, category, content, normalized_hash, importance,
-        source_orchestrator, source_session_id, metadata_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_orchestrator, source_session_id, metadata_json, created_at, updated_at, last_accessed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (project_key, scope, normalized_hash) DO NOTHING
       RETURNING *
     `).get(
       generateId(), projectKey, scope, category, content, hash, importance,
       input.source_orchestrator ?? null, input.source_session_id ?? null,
-      mergeMetadata(null, input.metadata), now, now,
+      mergeMetadata(null, input.metadata), now, now, now,
     );
     if (row) return { memory: formatMemory(row), deduplicated: false, reactivated: false };
 
@@ -199,6 +225,7 @@ export async function writeMemory(db, input, context = {}) {
 }
 
 export async function updateMemory(db, input, context = {}) {
+  rejectAccessFields(input);
   const content = input.content === undefined ? undefined : requireContent(input.content);
   if (input.scope !== undefined && !MEMORY_SCOPES.includes(input.scope)) {
     throw new Error('Memory scope must be project or global');
@@ -331,11 +358,11 @@ export function writeNote(db, input, context = {}) {
     return db.prepare(`
       INSERT INTO notes (
         id, project_key, status, content, surface_condition, source_orchestrator,
-        source_session_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
+        source_session_id, created_at, updated_at, last_accessed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
     `).get(
       generateId(), projectKey, status, content, input.surface_condition ?? null,
-      input.source_orchestrator ?? null, input.source_session_id ?? null, now, now,
+      input.source_orchestrator ?? null, input.source_session_id ?? null, now, now, now,
     );
   });
 }
@@ -367,6 +394,7 @@ export function readNotes(db, input = {}, context = {}) {
 }
 
 export function updateNote(db, input, { expectedUpdatedAt } = {}) {
+  rejectAccessFields(input);
   const content = input.content === undefined ? null : requireContent(input.content);
   function update() {
     if (expectedUpdatedAt !== undefined) {

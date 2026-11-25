@@ -54,6 +54,23 @@ Memory, note, search, and expansion results contain JSON in the MCP text
 response. Validation and tool errors use MCP text responses with the error flag
 set. Bootstrap returns the summary as plain text.
 
+## Access tracking
+
+New memories and notes start with their creation time as `last_accessed_at`
+and an `access_count` of zero. Deduplicated memory writes retain the existing
+access metadata, including when they reactivate a memory.
+
+Successful `mem_memory` get and list actions, `mem_note` read actions,
+`mem_search`, and `mem_bootstrap` increment the count once per distinct
+memory or note returned. Search counts the final ranked hits. Bootstrap
+counts the items that fit the budget and appear in the summary. Each access
+advances the timestamp to the later of its current value and the access time.
+Startup hooks and dashboard views leave access metadata untouched.
+
+Access metadata is read-only in write and update inputs. Recording an access
+preserves `updated_at`, so it leaves edit revisions and update-time sorting
+intact.
+
 ## Bootstrap
 
 `src/bootstrap.mjs` produces a `<project-memory>` section for active project and

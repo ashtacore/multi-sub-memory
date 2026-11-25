@@ -213,6 +213,33 @@ export const MIGRATIONS = [{
       );
     `);
   },
+}, {
+  version: 7,
+  up(db) {
+    for (const [table, indexedField] of [['memories', 'category'], ['notes', 'surface_condition']]) {
+      const columns = db.prepare(`PRAGMA table_info(${table})`).all().map(({ name }) => name);
+      if (!columns.includes('last_accessed_at')) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN last_accessed_at INTEGER`);
+      }
+      if (!columns.includes('access_count')) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0 CHECK (access_count >= 0)`);
+      }
+
+      const fts = `${table}_fts`;
+      db.exec(`
+        DROP TRIGGER IF EXISTS ${fts}_update;
+        CREATE TRIGGER ${fts}_update AFTER UPDATE ON ${table}
+        WHEN old.rowid IS NOT new.rowid OR old.content IS NOT new.content
+          OR old.${indexedField} IS NOT new.${indexedField} OR old.project_key IS NOT new.project_key
+        BEGIN
+          INSERT INTO ${fts} (${fts}, rowid, content, ${indexedField}, project_key)
+            VALUES ('delete', old.rowid, old.content, old.${indexedField}, old.project_key);
+          INSERT INTO ${fts} (rowid, content, ${indexedField}, project_key)
+            VALUES (new.rowid, new.content, new.${indexedField}, new.project_key);
+        END;
+      `);
+    }
+  },
 }];
 
 const busyWait = new Int32Array(new SharedArrayBuffer(4));
