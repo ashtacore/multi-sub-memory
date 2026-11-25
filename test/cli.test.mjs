@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { openDatabase } from '../src/db.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
-const plannedCommands = ['setup', 'doctor', 'dream', 'ui', 'import'];
+const plannedCommands = ['dream', 'ui', 'import'];
 
 function invoke(args, options = {}) {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
@@ -32,7 +32,21 @@ for (const flag of ['--help', '-h', 'help']) {
     assert.match(result.stdout, /\bserve\b/);
     assert.match(result.stdout, /\bindex\b/);
     assert.match(result.stdout, /<omp\|claude\|codex\|agy\|all>/);
-    for (const command of plannedCommands) assert.ok(result.stdout.includes(command), command);
+    for (const command of ['setup', 'doctor', ...plannedCommands]) assert.ok(result.stdout.includes(command), command);
+  });
+}
+
+for (const command of ['setup', 'doctor']) {
+  test(command + ' dispatches to its own help and returns its exit code', () => {
+    const help = invoke([command, '--help']);
+    assert.equal(help.status, 0, help.stderr);
+    assert.equal(help.stderr, '');
+    assert.match(help.stdout, new RegExp('Usage: multi-sub-memory ' + command));
+    const invalid = invoke([command, '--bogus']);
+    assert.equal(invalid.status, 1);
+    assert.equal(invalid.stdout, '');
+    assert.match(invalid.stderr, /--bogus/);
+    assert.doesNotMatch(invalid.stderr, /ExperimentalWarning/);
   });
 }
 
