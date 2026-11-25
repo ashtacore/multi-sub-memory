@@ -107,6 +107,7 @@ export function createEmbeddingEngine(options = {}) {
     embedding,
     env = process.env,
     loader = () => import('@huggingface/transformers'),
+    pipelineOptions,
     warn = (message) => { process.stderr.write(`${message}\n`); },
   } = options;
   const model = options.model ?? embedding?.model ?? DEFAULT_EMBEDDING_MODEL;
@@ -122,7 +123,7 @@ export function createEmbeddingEngine(options = {}) {
 
   async function initialize() {
     const { pipeline } = await loader();
-    const extractor = await pipeline('feature-extraction', model);
+    const extractor = await pipeline('feature-extraction', model, pipelineOptions);
     if (typeof extractor !== 'function') throw new TypeError('Expected a feature extractor');
     return extractor;
   }

@@ -20,6 +20,8 @@ The five Phase 1 MCP Core tools are `mem_memory`, `mem_note`, `mem_bootstrap`,
 
 ## Quick start
 
-Configure your MCP host to launch `npx multi-sub-memory` over stdio. Pass
-`--cwd <path>` to set the default workspace for calls. See the [MCP core
-guide](docs/wiki/MCP-Core.md) for tool actions and workspace selection.
+Run `npx -y multi-sub-memory setup` to initialize storage and register your MCP
+host, then run `npx -y multi-sub-memory doctor` to check the configuration.
+See [Setup and doctor](docs/wiki/Setup-and-Doctor.md) for scripted setup and
+diagnostics, and the [MCP core guide](docs/wiki/MCP-Core.md) for tool actions and
+workspace selection.

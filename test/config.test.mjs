@@ -1,10 +1,13 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { ConfigSchema, expandHome, loadConfig, parseJsonc, stripJsonc, writeConfig } from '../src/config.mjs';
 
+const defaultDreamer = {
+  enabled: false, mode: 'disabled', cadence: { mode: 'manual', minIntervalHours: 24, minNewMemories: 10 },
+};
 const defaultIndexers = {
   enabled: true, backgroundRefresh: false, refreshIntervalMs: 60_000,
   omp: {}, claude: {}, codex: {}, agy: {},
@@ -27,7 +30,7 @@ test('loads defaults and expands only the current home marker', (t) => {
     dbPath: path.join(homeDir, '.local', 'share', 'multi-sub-memory', 'memory.db'),
     embedding: { model: 'BAAI/bge-base-en-v1.5', enabled: true },
     bootstrap: { tokenBudget: 2500 },
-    dreamer: { enabled: false },
+    dreamer: defaultDreamer,
     indexers: defaultIndexers,
   });
   assert.equal(expandHome('~', homeDir), homeDir);
@@ -96,7 +99,7 @@ test('merges environment, project, user, and default config in precedence order'
     dbPath: path.join(homeDir, 'project.db'),
     embedding: { model: 'project-model', enabled: false },
     bootstrap: { tokenBudget: 1000 },
-    dreamer: { enabled: false },
+    dreamer: defaultDreamer,
     indexers: {
       ...defaultIndexers, enabled: false, backgroundRefresh: false, refreshIntervalMs: 30_000,
       omp: { sessionsDir: path.join(homeDir, 'user-omp') }, claude: { sessionsDir: path.join(homeDir, 'project-claude') },
@@ -116,7 +119,7 @@ test('merges environment, project, user, and default config in precedence order'
     dbPath: path.join(homeDir, 'env.db'),
     embedding: { model: 'env-model', enabled: false },
     bootstrap: { tokenBudget: 1200 },
-    dreamer: { enabled: false },
+    dreamer: defaultDreamer,
     indexers: {
       ...defaultIndexers, backgroundRefresh: false, refreshIntervalMs: 30_000,
       claude: { sessionsDir: path.join(homeDir, 'project-claude') },
@@ -174,6 +177,11 @@ test('rejects invalid values and unknown keys in individual config layers', (t) 
     { embedding: { unknown: true } },
     { unexpected: true },
     { dbPath: '' },
+    { dreamer: { http: { baseUrl: 'ftp://example.test' } } },
+    { dreamer: { http: { apiKey: 'fixture-key' } } },
+    { dreamer: { cli: { orchestrator: 'agy' } } },
+    { dreamer: { cadence: { minIntervalHours: 0 } } },
+    { dreamer: { cadence: { minNewMemories: -1 } } },
     { indexers: { enabled: 'true' } },
     { indexers: { backgroundRefresh: 1 } },
     { indexers: { refreshIntervalMs: 0 } },
@@ -315,6 +323,60 @@ test('rejects dangling config symlinks with directory-only targets', { skip: pro
   assert.equal(fs.lstatSync(slashLinkPath).isSymbolicLink(), true);
   assert.equal(fs.lstatSync(dotLinkPath).isSymbolicLink(), true);
   assert.deepEqual(fs.readdirSync(homeDir).sort(), ['config-dot.jsonc', 'config-slash.jsonc']);
+});
+
+test('loads legacy Dreamer enabled flags with new defaults', (t) => {
+  const options = configFixture(t);
+  const userConfigPath = path.join(options.homeDir, 'settings.jsonc');
+  for (const enabled of [false, true]) {
+    writeConfig(userConfigPath, { dreamer: { enabled } });
+    assert.deepEqual(loadConfig({ ...options, userConfigPath }).dreamer, { ...defaultDreamer, enabled });
+  }
+});
+
+test('merges nested Dreamer settings across layers before applying defaults and validating', (t) => {
+  const options = configFixture(t);
+  const userConfigPath = path.join(options.homeDir, 'settings.jsonc');
+  writeConfig(userConfigPath, { dreamer: {
+    enabled: true, mode: 'http', http: { baseUrl: 'https://example.test/v1', apiKeyEnv: 'FIXTURE_KEY' },
+    cli: { orchestrator: 'codex', args: ['exec'] }, cadence: { minIntervalHours: 3 },
+  } });
+  writeConfig(path.join(options.projectRoot, '.multi-sub-memory.jsonc'), { dreamer: {
+    http: { model: 'fixture-http' }, cli: { model: 'fixture-cli' }, cadence: { mode: 'auto' },
+  } });
+  assert.deepEqual(loadConfig({ ...options, userConfigPath }).dreamer, {
+    enabled: true, mode: 'http',
+    http: { baseUrl: 'https://example.test/v1', model: 'fixture-http', apiKeyEnv: 'FIXTURE_KEY' },
+    cli: { orchestrator: 'codex', args: ['exec'], model: 'fixture-cli' },
+    cadence: { mode: 'auto', minIntervalHours: 3, minNewMemories: 10 },
+  });
+});
+
+test('requires the selected backend for an enabled Dreamer in the effective config', (t) => {
+  const options = configFixture(t);
+  const userConfigPath = path.join(options.homeDir, 'settings.jsonc');
+  for (const mode of ['http', 'cli']) {
+    writeConfig(userConfigPath, { dreamer: { enabled: true, mode } });
+    assert.throws(() => loadConfig({ ...options, userConfigPath }), /Required for Dreamer/);
+    writeConfig(userConfigPath, { dreamer: { enabled: false, mode } });
+    assert.equal(loadConfig({ ...options, userConfigPath }).dreamer.mode, mode);
+  }
+});
+
+test('a project Dreamer URL change drops the inherited API key name', (t) => {
+  const options = configFixture(t);
+  const userConfigPath = path.join(options.homeDir, 'settings.jsonc');
+  const projectConfigPath = path.join(options.projectRoot, '.multi-sub-memory.jsonc');
+  const baseUrl = 'https://project.example.test/v1';
+  writeConfig(userConfigPath, { dreamer: { enabled: true, mode: 'http', http: {
+    baseUrl: 'https://user.example.test/v1', model: 'fixture', apiKeyEnv: 'USER_FIXTURE_KEY',
+  } } });
+  writeConfig(projectConfigPath, { dreamer: { http: { baseUrl } } });
+  assert.deepEqual(loadConfig({ ...options, userConfigPath }).dreamer.http, { baseUrl, model: 'fixture' });
+
+  writeConfig(projectConfigPath, { dreamer: { http: { baseUrl, apiKeyEnv: 'PROJECT_FIXTURE_KEY' } } });
+  assert.deepEqual(loadConfig({ ...options, userConfigPath }).dreamer.http,
+    { baseUrl, model: 'fixture', apiKeyEnv: 'PROJECT_FIXTURE_KEY' });
 });
 
 test('preserves the mode of an existing private POSIX config', { skip: process.platform === 'win32' }, (t) => {

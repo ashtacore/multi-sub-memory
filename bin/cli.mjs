@@ -3,7 +3,7 @@
 import { parseArgs } from 'node:util';
 import { INDEXER_ORCHESTRATORS } from '../src/indexers/types.mjs';
 
-const plannedCommands = ['setup', 'doctor', 'dream', 'ui', 'import'];
+const plannedCommands = ['dream', 'ui', 'import'];
 const indexOrchestrators = [...INDEXER_ORCHESTRATORS, 'all'];
 const args = process.argv.slice(2);
 const command = args[0] ?? 'serve';
@@ -65,8 +65,14 @@ async function indexTranscripts(args) {
 
 if (['--help', '-h', 'help'].includes(command)) {
   console.log('Usage: multi-sub-memory [command] [--cwd <path>]');
-  console.log(`Commands: serve, index, ${plannedCommands.join(', ')}`);
+  console.log(`Commands: serve, setup, doctor, index, ${plannedCommands.join(', ')}`);
   console.log(`Index usage: multi-sub-memory index [--orchestrator <${indexOrchestrators.join('|')}>] [--json] [--cwd <path>]`);
+} else if (command === 'setup') {
+  const { runSetup } = await import('../src/cli/setup.mjs');
+  process.exitCode = await runSetup(args.slice(1));
+} else if (command === 'doctor') {
+  const { runDoctor } = await import('../src/cli/doctor.mjs');
+  process.exitCode = await runDoctor(args.slice(1));
 } else if (command === 'serve' || command.startsWith('-')) {
   try {
     const options = parseServeArgs(command === 'serve' ? args.slice(1) : args);

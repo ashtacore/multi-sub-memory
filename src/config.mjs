@@ -6,11 +6,14 @@ import { z } from 'zod';
 import { INDEXER_ORCHESTRATORS } from './indexers/types.mjs';
 import { resolveProjectKey } from './project-id.mjs';
 
+export const DEFAULT_DB_PATH = '~/.local/share/multi-sub-memory/memory.db';
+export const DEFAULT_CONFIG_PATH = '~/.config/multi-sub-memory/config.jsonc';
+export const DEFAULT_EMBEDDING_ENABLED = true;
+
 const defaults = {
-  dbPath: '~/.local/share/multi-sub-memory/memory.db',
-  embedding: { model: 'BAAI/bge-base-en-v1.5', enabled: true },
+  dbPath: DEFAULT_DB_PATH,
+  embedding: { model: 'BAAI/bge-base-en-v1.5', enabled: DEFAULT_EMBEDDING_ENABLED },
   bootstrap: { tokenBudget: 2500 },
-  dreamer: { enabled: false },
   indexers: {
     enabled: true, backgroundRefresh: false, refreshIntervalMs: 60_000,
     omp: {}, claude: {}, codex: {}, agy: {},
@@ -19,7 +22,43 @@ const defaults = {
 
 const embeddingSchema = z.object({ model: z.string().min(1), enabled: z.boolean() }).strict();
 const bootstrapSchema = z.object({ tokenBudget: z.number().int().positive() }).strict();
-const dreamerSchema = z.object({ enabled: z.boolean() }).strict();
+const nonEmptyString = z.string().min(1);
+const httpSchema = z.strictObject({
+  baseUrl: z.url({ protocol: /^https?$/ }).refine((value) => {
+    const url = URL.parse(value);
+    return url !== null && !url.username && !url.password;
+  }, 'Use an API key environment variable instead of URL credentials'),
+  model: nonEmptyString,
+  apiKeyEnv: nonEmptyString.optional(),
+});
+const cliSchema = z.strictObject({
+  orchestrator: z.enum(['omp', 'claude', 'codex']),
+  command: nonEmptyString.optional(),
+  args: z.array(z.string()).optional(),
+  model: nonEmptyString.optional(),
+});
+const defaultCadence = { mode: 'manual', minIntervalHours: 24, minNewMemories: 10 };
+const cadenceFields = z.strictObject({
+  mode: z.enum(['manual', 'auto']),
+  minIntervalHours: z.number().positive(),
+  minNewMemories: z.number().int().nonnegative(),
+});
+const cadenceSchema = cadenceFields.extend({
+  mode: cadenceFields.shape.mode.default(defaultCadence.mode),
+  minIntervalHours: cadenceFields.shape.minIntervalHours.default(defaultCadence.minIntervalHours),
+  minNewMemories: cadenceFields.shape.minNewMemories.default(defaultCadence.minNewMemories),
+});
+const dreamerFields = z.strictObject({
+  enabled: z.boolean(),
+  mode: z.enum(['disabled', 'http', 'cli']),
+  http: httpSchema.optional(),
+  cli: cliSchema.optional(),
+});
+const dreamerSchema = dreamerFields.extend({
+  enabled: dreamerFields.shape.enabled.default(false),
+  mode: dreamerFields.shape.mode.default('disabled'),
+  cadence: cadenceSchema.prefault({}),
+});
 const adapterSchema = z.object({ sessionsDir: z.string().min(1).optional() }).strict();
 const indexersSchema = z.object({
   enabled: z.boolean(),
@@ -31,7 +70,7 @@ const indexersSchema = z.object({
   agy: adapterSchema,
 }).strict();
 
-export const ConfigSchema = z.object({
+const configFields = z.object({
   dbPath: z.string().min(1),
   embedding: embeddingSchema,
   bootstrap: bootstrapSchema,
@@ -39,10 +78,23 @@ export const ConfigSchema = z.object({
   indexers: indexersSchema,
 }).strict();
 
-const configLayerSchema = ConfigSchema.extend({
+export const ConfigSchema = configFields.superRefine(({ dreamer }, context) => {
+  const { enabled, mode } = dreamer;
+  if (enabled && mode !== 'disabled' && !dreamer[mode]) {
+    context.addIssue({
+      code: 'custom', path: ['dreamer', mode], message: `Required for Dreamer ${mode} mode`,
+    });
+  }
+});
+
+const configLayerSchema = configFields.extend({
   embedding: embeddingSchema.partial(),
   bootstrap: bootstrapSchema.partial(),
-  dreamer: dreamerSchema.partial(),
+  dreamer: dreamerFields.extend({
+    http: httpSchema.partial().optional(),
+    cli: cliSchema.partial().optional(),
+    cadence: cadenceFields.partial(),
+  }).partial(),
   indexers: indexersSchema.partial(),
 }).partial();
 
@@ -112,20 +164,26 @@ export function parseJsonc(text) {
   return JSON.parse(stripJsonc(text));
 }
 
-function readConfigLayer(configPath) {
-  let text;
+export function readConfigText(configPath) {
   try {
-    text = fs.readFileSync(configPath, 'utf8');
+    return fs.readFileSync(configPath, 'utf8');
   } catch (error) {
-    if (error.code === 'ENOENT') return {};
+    if (error.code === 'ENOENT') return undefined;
     throw error;
   }
+}
 
+export function parseConfigLayer(text, configPath) {
+  if (text === undefined) return {};
   try {
     return configLayerSchema.parse(parseJsonc(text));
   } catch (error) {
     throw new Error('Invalid config at ' + configPath + '\n' + error.message, { cause: error });
   }
+}
+
+export function readConfigLayer(configPath) {
+  return parseConfigLayer(readConfigText(configPath), configPath);
 }
 
 function environmentLayer(env) {
@@ -148,10 +206,12 @@ export function loadConfig(options = {}) {
   const { cwd, projectRoot, env = process.env, homeDir = os.homedir() } = options;
   const userConfigPath = options.userConfigPath ?? (env.MULTI_SUB_MEMORY_CONFIG
     ? expandHome(env.MULTI_SUB_MEMORY_CONFIG, homeDir)
-    : path.join(homeDir, '.config', 'multi-sub-memory', 'config.jsonc'));
+    : expandHome(DEFAULT_CONFIG_PATH, homeDir));
   const projectConfigPath = options.projectConfigPath
     ?? path.join(projectRoot ?? resolveProjectKey(cwd).projectRoot, '.multi-sub-memory.jsonc');
-  const user = readConfigLayer(userConfigPath);
+  const user = options.userConfigData === undefined
+    ? readConfigLayer(userConfigPath)
+    : configLayerSchema.parse(options.userConfigData);
   const project = readConfigLayer(projectConfigPath);
   const overrides = environmentLayer(env);
   const indexers = { ...defaults.indexers, ...user.indexers, ...project.indexers };
@@ -168,81 +228,96 @@ export function loadConfig(options = {}) {
     dbPath: overrides.dbPath ?? project.dbPath ?? user.dbPath ?? defaults.dbPath,
     embedding: { ...defaults.embedding, ...user.embedding, ...project.embedding, ...overrides.embedding },
     bootstrap: { ...defaults.bootstrap, ...user.bootstrap, ...project.bootstrap },
-    dreamer: { ...defaults.dreamer, ...user.dreamer, ...project.dreamer },
+    dreamer: mergeDreamer(user.dreamer, project.dreamer),
     indexers,
   });
   config.dbPath = expandHome(config.dbPath, homeDir);
   return config;
 }
 
-function resolveConfigDestination(configPath) {
-  if (!fs.lstatSync(configPath, { throwIfNoEntry: false })?.isSymbolicLink()) return configPath;
-
-  try {
-    return fs.realpathSync.native(configPath);
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-
-  if (process.platform === 'win32') {
-    // Win32 collapses `..` before following any symlinks in the target path.
-    let destination = configPath;
-    for (let hops = 0; hops < 40; hops++) {
-      const directory = fs.realpathSync.native(path.dirname(destination));
-      destination = path.resolve(directory, fs.readlinkSync(destination));
-      if (!fs.lstatSync(destination, { throwIfNoEntry: false })?.isSymbolicLink()) {
-        return destination;
-      }
-    }
-    throw new Error('Too many symbolic links resolving config path ' + configPath);
-  }
-
-  // POSIX follows each symlink before interpreting any later `..` components.
-  const remaining = [path.basename(configPath)];
-  let destination = fs.realpathSync.native(path.dirname(configPath));
+export function resolveConfigDestination(configPath) {
+  let absolutePath = configPath;
+  if (process.platform === 'win32') absolutePath = path.resolve(configPath);
+  else if (!path.isAbsolute(configPath)) absolutePath = process.cwd() + path.sep + configPath;
   let hops = 0;
-  while (remaining.length > 0) {
-    const component = remaining.shift();
-    if (component === '.') {
-      if (remaining.length === 0) {
-        throw new Error('Config symlink target must not be a directory path: ' + configPath);
-      }
-      continue;
-    }
-    if (component === '..') {
-      if (!fs.lstatSync(destination, { throwIfNoEntry: false })?.isDirectory()) {
-        throw new Error('Cannot traverse .. from non-existent or non-directory path ' + destination);
-      }
-      destination = path.dirname(destination);
-      continue;
-    }
-
-    const candidate = path.join(destination, component);
-    if (!fs.lstatSync(candidate, { throwIfNoEntry: false })?.isSymbolicLink()) {
-      destination = candidate;
-      continue;
-    }
-
+  function followLink(link) {
     if (++hops > 40) {
       throw new Error('Too many symbolic links resolving config path ' + configPath);
     }
-    const target = fs.readlinkSync(candidate);
-    if (remaining.length === 0 && target.endsWith('/')) {
-      throw new Error('Config symlink target must not be a directory path: ' + target);
-    }
-    const { root } = path.parse(target);
-    if (root) destination = path.resolve(destination, root);
-    remaining.unshift(...target.slice(root.length).split('/').filter(Boolean));
+    return fs.readlinkSync(link);
   }
-  return destination;
+
+  // Canonicalize the deepest existing ancestor and retain the missing tail.
+  function resolve(file) {
+    const parent = path.dirname(file);
+    try {
+      return fs.realpathSync.native(file);
+    } catch (error) {
+      if (error.code !== 'ENOENT' || file === parent) throw error;
+    }
+    const directory = resolve(parent);
+    const candidate = path.join(directory, path.basename(file));
+    if (!fs.lstatSync(candidate, { throwIfNoEntry: false })?.isSymbolicLink()) return candidate;
+    // Win32 collapses `..` before following any symlinks in the target path.
+    if (process.platform === 'win32') return resolve(path.resolve(directory, followLink(candidate)));
+    return resolvePosixLink(directory, path.basename(file), file === absolutePath);
+  }
+
+  // POSIX follows each symlink before interpreting any later `..` components.
+  function resolvePosixLink(destination, basename, requireFileTarget) {
+    const remaining = [basename];
+    while (remaining.length > 0) {
+      const component = remaining.shift();
+      if (component === '.') {
+        if (requireFileTarget && remaining.length === 0) {
+          throw new Error('Config symlink target must not be a directory path: ' + configPath);
+        }
+        continue;
+      }
+      if (component === '..') {
+        if (!fs.lstatSync(destination, { throwIfNoEntry: false })?.isDirectory()) {
+          throw new Error('Cannot traverse .. from non-existent or non-directory path ' + destination);
+        }
+        destination = path.dirname(destination);
+        continue;
+      }
+
+      const candidate = path.join(destination, component);
+      if (!fs.lstatSync(candidate, { throwIfNoEntry: false })?.isSymbolicLink()) {
+        destination = candidate;
+        continue;
+      }
+
+      const target = followLink(candidate);
+      if (requireFileTarget && remaining.length === 0 && target.endsWith('/')) {
+        throw new Error('Config symlink target must not be a directory path: ' + target);
+      }
+      const { root } = path.parse(target);
+      if (root) destination = root;
+      remaining.unshift(...target.slice(root.length).split('/').filter(Boolean));
+    }
+    return destination;
+  }
+
+  return resolve(absolutePath);
+}
+
+function mergeDreamer(user = {}, project = {}) {
+  const dreamer = { ...user, ...project };
+  for (const key of ['http', 'cli', 'cadence']) {
+    if (user[key] || project[key]) dreamer[key] = { ...user[key], ...project[key] };
+  }
+  if (project.http?.baseUrl !== undefined && project.http.baseUrl !== user.http?.baseUrl
+    && project.http.apiKeyEnv === undefined) {
+    delete dreamer.http.apiKeyEnv;
+  }
+  return dreamer;
 }
 
 export function writeConfig(configPath, configData, options = {}) {
   const config = configLayerSchema.parse(configData);
   const resolvedPath = expandHome(configPath, options.homeDir);
   const destination = resolveConfigDestination(resolvedPath);
-  const directory = path.dirname(destination);
-  fs.mkdirSync(directory, { recursive: true });
 
   let existingMode;
   try {
@@ -252,18 +327,22 @@ export function writeConfig(configPath, configData, options = {}) {
     if (error.code !== 'ENOENT') throw error;
   }
 
+  writeTextAtomically(destination, JSON.stringify(config, null, 2) + '\n', options.mode ?? existingMode);
+}
+
+export function writeTextAtomically(resolvedPath, text, mode = 0o600) {
+  const directory = path.dirname(resolvedPath);
+  fs.mkdirSync(directory, { recursive: true });
   const tempPath = path.join(directory, '.multi-sub-memory-' + randomBytes(6).toString('hex') + '.tmp');
   const tempFile = fs.openSync(tempPath, 'wx', 0o600);
   try {
     try {
-      fs.writeFileSync(tempFile, JSON.stringify(config, null, 2) + '\n', 'utf8');
-      if (process.platform !== 'win32' && existingMode !== undefined) {
-        fs.fchmodSync(tempFile, existingMode);
-      }
+      fs.writeFileSync(tempFile, text, 'utf8');
+      if (process.platform !== 'win32') fs.fchmodSync(tempFile, mode);
     } finally {
       fs.closeSync(tempFile);
     }
-    fs.renameSync(tempPath, destination);
+    fs.renameSync(tempPath, resolvedPath);
   } catch (error) {
     try {
       fs.unlinkSync(tempPath);
