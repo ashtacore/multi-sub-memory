@@ -56,16 +56,14 @@ set. Bootstrap returns the summary as plain text.
 
 ## Access tracking
 
-New memories and notes start with their creation time as `last_accessed_at`
-and an `access_count` of zero. Deduplicated memory writes retain the existing
-access metadata, including when they reactivate a memory.
-
-Successful `mem_memory` get and list actions, `mem_note` read actions,
-`mem_search`, and `mem_bootstrap` increment the count once per distinct
-memory or note returned. Search counts the final ranked hits. Bootstrap
-counts the items that fit the budget and appear in the summary. Each access
-advances the timestamp to the later of its current value and the access time.
-Startup hooks and dashboard views leave access metadata untouched.
+New MCP memories and notes start with their creation time as
+`last_accessed_at` and an `access_count` of zero. A successful MCP call
+increments the count once per distinct existing memory or note it returns.
+This includes deduplicated writes, reactivations, updates, archives, and
+dismissals. Search counts the final ranked hits. Bootstrap counts the items
+that fit the budget and appear in the summary. Each access advances the
+timestamp to the later of its current value and the access time. Startup
+hooks and dashboard views leave access metadata untouched.
 
 Access metadata is read-only in write and update inputs. Recording an access
 preserves `updated_at`, so it leaves edit revisions and update-time sorting
@@ -169,8 +167,9 @@ its metadata and an ellipsis fit.
   only if inference succeeds and the stored text still matches. See [storage and embeddings](Storage-and-Embeddings.md).
 - Reserve stdout for MCP protocol messages. Send process diagnostics to stderr.
 - Select and count memory get and list results and note read results in one
-  write transaction. If a row selected by search or bootstrap disappears
-  before counting, roll back all access updates for that call and return a
-  retryable tool error.
+  write transaction. Record access for mutations that return an existing
+  record in the same transaction as the edit. If a row selected by search or
+  bootstrap disappears before counting, roll back all access updates for that
+  call and return a retryable tool error.
 - Keep host startup hooks read-only and fail-open. The MCP server requires no
   host message mutations or pre-request gates.

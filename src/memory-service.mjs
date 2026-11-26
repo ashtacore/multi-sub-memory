@@ -159,6 +159,12 @@ export function readWithAccess(db, table, select) {
   });
 }
 
+function trackMutationAccess(db, table, row, trackAccess) {
+  if (!trackAccess) return row;
+  const stats = updateAccess(db, { [table]: [row.id] })[table].get(row.id);
+  return { ...row, ...stats };
+}
+
 export async function storeEmbedding(db, memory, engine, fallbackModel) {
   if (!engine) return 0;
   try {
@@ -222,7 +228,8 @@ export async function writeMemory(db, input, context = {}) {
       now, existing.id,
     );
     if (updated.content !== existing.content) invalidateEmbedding(db, existing.id);
-    return { memory: formatMemory(updated), deduplicated: true, reactivated };
+    const memory = formatMemory(trackMutationAccess(db, 'memories', updated, context.trackAccess));
+    return { memory, deduplicated: true, reactivated };
   });
   if (!result.deduplicated || result.reactivated) {
     void storeEmbedding(db, result.memory, context.embeddingEngine);
@@ -291,7 +298,8 @@ export async function updateMemory(db, input, context = {}) {
         Date.now(), input.id,
       );
       if (changedContent) invalidateEmbedding(db, input.id);
-      return { memory: context.rawRow ? row : formatMemory(row), changedContent };
+      const accessed = trackMutationAccess(db, 'memories', row, context.trackAccess);
+      return { memory: context.rawRow ? accessed : formatMemory(accessed), changedContent };
     });
   } catch (error) {
     if (error.errcode === 2067 || error.code === 'SQLITE_CONSTRAINT_UNIQUE'
@@ -304,7 +312,7 @@ export async function updateMemory(db, input, context = {}) {
   return result.memory;
 }
 
-export function archiveMemory(db, input) {
+export function archiveMemory(db, input, { trackAccess } = {}) {
   const supersededBy = input.superseded_by ?? null;
   return inWriteTransaction(db, () => {
     if (supersededBy !== null) {
@@ -315,7 +323,7 @@ export function archiveMemory(db, input) {
     const row = db.prepare(`
       UPDATE memories SET status = ?, superseded_by = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ? RETURNING *
     `).get(supersededBy === null ? 'archived' : 'superseded', supersededBy, Date.now(), input.id);
-    return formatMemory(requireRow(row, 'Memory', input.id));
+    return formatMemory(trackMutationAccess(db, 'memories', requireRow(row, 'Memory', input.id), trackAccess));
   });
 }
 
@@ -406,7 +414,7 @@ export function readNotes(db, input = {}, context = {}) {
   });
 }
 
-export function updateNote(db, input, { expectedUpdatedAt } = {}) {
+export function updateNote(db, input, { expectedUpdatedAt, trackAccess } = {}) {
   rejectAccessFields(input);
   const content = input.content === undefined ? null : requireContent(input.content);
   function update() {
@@ -422,11 +430,11 @@ export function updateNote(db, input, { expectedUpdatedAt } = {}) {
       content, input.status ?? null, Number(input.surface_condition !== undefined),
       input.surface_condition ?? null, Date.now(), input.id,
     );
-    return requireRow(row, 'Note', input.id);
+    return trackMutationAccess(db, 'notes', requireRow(row, 'Note', input.id), trackAccess);
   }
-  return expectedUpdatedAt === undefined ? update() : inWriteTransaction(db, update);
+  return trackAccess || expectedUpdatedAt !== undefined ? inWriteTransaction(db, update) : update();
 }
 
-export function dismissNote(db, id) {
-  return updateNote(db, { id, status: 'dismissed' });
+export function dismissNote(db, id, options) {
+  return updateNote(db, { id, status: 'dismissed' }, options);
 }

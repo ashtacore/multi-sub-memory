@@ -108,7 +108,7 @@ test('MCP advertises the five core tools and validates action inputs', async (t)
   await expectError('mem_bootstrap', { token_budget: 0 }, /token_budget/);
 });
 
-test('MCP access metadata starts at creation and tracks only returned get, list and note reads', async (t) => {
+test('MCP read actions track only the records they return', async (t) => {
   const { db, memory, note, expectError } = await fixture(t);
   const started = Date.now();
   const saved = (await memory('write', { content: 'First memory', importance: 5 })).memory;
@@ -137,6 +137,61 @@ test('MCP access metadata starts at creation and tracks only returned get, list 
   assert.equal(totalChanges.get().total - before, 3, 'the access writes leave FTS shadow tables untouched');
   assert.equal(db.prepare('SELECT access_count FROM memories WHERE id = ?').get(omitted.id).access_count, 0);
   assert.equal(db.prepare('SELECT access_count FROM notes WHERE id = ?').get(active.id).access_count, 0);
+});
+
+test('MCP mutations count existing records and initialize new records at zero', async (t) => {
+  const { db, memory, note } = await fixture(t);
+  const content = 'Original memory';
+  const { memory: saved } = await memory('write', { content });
+  const handoff = await note('write', { content: 'Original note' });
+
+  async function assertMutationAccess(table, created, mutate) {
+    assert.equal(created.access_count, 0);
+    assert.equal(created.last_accessed_at, created.created_at);
+    const futureRevision = Date.now() + 60_000;
+    db.prepare(`UPDATE ${table} SET updated_at = ? WHERE id = ?`).run(futureRevision, created.id);
+    const resetAccessTime = db.prepare(`UPDATE ${table} SET last_accessed_at = NULL WHERE id = ?`);
+    const select = db.prepare(`SELECT access_count, last_accessed_at, updated_at FROM ${table} WHERE id = ?`);
+    for (const [index, run] of mutate.entries()) {
+      resetAccessTime.run(created.id);
+      const started = Date.now();
+      const row = await run();
+      assert.equal(row.id, created.id);
+      assert.equal(row.access_count, index + 1);
+      assert.ok(row.last_accessed_at >= started && row.last_accessed_at <= Date.now());
+      assert.equal(row.updated_at, futureRevision + index + 1);
+      assert.deepEqual({ ...select.get(created.id) }, {
+        access_count: row.access_count, last_accessed_at: row.last_accessed_at, updated_at: row.updated_at,
+      });
+    }
+  }
+
+  await assertMutationAccess('memories', saved, [
+    async () => (await memory('write', { content })).memory,
+    () => memory('update', { id: saved.id, importance: 4 }),
+    () => memory('archive', { id: saved.id }),
+    async () => (await memory('write', { content })).memory,
+  ]);
+  await assertMutationAccess('notes', handoff, [
+    () => note('update', { id: handoff.id, content: 'Updated note' }),
+    () => note('dismiss', { id: handoff.id }),
+  ]);
+});
+
+test('MCP rolls back record edits when mutation access tracking fails', async (t) => {
+  const { db, memory, note, expectError } = await fixture(t);
+  const { memory: saved } = await memory('write', { content: 'Original memory' });
+  const handoff = await note('write', { content: 'Original note' });
+  for (const [table, tool, record] of [['memories', 'mem_memory', saved], ['notes', 'mem_note', handoff]]) {
+    db.exec(`
+      CREATE TRIGGER block_${table}_access BEFORE UPDATE OF access_count ON ${table}
+      BEGIN SELECT RAISE(ABORT, 'fixture access write failed'); END;
+    `);
+    const select = db.prepare(`SELECT * FROM ${table} WHERE id = ?`);
+    const before = select.get(record.id);
+    await expectError(tool, { action: 'update', id: record.id, content: 'Changed content' }, /fixture access write failed/);
+    assert.deepEqual(select.get(record.id), before);
+  }
 });
 
 test('access metadata is read-only in MCP and service updates', async (t) => {
@@ -603,9 +658,9 @@ test('bootstrap renders deterministic sections and enforces a whole-item token b
   const median = elapsed.sort((a, b) => a - b)[1];
   assert.ok(median < 50, `Median warm bootstrap took ${median.toFixed(1)} ms`);
   assert.deepEqual(db.prepare('SELECT access_count FROM memories ORDER BY content').all().map(({ access_count }) => access_count),
-    [0, 3, 5, 5]);
+    [1, 3, 5, 5]);
   assert.deepEqual(db.prepare('SELECT access_count FROM notes ORDER BY content').all().map(({ access_count }) => access_count),
-    [0, 2, 4]);
+    [1, 2, 4]);
 });
 
 test('bootstrap accepts a budget that fits a complete short note', async (t) => {

@@ -46,7 +46,7 @@ function toolHandler(run, format = JSON.stringify) {
 
 export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
   const server = new McpServer({ name: 'multi-sub-memory', version: '0.1.0' });
-  const context = { config, embeddingEngine, defaultCwd };
+  const context = { config, embeddingEngine, defaultCwd, trackAccess: true };
 
   server.registerTool('mem_memory', {
     description: 'Write, update, archive, get, or list durable project and global memories. Write requires content. Update, archive, and get require id.',
@@ -71,7 +71,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
         return updateMemory(db, input, context);
       case 'archive':
         requireId(input);
-        return archiveMemory(db, input);
+        return archiveMemory(db, input, context);
       case 'get': {
         const id = requireId(input);
         return readWithAccess(db, 'memories', () => [getMemory(db, id)])[0];
@@ -99,9 +99,9 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       case 'update':
         requireId(input);
         if (input.status === 'all') throw new Error('Note status cannot be all for update');
-        return updateNote(db, input);
+        return updateNote(db, input, context);
       case 'dismiss':
-        return dismissNote(db, requireId(input));
+        return dismissNote(db, requireId(input), context);
     }
   }));
 
