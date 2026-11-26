@@ -12,6 +12,21 @@ The server listens on `127.0.0.1:3847` by default and prints its URL. Use
 `--port 0` for an ephemeral port and `--open` to launch that URL in the
 default browser. Stop the server with Ctrl+C.
 
+## Desktop app
+
+The standalone Electron app provides the same dashboard without a separate
+Node installation. It starts on a temporary loopback port in global context,
+so the launch directory does not pick a repository or its database settings.
+On Windows, use the NSIS installer or portable executable. On Linux, use the
+AppImage. The npm browser dashboard is installed independently.
+
+From the repository root, install the root and desktop dependencies with
+`npm ci` and `npm --prefix desktop ci`. Run `npm --prefix desktop start` to
+open the app from source. Build on Windows with
+`npm --prefix desktop run dist -- --win` or on Linux with
+`npm --prefix desktop run dist -- --linux`. The builds land in `desktop/dist/`.
+[Desktop build guide](../../desktop/README.md)
+
 ## Views
 
 - The project selector and overview show memory and note status counts,
@@ -30,8 +45,9 @@ default browser. Stop the server with Ctrl+C.
   or update time in either direction. Search results use relevance and
   clearing the query restores the previous list sort. Use **Project / Scope**
   in the editor to move a memory to another project, promote it to Global,
-  or move it from Global into a project. Registered projects remain
-  available even when empty. Edit, archive, restore, and permanently
+  or move it from Global into a project. Registered and YAML-configured
+  projects remain available as destinations even when empty or offline.
+  Edit, archive, restore, and permanently
   delete memories, with confirmation before deletion. The editor shows
   Superseded as the current status of superseded memories, which can be
   edited, archived, or restored.
@@ -55,19 +71,45 @@ default browser. Stop the server with Ctrl+C.
   history across projects. Sort using the **Started**, **Finished**, or
   **Run time** column headers and filter from the **Status** header.
   Narrow displays offer the same controls above the run history.
-  Select the launch workspace to start a run or
-  request a dry run. Launch the dashboard with `--cwd` to run Dreamer for
-  another workspace. The dashboard reloads the global YAML file when displaying
-  Dreamer status and before executing a run. If the runner configuration changes
-  between requests, the run is rejected and the dashboard refreshes the panel.
-  A Git workspace is required to run Dreamer. Restart the dashboard after a
-  change to the launch workspace's repository identity.
+  Select a project and use **Trigger Dream** or **Dry Run**. When several
+  checkout directories are available, choose one in **Checkout**. A project
+  without an existing checkout shows a hint in place of enabled run controls.
+  The dashboard reloads the global YAML file when displaying Dreamer status
+  and before executing a run. If the runner configuration changes between
+  requests, the run is rejected and the panel refreshes.
   Both run modes use the restricted CLI presets and an empty temporary working
   directory for CLI runners. A dry run can send data to the authorized runner
   and records the proposal without changing memories, comments, or tags.
   The result shows proposed tag changes and the source IDs and summary for
   proposed comment compactions.
   [Dreamer configuration and trust](Dreamer.md)
+
+## Dreamer checkouts
+
+The dashboard finds checkout roots from current and past project writes, indexed
+transcripts, the browser dashboard’s launch workspace, and any paths listed
+under the repository key in the user YAML file. Use absolute or home-relative
+paths. The server uses Git to verify the identity of each checkout and loads
+the selected repository's effective configuration. Both run modes use the
+database opened by the dashboard at launch.
+
+```yaml
+projects:
+  github.com/example/repo:
+    checkouts:
+      - ~/src/repo
+      - ~/worktrees/repo-review
+```
+
+Successful manual runs, including dry runs, record checkout usage in
+`<database>.dreamer-checkouts.json` beside the active SQLite database. The
+dashboard prefers the most recently used checkout that still exists and belongs
+to the repository. With no usable run history, it tries the current registry
+root, configured paths in YAML order, roots observed in project writes from
+most to least recent, other remembered roots, recently indexed paths, and
+the launch workspace. If checkout history cannot be saved,
+the dashboard returns the completed result with a warning. Live runs use
+the selected repository's embedding settings.
 
 ## HTTP API
 
@@ -77,7 +119,7 @@ Use `global` for global rows alone.
 
 | Method and path | Parameters and effects |
 |---|---|
-| `GET /api/overview` | Project and global counts, totals, default project key, embedding status, and database health |
+| `GET /api/overview` | Project and global counts, configured project keys, totals, default project key, embedding status, and database health |
 | `GET /api/memories` | `project_key`, `scope` (project, global, or all), `category`, `status` (active by default, archived, superseded, or all), `q`, `tag`, `limit`, `sort` (`importance`, `created_at`, or `updated_at`), and `order` (`asc` or `desc`). Filters constrain search before relevance ranking. Rows include sorted `tags`, `project_name`, and a nullable `project_root`. |
 | `GET /api/tags` | Requires `project_key` for a single repository or `global`. Returns `tags` with each name, description, and assignment count across all memory statuses. |
 | `PATCH /api/memories/:id` | Any of `content`, `category`, `importance` (1–5), `status` (active or archived), `scope` (project or global), `project_key` (a known project key or `global`), or `tags` (array replacing assignments), plus optional `expected_updated_at`. Omit `status` to keep the existing status. An explicit superseded status or unknown destination returns 400. A duplicate in the destination project and scope returns 409. |
@@ -89,8 +131,8 @@ Use `global` for global rows alone.
 | `POST /api/notes/:id/comments` | Appends a progress comment with nonblank `body` and optional topic `expected_updated_at`. Returns `note` and `comment`. |
 | `PATCH /api/notes/:id/comments/:commentId` | Updates a progress comment's `body` with optional comment `expected_updated_at`. Editing a transition comment returns 400. |
 | `DELETE /api/notes/:id/comments/:commentId` | Removes a progress comment and advances the topic revision. Accepts an optional comment `expected_updated_at` query parameter. Deleting a transition comment returns 400. |
-| `GET /api/dreamer` | Active leases, fresh sanitized configuration with `config_fingerprint` and runner authorization, `runnable_project_key` for the launch workspace, and up to 50 runs. History supports `project_key`, `status`, `sort` (`started_at`, `finished_at`, or `duration`), and `order` (`asc` or `desc`). |
-| `POST /api/dreamer/run` | Requires the launch workspace's `project_key`. Accepts optional boolean `dry_run` and string `expected_config_fingerprint`. A fingerprint mismatch returns 409 before contacting the runner. Returns the run result or a skip reason. |
+| `GET /api/dreamer` | Active leases, fresh sanitized configuration with `config_fingerprint` and runner authorization, the selected project’s verified `checkouts` in default-first order, its `runnable_project_key` when a checkout is available, and up to 50 runs. History supports `project_key`, `status`, `sort` (`started_at`, `finished_at`, or `duration`), and `order` (`asc` or `desc`). |
+| `POST /api/dreamer/run` | Requires a repository `project_key`. Accepts an optional absolute `checkout` path, boolean `dry_run`, and string `expected_config_fingerprint`. Omit `checkout` to use the first verified checkout. An invalid supplied path returns 400. A fingerprint mismatch returns 409 before contacting the runner. Returns the run result or a skip reason. |
 
 Record PATCH routes use the supplied fields to update the stored row.
 A project memory keeps its existing assignment when a PATCH specifies

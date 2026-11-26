@@ -79,7 +79,7 @@ function projectKeyFor(scope, input, context) {
   return projectIdentityFor(scope, input, context).projectKey;
 }
 
-function recordProject(db, projectKey, projectRoot, now) {
+export function recordProject(db, projectKey, projectRoot, now) {
   if (!projectKey || projectKey === GLOBAL_PROJECT_KEY || !projectRoot) return;
   db.prepare(`
     INSERT INTO projects (project_key, project_root, updated_at)

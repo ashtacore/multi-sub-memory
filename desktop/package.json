@@ -1,0 +1,33 @@
+{
+  "name": "multi-sub-memory-desktop",
+  "productName": "Multi-Sub Memory",
+  "version": "0.1.0",
+  "description": "Desktop dashboard for multi-sub-memory",
+  "author": "multi-sub-memory contributors",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "predist": "node stage.mjs",
+    "dist": "electron-builder --publish never"
+  },
+  "devDependencies": {
+    "electron": "45.5.0",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "io.github.ashtacore.multi-sub-memory",
+    "files": ["main.mjs", "preload.mjs"],
+    "extraResources": [
+      { "from": ".dashboard", "to": "dashboard", "filter": ["src/**/*", "LICENSE"] },
+      { "from": ".dashboard/node_modules", "to": "dashboard/node_modules" }
+    ],
+    "win": { "target": ["nsis", "portable"] },
+    "linux": { "target": ["AppImage"], "category": "Utility" },
+    "nsis": { "artifactName": "multi-sub-memory-desktop-${version}-${arch}-setup.${ext}" },
+    "portable": { "artifactName": "multi-sub-memory-desktop-${version}-${arch}-portable.${ext}" },
+    "appImage": { "artifactName": "multi-sub-memory-desktop-${version}-${arch}.${ext}" }
+  }
+}

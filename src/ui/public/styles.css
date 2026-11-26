@@ -128,6 +128,8 @@ pre {
 .dream-summary h3 { margin-bottom: .55rem; }
 .leases { margin-top: .55rem; padding-left: 1.2rem; }
 .dream-controls, .history-heading { margin-block: .95rem .65rem; }
+.dream-checkout { max-width: 100%; min-width: 0; }
+.dream-checkout select { min-width: 0; text-overflow: ellipsis; }
 .dream-controls p { margin-top: .45rem; }
 #dream-history { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; table-layout: auto; font-size: .85rem; }

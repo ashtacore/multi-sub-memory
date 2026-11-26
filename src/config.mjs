@@ -115,6 +115,7 @@ const configLayerSchema = configFields.extend({
 }).partial();
 
 const projectLayerSchema = configLayerSchema.extend({
+  checkouts: z.array(nonEmptyString).optional(),
   forkMode: z.enum(['origin', 'upstream']).optional(),
 });
 const fileSchema = configLayerSchema.extend({
@@ -271,7 +272,7 @@ function resolveEffectiveConfig(options, includeProject) {
   const user = options.userConfigData === undefined
     ? readConfigLayer(resolveUserConfigPath(options))
     : fileSchema.parse(options.userConfigData);
-  const project = includeProject || requireProject || Object.keys(user.projects ?? {}).length
+  const project = cwd !== null && (includeProject || requireProject || Object.keys(user.projects ?? {}).length)
     ? resolveProjectKey(cwd, { projects: user.projects, optional: !requireProject, timeoutMs })
     : undefined;
   const layer = user.projects?.[project?.projectKey] ?? {};

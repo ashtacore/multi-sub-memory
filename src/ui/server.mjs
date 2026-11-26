@@ -112,10 +112,11 @@ export function allowedLoopbackGuards(port) {
 
 export async function startDashboardServer(options = {}) {
   const { port = DEFAULT_UI_PORT, cwd: directory, userConfigPath, homeDir, env = process.env } = options;
-  const cwd = path.resolve(directory ?? process.cwd());
+  const globalMode = options.globalMode === true || directory === null;
+  const cwd = globalMode ? null : path.resolve(directory ?? process.cwd());
   const configOptions = { userConfigPath, homeDir, env };
   const { config: baseConfig, project } = options.config
-    ? { config: options.config, project: resolveConfigProject(cwd, options.config, { optional: true }) }
+    ? { config: options.config, project: globalMode ? undefined : resolveConfigProject(cwd, options.config, { optional: true }) }
     : loadWorkspaceConfig({ cwd, ...configOptions });
   const config = options.dbPath === undefined
     ? baseConfig : { ...baseConfig, dbPath: expandHome(options.dbPath, homeDir) };

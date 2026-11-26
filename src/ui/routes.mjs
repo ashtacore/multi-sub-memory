@@ -1,7 +1,11 @@
 import { createHmac, randomBytes } from 'node:crypto';
-import { loadWorkspaceConfig } from '../config.mjs';
+import { statSync } from 'node:fs';
+import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { expandHome, loadWorkspaceConfig, readConfigLayer, resolveUserConfigPath } from '../config.mjs';
 import { runDream } from '../dreamer/engine.mjs';
 import { createDreamRedactor, sanitizeDreamError } from '../dreamer/runners.mjs';
+import { createEmbeddingEngine } from '../embeddings.mjs';
 import {
   GLOBAL_PROJECT_KEY, MAX_LIST_LIMIT, MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
   MissingProjectDestinationError,
@@ -10,8 +14,9 @@ import {
   memoryTags, normalizeTag, TagValidationError,
   updateMemory, updateNote, updateNoteComment,
 } from '../memory-service.mjs';
-import { formatProjectLabels } from '../project-id.mjs';
+import { formatProjectLabels, normalizePath, resolveProjectKey } from '../project-id.mjs';
 import { hybridSearch } from '../search.mjs';
+import { createCheckoutState } from './checkout-state.mjs';
 
 const all = 'all';
 const globalKey = GLOBAL_PROJECT_KEY;
@@ -124,7 +129,8 @@ function knownProjectRoots(db, defaultProjectKey, defaultProjectRoot) {
   return roots;
 }
 
-function knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, extraKeys = []) {
+function knownProjectCatalog(context, configuredProjects = readConfiguredProjects(context)) {
+  const { db, defaultProjectKey, defaultProjectRoot } = context;
   const roots = knownProjectRoots(db, defaultProjectKey, defaultProjectRoot);
   const keys = new Set(roots.keys());
   if (defaultProjectKey && defaultProjectKey !== globalKey) keys.add(defaultProjectKey);
@@ -133,12 +139,12 @@ function knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, extraKey
       if (project_key && project_key !== globalKey) keys.add(project_key);
     }
   }
-  for (const key of extraKeys) {
-    if (key && key !== globalKey) keys.add(key);
+  for (const key of Object.keys(configuredProjects)) {
+    if (key !== globalKey && key !== all) keys.add(key);
   }
   const labels = formatProjectLabels([...keys].map((projectKey) => ({
     projectKey,
-    projectRoot: roots.get(projectKey),
+    projectRoot: roots.get(projectKey) ?? configuredProjects[projectKey]?.checkouts?.[0],
   })));
   return { roots, labels };
 }
@@ -154,7 +160,60 @@ function attachMemoryProject(row, { roots, labels }) {
   };
 }
 
-function overview({ db, defaultProjectKey, defaultProjectRoot, config, embeddingEngine }) {
+function userSettings(context) {
+  return readConfigLayer(resolveUserConfigPath(context.configOptions));
+}
+
+function readConfiguredProjects(context) {
+  try {
+    return userSettings(context).projects ?? {};
+  } catch {
+    // Database-backed projects remain usable while the settings file is being repaired.
+    return {};
+  }
+}
+
+function projectCheckouts(context, settings, projectKey) {
+  const { db, defaultProjectKey, defaultProjectRoot, configOptions, checkoutState } = context;
+  const remembered = checkoutState.get(projectKey);
+  const registered = db.prepare('SELECT project_root FROM projects WHERE project_key = ?').get(projectKey);
+  const observed = db.prepare(`
+    SELECT project_root FROM project_checkouts WHERE project_key = ?
+    ORDER BY last_used_order DESC, project_root
+  `).all(projectKey);
+  const transcripts = db.prepare(`
+    SELECT project_root FROM transcript_files WHERE project_key = ? AND project_root IS NOT NULL
+    GROUP BY project_root ORDER BY MAX(last_indexed_at) DESC
+  `).all(projectKey);
+  const candidates = new Set([
+    ...remembered.recent,
+    registered?.project_root,
+    ...(settings.projects?.[projectKey]?.checkouts ?? []),
+    ...observed.map(({ project_root }) => project_root),
+    ...remembered.checkouts,
+    ...transcripts.map(({ project_root }) => project_root),
+    projectKey === defaultProjectKey ? defaultProjectRoot : null,
+  ]);
+  const checkouts = new Set();
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const directory = expandHome(candidate, configOptions.homeDir);
+    if (!path.isAbsolute(directory)) continue;
+    try {
+      if (!statSync(directory, { throwIfNoEntry: false })?.isDirectory()) continue;
+      const root = normalizePath(directory);
+      if (checkouts.has(root)) continue;
+      const project = resolveProjectKey(root, { projects: settings.projects, optional: true, cache: false });
+      if (project?.projectKey === projectKey && project.projectRoot === root) checkouts.add(root);
+    } catch {
+      // An inaccessible or removed directory cannot be selected.
+    }
+  }
+  return [...checkouts];
+}
+
+function overview(context) {
+  const { db, defaultProjectKey, config, embeddingEngine } = context;
   const projects = new Map();
   const global = emptyCounts();
   const totals = emptyCounts();
@@ -188,14 +247,8 @@ function overview({ db, defaultProjectKey, defaultProjectRoot, config, embedding
   for (const { project_key } of db.prepare('SELECT DISTINCT project_key FROM dream_runs').all()) {
     projectCounts(project_key);
   }
-  const roots = knownProjectRoots(db, defaultProjectKey, defaultProjectRoot);
-  for (const key of roots.keys()) {
-    if (key !== globalKey) projectCounts(key);
-  }
-  const labels = formatProjectLabels([...projects.keys()].map((projectKey) => ({
-    projectKey,
-    projectRoot: roots.get(projectKey),
-  })));
+  const { labels } = knownProjectCatalog(context);
+  for (const key of labels.keys()) projectCounts(key);
   const projectList = [...projects.values()].map((project) => ({
     ...project,
     display_name: labels.get(project.project_key) ?? project.project_key,
@@ -233,7 +286,8 @@ function rowFilter(fields) {
   };
 }
 
-async function memories({ db, defaultProjectKey, defaultProjectRoot, embeddingEngine, cwd }, params) {
+async function memories(context, params) {
+  const { db, embeddingEngine, cwd } = context;
   const scope = choice(params, 'scope', [...MEMORY_SCOPES, all], all);
   const status = choice(params, 'status', [...MEMORY_STATUSES, all], 'active');
   const category = choice(params, 'category', [...MEMORY_CATEGORIES, all], all);
@@ -258,7 +312,7 @@ async function memories({ db, defaultProjectKey, defaultProjectRoot, embeddingEn
   const { where, values } = rowFilter(fields);
   const limit = listLimit(params);
   const query = params.get('q')?.trim();
-  const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot);
+  const catalog = knownProjectCatalog(context);
   const format = (row) => attachMemoryProject({ ...row, tags: memoryTags(db, row.id) }, catalog);
   if (!query) {
     const orderBy = sort === 'importance'
@@ -367,7 +421,8 @@ async function noteComments({ db }, req, params, noteId, commentId) {
   }
 }
 
-async function changeRecord({ db, config, tagConfig = config, defaultProjectKey, defaultProjectRoot, embeddingEngine }, req, table, id, params) {
+async function changeRecord(context, req, table, id, params) {
+  const { db, config, tagConfig = config, defaultProjectKey, defaultProjectRoot, embeddingEngine } = context;
   if (req.method === 'DELETE') {
     if (table === 'notes') {
       try {
@@ -384,14 +439,16 @@ async function changeRecord({ db, config, tagConfig = config, defaultProjectKey,
   const { expected_updated_at: expectedUpdatedAt, ...body } = validate(
     await readBody(req), table === 'memories' ? memoryRules : noteRules,
   );
+  const configuredProjects = table === 'memories' ? readConfiguredProjects(context) : undefined;
   if (table === 'memories') {
     if (body.status === 'superseded') {
       throw new RequestError(400, 'Memories cannot be marked superseded manually.');
     }
     if (body.project_key !== undefined && body.project_key !== globalKey) {
       // The catalog includes keys from existing memories, including legacy rows.
-      const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot);
-      if (body.project_key === all || !catalog.labels.has(body.project_key)) {
+      const catalog = knownProjectCatalog(context, configuredProjects);
+      const destination = body.project_key;
+      if (destination === all || !catalog.labels.has(destination)) {
         throw new RequestError(400, 'Unknown project destination.');
       }
     }
@@ -408,7 +465,7 @@ async function changeRecord({ db, config, tagConfig = config, defaultProjectKey,
       const memory = await updateMemory(db, { ...body, id }, {
         config: tagConfig, defaultProject, embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt,
       });
-      const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, [memory.project_key]);
+      const catalog = knownProjectCatalog(context, configuredProjects);
       return { memory: attachMemoryProject(memory, catalog) };
     }
     return { note: updateNote(db, { ...body, id }, { expectedUpdatedAt }) };
@@ -438,12 +495,12 @@ function dreamRedactor(env, apiKeyEnv) {
   return redact;
 }
 
-function effectiveDreamer(context) {
-  const { cwd, configOptions, env } = context;
-  const { config, project } = loadWorkspaceConfig({ cwd, ...configOptions });
+function effectiveDreamer(context, { checkout, projectKey, settings }) {
+  const { configOptions, env } = context;
+  const { config, project } = loadWorkspaceConfig({ ...configOptions, cwd: checkout ?? null, userConfigData: settings });
   config.dbPath = context.config.dbPath;
   const { enabled, mode, http, cli } = config.dreamer;
-  const runnableProjectKey = project?.projectKey === context.defaultProjectKey ? project.projectKey : null;
+  const runnableProjectKey = checkout && project?.projectKey === projectKey ? projectKey : null;
   const authorized = Boolean(runnableProjectKey && enabled && mode !== 'disabled');
   const endpoint = mode === 'http' ? URL.parse(http?.baseUrl) : null;
   const keyConfigured = Boolean(http?.apiKeyEnv && env[http.apiKeyEnv]?.trim());
@@ -466,7 +523,13 @@ function effectiveDreamer(context) {
 
 function dreamer(context, params) {
   const { db, env } = context;
-  const { config, runnableProjectKey, authorized, fingerprint, endpoint, keyConfigured, redactDream } = effectiveDreamer(context);
+  const selectedKey = projectFilter(params);
+  const projectKey = selectedKey ?? context.defaultProjectKey;
+  const settings = userSettings(context);
+  const checkouts = projectKey && projectKey !== globalKey
+    ? projectCheckouts(context, settings, projectKey) : [];
+  const { config, runnableProjectKey, authorized, fingerprint, endpoint, keyConfigured, redactDream } =
+    effectiveDreamer(context, { checkout: checkouts[0], projectKey, settings });
   const { enabled = false, mode = 'disabled', cadence = {}, http, cli } = config.dreamer ?? {};
   const runner = mode === 'http' || mode === 'cli' ? config.dreamer[mode] : undefined;
   const status = choice(params, 'status', [...DREAM_STATUSES, all], all);
@@ -511,33 +574,52 @@ function dreamer(context, params) {
     runs,
   });
   details.config.config_fingerprint = fingerprint;
-  return { runnable_project_key: runnableProjectKey, ...details };
+  return { project_key: selectedKey ?? all, runnable_project_key: runnableProjectKey, checkouts, ...details };
 }
 
 async function startDream(context, req) {
-  const { db, cwd, defaultProjectKey, embeddingEngine, configOptions } = context;
+  const { db, defaultProjectKey, configOptions, env } = context;
   const body = validate(await readBody(req), {
     project_key: (key) => nonblank(key) && key.trim() === key,
+    checkout: (value) => nonblank(value) && path.isAbsolute(value) && !value.includes('\0'),
     dry_run: (value) => typeof value === 'boolean',
     expected_config_fingerprint: (value) => typeof value === 'string',
   });
   if (!body.project_key) throw new RequestError(400, 'A project key is required');
-  if (body.project_key !== defaultProjectKey) {
-    throw new RequestError(400, 'Dreamer can only run for the workspace this dashboard was launched in');
+  const projectKey = body.project_key;
+  const settings = userSettings(context);
+  const checkouts = projectCheckouts(context, settings, projectKey);
+  const checkout = body.checkout === undefined ? checkouts[0] : normalizePath(body.checkout);
+  if (!checkout || !checkouts.includes(checkout)) {
+    if (body.checkout === undefined && projectKey === defaultProjectKey) {
+      throw new RequestError(409, 'Workspace identity changed or its checkout is unavailable.');
+    }
+    throw new RequestError(400, 'Select a known local checkout that belongs to this project.');
   }
-  const { config, runnableProjectKey, fingerprint, redactDream } = effectiveDreamer(context);
+  const { config, runnableProjectKey, fingerprint, redactDream } =
+    effectiveDreamer(context, { checkout, projectKey, settings });
+  if (!runnableProjectKey) throw new RequestError(400, 'The checkout no longer belongs to this project.');
   if (body.expected_config_fingerprint !== undefined && body.expected_config_fingerprint !== fingerprint) {
     throw new RequestError(409, 'Dreamer configuration changed; refresh before running.');
   }
-  if (!runnableProjectKey) throw new RequestError(409, 'Workspace identity changed; restart the dashboard.');
-  return redactDream(await runDream({
-    db, config, projectKey: defaultProjectKey, cwd, embeddingEngine, dryRun: Boolean(body.dry_run),
+  const embeddingEngine = isDeepStrictEqual(config.embedding, context.config.embedding)
+    ? context.embeddingEngine : createEmbeddingEngine({ embedding: config.embedding, env });
+  const result = redactDream(await runDream({
+    db, config, projectKey, cwd: checkout, embeddingEngine, dryRun: Boolean(body.dry_run),
     ...configOptions, userDreamer: config.dreamer,
   }));
+  if (!result.skipped) {
+    try {
+      context.checkoutState.record(projectKey, checkout, checkouts);
+    } catch {
+      result.warning = 'Dreamer finished, but the dashboard could not save checkout history.';
+    }
+  }
+  return result;
 }
 
 export function createApi(context) {
-  context = { ...context, fingerprintKey: randomBytes(32) };
+  context = { ...context, fingerprintKey: randomBytes(32), checkoutState: createCheckoutState(context.db) };
   return async function api(req, pathname, params) {
     if (req.method === 'GET') {
       if (pathname === '/api/overview') return overview(context);

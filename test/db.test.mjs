@@ -10,7 +10,7 @@ import { MIGRATIONS, acquireLease, hashNormalizedContent, normalizeContent, open
 import { cosineSimilarity, decodeFloat32Vector, encodeFloat32Vector } from '../src/embeddings.mjs';
 
 import { formatBootstrap } from '../src/bootstrap.mjs';
-import { addNoteComment, getMemory, getNote, lastNoteComments, listNoteComments, updateNote, updateNoteComment } from '../src/memory-service.mjs';
+import { addNoteComment, getMemory, getNote, lastNoteComments, listNoteComments, recordProject, updateNote, updateNoteComment } from '../src/memory-service.mjs';
 
 function databaseFixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-db-'));
@@ -74,7 +74,7 @@ test('creates the core schema in WAL mode and preserves the migration record on 
   const schema = db.prepare('SELECT name, type FROM sqlite_schema').all();
   const objects = new Map(schema.map(({ name, type }) => [name, type]));
   for (const table of ['schema_migrations', 'memories', 'memory_embeddings', 'notes', 'note_comments', 'tag_dictionary', 'memory_tags',
-    'transcript_files', 'transcript_messages', 'transcript_embeddings', 'dream_runs', 'leases']) {
+    'transcript_files', 'transcript_messages', 'transcript_embeddings', 'dream_runs', 'leases', 'projects', 'project_checkouts']) {
     assert.equal(objects.get(table), 'table', table);
   }
   for (const table of ['memories_fts', 'notes_fts', 'transcript_messages_fts']) {
@@ -92,7 +92,7 @@ test('creates the core schema in WAL mode and preserves the migration record on 
 
   const selectMigrations = 'SELECT version, applied_at FROM schema_migrations ORDER BY version';
   const migrations = db.prepare(selectMigrations).all();
-  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   assert.ok(Number.isInteger(migrations[0].applied_at) && migrations[0].applied_at > 0);
   addMemory(db);
   const reopened = fixture.open();
@@ -141,7 +141,7 @@ test('two processes can open and migrate a fresh database concurrently', async (
     try {
       assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
       assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-        .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     } finally {
       db.close();
     }
@@ -157,7 +157,7 @@ test('two processes can open and migrate a fresh database concurrently', async (
 
   const db = fixture.open({ readOnly: true });
   assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 });
 
 test('rolls back both schema changes and the migration record when migration fails', (t) => {
@@ -168,7 +168,7 @@ test('rolls back both schema changes and the migration record when migration fai
   assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name = 'memories'").get(), undefined);
   db.exec('DROP TABLE notes');
   runMigrations(db);
-  assert.equal(count(db, 'schema_migrations'), 9);
+  assert.equal(count(db, 'schema_migrations'), 10);
 });
 
 test('adds transcript checkpoints, embedding eligibility, and Dreamer fields to a version 1 database without losing rows', (t) => {
@@ -220,7 +220,7 @@ test('reopens a pre-repair version 2 database and adds embedding eligibility wit
 
   const reopened = fixture.open();
   const migrations = reopened.prepare('SELECT version, applied_at FROM schema_migrations ORDER BY version').all();
-  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.deepEqual(migrations.map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   assert.deepEqual(migrations.slice(0, 2).map(({ applied_at }) => applied_at), [1, 2]);
   const { id, byte_offset, line_count, file_identity, checkpoint_hash, file_size } = reopened
     .prepare('SELECT * FROM transcript_files').get();
@@ -272,7 +272,7 @@ test('adds Dreamer fields to a version 4 database and preserves completed runs',
   const originalRun = db.prepare('SELECT * FROM dream_runs').get();
   const reopened = fixture.open();
   assert.deepEqual(reopened.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   assert.deepEqual({ ...reopened.prepare('SELECT * FROM dream_runs').get() }, {
     ...originalRun, last_transcript_message_id: null,
   });
@@ -297,7 +297,7 @@ test('records version 5 and preserves a completed run with existing Dreamer colu
 
   const reopened = fixture.open();
   assert.deepEqual(reopened.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    .map(({ version }) => version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   const { status, last_transcript_message_id } = reopened.prepare(
     'SELECT status, last_transcript_message_id FROM dream_runs WHERE id = ?',
   ).get('fixture');
@@ -336,6 +336,27 @@ test('migration 7 preserves existing rows and handles access columns already pre
       { last_accessed_at: 123, access_count: 2 });
   }
   assert.ok(reapplied.prepare('SELECT 1 FROM schema_migrations WHERE version = 7').get());
+});
+
+test('migration 10 preserves registry roots and orders repeat writes with identical timestamps', (t) => {
+  const fixture = databaseFixture(t);
+  const db = fixture.openUnmigrated();
+  db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)');
+  for (const { version, up } of MIGRATIONS.filter(({ version }) => version < 10)) {
+    up(db);
+    db.prepare('INSERT INTO schema_migrations VALUES (?, 1)').run(version);
+  }
+  db.exec("INSERT INTO projects VALUES ('fixture', '/first', 1)");
+  const reopened = fixture.open();
+  const checkouts = reopened.prepare(
+    "SELECT project_root FROM project_checkouts WHERE project_key = 'fixture' ORDER BY last_used_order DESC",
+  );
+  assert.deepEqual(checkouts.all().map(({ project_root }) => project_root), ['/first']);
+  recordProject(reopened, 'fixture', '/second', 1);
+  assert.deepEqual(checkouts.all().map(({ project_root }) => project_root), ['/second', '/first']);
+  recordProject(reopened, 'fixture', '/third', 1);
+  recordProject(reopened, 'fixture', '/first', 1);
+  assert.deepEqual(checkouts.all().map(({ project_root }) => project_root), ['/first', '/third', '/second']);
 });
 
 test('read-only connections allow reads, reject writes, and skip migrations and directory creation', (t) => {
@@ -611,7 +632,7 @@ test('migration 9 preserves v8 data, is idempotent, and cascades tag assignments
   assert.throws(() => db.exec("INSERT INTO tag_dictionary VALUES ('project', 'Invalid', '', 1, 1)"), /CHECK/);
   db.exec("INSERT INTO memory_tags VALUES ('memory', 'release')");
   assert.throws(() => db.exec("INSERT INTO memory_tags VALUES ('missing', 'release')"), /FOREIGN KEY/);
-  MIGRATIONS.at(-1).up(db);
+  MIGRATIONS.find(({ version }) => version === 9).up(db);
   runMigrations(db);
   assert.deepEqual(getMemory(db, 'memory').tags, ['release']);
   db.exec("DELETE FROM memories WHERE id = 'memory'");

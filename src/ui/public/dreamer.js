@@ -128,15 +128,21 @@ function categoryName(status) {
   return status === 'dry-run' ? 'Dry run' : status.slice(0, 1).toUpperCase() + status.slice(1);
 }
 
-export function renderDreamControls(data, project, running) {
+export function renderDreamControls(data, project, running, preferredCheckout) {
+  const select = byId('dream-checkout');
+  const checkouts = data?.project_key === project && data.runnable_project_key === project ? data.checkouts : [];
+  if (JSON.stringify([...select.options].map(({ value }) => value)) !== JSON.stringify(checkouts)) {
+    select.replaceChildren(...checkouts.map((checkout) => new Option(checkout, checkout)));
+  }
+  select.value = checkouts.includes(preferredCheckout) ? preferredCheckout : checkouts[0] ?? '';
+  select.title = select.value;
+  byId('dream-checkout-field').hidden = checkouts.length < 2;
+  select.disabled = running;
   let hint = '';
   if (running) hint = 'Dreamer is running…';
-  else if (!data) hint = 'Waiting for Dreamer status.';
-  else if (!data.runnable_project_key) hint = 'Launch the dashboard in a Git workspace to run Dreamer. Restart after changing its repository identity.';
   else if (project === 'all' || project === 'global') hint = 'Select a specific project to run Dreamer.';
-  else if (project !== data.runnable_project_key) {
-    hint = 'Dreamer can only run for the workspace this dashboard was launched in. Restart with --cwd for another project.';
-  }
+  else if (!data || data.project_key !== project) hint = 'Waiting for Dreamer status.';
+  else if (!checkouts.length) hint = 'No local Git checkout is available for this project. Add an existing directory to this project’s checkouts in config.yaml.';
   else if (!data.config.enabled) hint = 'Dreamer is disabled in configuration.';
   else if (!data.config.authorized) hint = 'Authorize this Dreamer runner in user settings.';
   else if (data.active_leases.some(({ project_key }) => project_key === project)) {
@@ -213,7 +219,7 @@ export function dreamResult(result) {
   const tagActivity = tagOperations.length
     ? `${tagOperations.length} tag ${tagOperations.length === 1 ? 'change' : 'changes'} ${result.dryRun ? 'proposed' : 'applied'}.` : '';
   const message = [title, result.memoriesReviewed + ' reviewed, ' + result.memoriesMerged + ' merged, '
-    + result.memoriesArchived + ' archived.', commentActivity, tagActivity, result.summary].filter(Boolean).join(' ');
+    + result.memoriesArchived + ' archived.', commentActivity, tagActivity, result.summary, result.warning].filter(Boolean).join(' ');
   if (!result.dryRun) return message;
   const comments = compactions.map(({ note_id, source_comment_ids, summary }) =>
     `Note ${note_id} · Source comments ${source_comment_ids.join(', ')}\n${summary}`);
