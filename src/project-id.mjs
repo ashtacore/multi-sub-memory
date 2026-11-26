@@ -80,7 +80,7 @@ function gitDirectory(cwd, deadline, option) {
 
 const remoteKeyPattern = /^[a-z0-9][a-z0-9.-]*(?::\d{1,5})?(?:\/[A-Za-z0-9_.~-]+){2,}$/;
 const caseInsensitiveHosts = new Set(['github.com', 'gitlab.com', 'bitbucket.org', 'dev.azure.com']);
-const defaultPorts = new Map([['http:', '80'], ['https:', '443'], ['ssh:', '22'], ['git+ssh:', '22']]);
+const defaultPorts = new Map([['http:', '80'], ['https:', '443'], ['ssh:', '22'], ['git+ssh:', '22'], ['git:', '9418']]);
 
 export function isProjectKey(value) {
   if (typeof value !== 'string') return false;
@@ -92,7 +92,7 @@ function normalizeRemoteKey(remote) {
   if (!remote || windowsAbsolutePath.test(remote)) return undefined;
   const scp = /^(?:[^/@:]+@)?([^/:]+):((?!\/\/).+)$/.exec(remote);
   const parsed = URL.parse(scp ? 'ssh://' + scp[1] + '/' + scp[2].replace(/^\//, '') : remote);
-  if (!parsed || (!defaultPorts.has(parsed.protocol) && parsed.protocol !== 'git:')) return undefined;
+  if (!parsed || !defaultPorts.has(parsed.protocol)) return undefined;
   const hostname = parsed.hostname.toLowerCase();
   const port = parsed.port && parsed.port !== defaultPorts.get(parsed.protocol) ? ':' + parsed.port : '';
   const repository = caseInsensitiveHosts.has(hostname) ? parsed.pathname.toLowerCase() : parsed.pathname;
@@ -100,17 +100,10 @@ function normalizeRemoteKey(remote) {
   return isProjectKey(key) ? key : undefined;
 }
 
-function readRemotes(cwd, deadline) {
-  const result = runGit(cwd, deadline, 'config', '--local', '--includes', '--null', '--get-regexp', '^remote\\.(upstream|origin)\\.url$');
-  if (result.status !== 0) return {};
-  const urls = new Map();
-  for (const entry of result.stdout.split('\0')) {
-    const separator = entry.indexOf('\n');
-    if (separator === -1) continue;
-    const name = entry.slice('remote.'.length, separator - '.url'.length);
-    if (!urls.has(name)) urls.set(name, normalizeRemoteKey(entry.slice(separator + 1)));
-  }
-  return { upstream: urls.get('upstream'), origin: urls.get('origin') };
+function readRemoteKey(cwd, deadline, name) {
+  const result = runGit(cwd, deadline, 'remote', 'get-url', name);
+  if (result.status !== 0) return undefined;
+  return normalizeRemoteKey(result.stdout.replace(gitLineTerminator, ''));
 }
 
 const projectCache = new Map();
@@ -131,7 +124,8 @@ function discoverProject(cwd, deadline) {
   return {
     projectRoot,
     local: 'local:' + hash,
-    ...readRemotes(cwd, deadline),
+    upstream: readRemoteKey(cwd, deadline, 'upstream'),
+    origin: readRemoteKey(cwd, deadline, 'origin'),
   };
 }
 

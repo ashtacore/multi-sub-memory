@@ -150,6 +150,18 @@ test('normalizes remote transports across clones and prefers upstream with an ex
   assert.equal(resolveProjectKey(clone).projectKey, upstream);
 });
 
+test('Git insteadOf aliases and expanded fetch URLs share a project key', (t) => {
+  const repo = tempDirectory(t);
+  git(repo, 'init', '--template=');
+  git(repo, 'config', '--local', 'url.https://github.com/.insteadOf', 'fixture-gh:');
+  git(repo, 'remote', 'add', 'origin', 'fixture-gh:Team/Repo.git');
+  const aliasKey = resolveProjectKey(repo).projectKey;
+
+  git(repo, 'remote', 'set-url', 'origin', 'https://github.com/Team/Repo.git');
+  assert.equal(aliasKey, resolveProjectKey(repo).projectKey);
+  assert.equal(aliasKey, 'github.com/team/repo');
+});
+
 test('preserves non-default ports and repository path casing on other hosts', (t) => {
   const repo = tempDirectory(t);
   git(repo, 'init', '--template=');
@@ -162,6 +174,9 @@ test('preserves non-default ports and repository path casing on other hosts', (t
     ['http://git.example.test:80/team/Repo.git', 'git.example.test/team/Repo'],
     ['ssh://git@GIT.example.test:22/team/Repo.git', 'git.example.test/team/Repo'],
     ['git+ssh://git@GIT.example.test:22/team/Repo.git', 'git.example.test/team/Repo'],
+    ['git://git.example.test/team/Repo.git', 'git.example.test/team/Repo'],
+    ['git://git.example.test:9418/team/Repo.git', 'git.example.test/team/Repo'],
+    ['git://git.example.test:9419/team/Repo.git', 'git.example.test:9419/team/Repo'],
     ['git@GIT.example.test:/team/Repo.git', 'git.example.test/team/Repo'],
   ]) {
     git(repo, 'remote', 'set-url', 'origin', remote);

@@ -477,7 +477,7 @@ test('Dreamer reports disabled and validates manual run input', async (t) => {
 });
 
 test('dashboard can browse global data outside Git and exposes no runnable Dreamer project', async (t) => {
-  const { db, request, mutate } = await fixture(t, { gitWorkspace: false, dreamer: {
+  const { request, mutate } = await fixture(t, { gitWorkspace: false, dreamer: {
     enabled: true, mode: 'http', http: { baseUrl: 'https://runner.example.test/v1', model: 'fixture' },
   } });
   const overview = await request('/api/overview');
@@ -488,6 +488,23 @@ test('dashboard can browse global data outside Git and exposes no runnable Dream
   assert.equal(status.json.runnable_project_key, null);
   assert.equal(status.json.config.authorized, false);
   assert.equal((await mutate('POST', '/api/dreamer/run', { project_key: 'example.test/owner/repo' })).status, 400);
+});
+
+test('scope-only memory PATCH outside Git keeps an existing project and requires a destination for global memories', async (t) => {
+  const { cwd, db, mutate, projectKey } = await fixture(t, { gitWorkspace: false });
+  assert.equal(projectKey, null);
+  const repo = path.join(cwd, 'project');
+  await mkdir(repo);
+  initGit(repo);
+  const { memory: projectMemory } = await writeMemory(db, { cwd: repo, content: 'Project fixture', importance: 2 });
+  const updated = await mutate('PATCH', '/api/memories/' + projectMemory.id, { scope: 'project', importance: 4 });
+  assert.equal(updated.status, 200, updated.text);
+  assert.equal(updated.json.memory.scope, 'project');
+  assert.equal(updated.json.memory.project_key, projectMemory.project_key);
+  assert.equal(updated.json.memory.importance, 4);
+  const stored = db.prepare('SELECT project_key, importance FROM memories WHERE id = ?').get(projectMemory.id);
+  assert.equal(stored.project_key, projectMemory.project_key);
+  assert.equal(stored.importance, 4);
 
   const { memory } = await writeMemory(db, { content: 'Global fixture', scope: 'global' });
   const response = await mutate('PATCH', '/api/memories/' + memory.id, { scope: 'project' });

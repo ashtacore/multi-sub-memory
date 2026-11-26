@@ -4,7 +4,7 @@ import { runDream } from '../dreamer/engine.mjs';
 import { createDreamRedactor, sanitizeDreamError } from '../dreamer/runners.mjs';
 import {
   GLOBAL_PROJECT_KEY, MAX_LIST_LIMIT, MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
-  StaleRecordError, updateMemory, updateNote,
+  MissingProjectDestinationError, StaleRecordError, updateMemory, updateNote,
 } from '../memory-service.mjs';
 import { formatProjectLabels } from '../project-id.mjs';
 import { hybridSearch } from '../search.mjs';
@@ -340,10 +340,7 @@ async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot,
       throw new RequestError(400, 'Project memories require a non-global project key.');
     }
   }
-  const defaultProject = defaultProjectKey ? { projectKey: defaultProjectKey, projectRoot: defaultProjectRoot } : undefined;
-  if (table === 'memories' && body.scope === 'project' && body.project_key === undefined && !defaultProject) {
-    throw new RequestError(400, 'Select a project destination or launch the dashboard in a Git workspace.');
-  }
+  const defaultProject = defaultProjectKey ? { projectKey: defaultProjectKey, projectRoot: defaultProjectRoot } : null;
   try {
     if (table === 'memories') {
       const memory = await updateMemory(db, { ...body, id }, {
@@ -354,6 +351,7 @@ async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot,
     }
     return { note: updateNote(db, { ...body, id }, { expectedUpdatedAt }) };
   } catch (error) {
+    if (error instanceof MissingProjectDestinationError) throw new RequestError(400, error.message);
     if (error instanceof StaleRecordError) throw new RequestError(409, error.message);
     if (error.message.startsWith(noun + ' not found:')) throw new RequestError(404, noun + ' not found');
     if (error.message.startsWith('Memory update conflicts with existing content')) {

@@ -8,8 +8,9 @@ global memories, read global notes with `include_global`, and search.
 
 ## Project identity
 
-The server prefers the `upstream` remote and falls back to `origin`. A remote
-key uses a lowercase host name and retains any non-default port, as in
+The server prefers the `upstream` remote and falls back to `origin`. It uses the
+fetch URL after Git applies any `insteadOf` rules. A remote key uses a lowercase
+host name and retains any non-default port, as in
 `git.example.test:8443/team/Repo`. Repository path casing is preserved except
 on `github.com`, `gitlab.com`, `bitbucket.org`, and `dev.azure.com`, where it
 is folded to lowercase. SSH and HTTPS remotes with the same normalized host and path

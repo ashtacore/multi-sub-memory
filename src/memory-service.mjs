@@ -21,6 +21,12 @@ export class StaleRecordError extends Error {
   }
 }
 
+export class MissingProjectDestinationError extends Error {
+  constructor() {
+    super('Select a project destination or launch the dashboard in a Git workspace.');
+  }
+}
+
 function checkRevision(row, expectedUpdatedAt) {
   if (expectedUpdatedAt !== undefined && String(row.updated_at) !== expectedUpdatedAt) {
     throw new StaleRecordError();
@@ -206,11 +212,6 @@ export async function updateMemory(db, input, context = {}) {
   if (input.scope === 'project' && input.project_key === GLOBAL_PROJECT_KEY) {
     throw new Error('Project memories cannot use the global project key');
   }
-  const needsDefaultProject = input.scope === 'project' && input.project_key === undefined;
-  const targetProject = needsDefaultProject
-    ? context.defaultProject ?? projectIdentityFor('project', input, context)
-    : { projectKey: input.project_key ?? GLOBAL_PROJECT_KEY, projectRoot: null };
-  const targetProjectKey = targetProject.projectKey;
   let result;
   try {
     result = inWriteTransaction(db, () => {
@@ -227,10 +228,10 @@ export async function updateMemory(db, input, context = {}) {
       } else if (existing.scope === 'project') {
         projectKey = existing.project_key;
       } else {
-        projectKey = targetProjectKey;
-      }
-      if (scope === 'project' && needsDefaultProject && projectKey === targetProjectKey) {
-        recordProject(db, targetProjectKey, targetProject.projectRoot, Date.now());
+        if (context.defaultProject === null) throw new MissingProjectDestinationError();
+        const project = context.defaultProject ?? projectIdentityFor('project', input, context);
+        projectKey = project.projectKey;
+        recordProject(db, projectKey, project.projectRoot, Date.now());
       }
       const status = input.status ?? existing.status;
       if (status === 'superseded' && existing.superseded_by === null) {
