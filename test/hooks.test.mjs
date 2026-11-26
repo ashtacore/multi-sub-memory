@@ -73,6 +73,16 @@ test('hook bootstrap matches the shared formatter and leaves the source untouche
   assert.equal(await renderHookBootstrap(options), expected);
   assert.deepEqual(fs.readFileSync(options.dbPath), original);
   assertNoSidecars(options.dbPath);
+  const db = openDatabase(options.dbPath, { readOnly: true });
+  try {
+    for (const table of ['memories', 'notes']) {
+      const row = db.prepare(`SELECT access_count, last_accessed_at, created_at FROM ${table}`).get();
+      assert.equal(row.access_count, 0);
+      assert.equal(row.last_accessed_at, row.created_at);
+    }
+  } finally {
+    db.close();
+  }
 });
 
 test('hook bootstrap includes committed WAL data before and after the last writer closes', async (t) => {

@@ -33,6 +33,12 @@ function checkRevision(row, expectedUpdatedAt) {
   }
 }
 
+function rejectAccessFields(input) {
+  for (const field of ['last_accessed_at', 'access_count']) {
+    if (Object.hasOwn(input, field)) throw new Error(`Unknown field: ${field}`);
+  }
+}
+
 export function resolveCachedProjectKey(cwd, config, options) {
   return resolveConfigProject(cwd, config, { ...options, cache: true });
 }
@@ -120,6 +126,45 @@ export function inWriteTransaction(db, write) {
   }
 }
 
+function updateAccess(db, { memories = [], notes = [] }) {
+  const updated = { memories: new Map(), notes: new Map() };
+  const now = Date.now();
+  for (const [table, ids] of [['memories', memories], ['notes', notes]]) {
+    if (!ids.length) continue;
+    const rows = db.prepare(`
+      UPDATE ${table} SET access_count = access_count + 1,
+        last_accessed_at = MAX(COALESCE(last_accessed_at, 0), ?)
+      WHERE id IN (SELECT value FROM json_each(?))
+      RETURNING id, last_accessed_at, access_count
+    `).all(now, JSON.stringify(ids));
+    const statsById = updated[table];
+    for (const { id, ...stats } of rows) statsById.set(id, stats);
+    if (ids.some((id) => !statsById.has(id))) {
+      throw new Error('A selected memory or note was removed. Retry the request.');
+    }
+  }
+  return updated;
+}
+
+export function recordAccess(db, { memories = [], notes = [] }) {
+  if (!memories.length && !notes.length) return { memories: new Map(), notes: new Map() };
+  return inWriteTransaction(db, () => updateAccess(db, { memories, notes }));
+}
+
+export function readWithAccess(db, table, select) {
+  return inWriteTransaction(db, () => {
+    const records = select();
+    const updated = updateAccess(db, { [table]: records.map(({ id }) => id) })[table];
+    return records.map((row) => ({ ...row, ...updated.get(row.id) }));
+  });
+}
+
+function trackMutationAccess(db, table, row, trackAccess) {
+  if (!trackAccess) return row;
+  const stats = updateAccess(db, { [table]: [row.id] })[table].get(row.id);
+  return { ...row, ...stats };
+}
+
 export async function storeEmbedding(db, memory, engine, fallbackModel) {
   if (!engine) return 0;
   try {
@@ -156,14 +201,14 @@ export async function writeMemory(db, input, context = {}) {
     const row = db.prepare(`
       INSERT INTO memories (
         id, project_key, scope, category, content, normalized_hash, importance,
-        source_orchestrator, source_session_id, metadata_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_orchestrator, source_session_id, metadata_json, created_at, updated_at, last_accessed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (project_key, scope, normalized_hash) DO NOTHING
       RETURNING *
     `).get(
       generateId(), projectKey, scope, category, content, hash, importance,
       input.source_orchestrator ?? null, input.source_session_id ?? null,
-      mergeMetadata(null, input.metadata), now, now,
+      mergeMetadata(null, input.metadata), now, now, now,
     );
     if (row) return { memory: formatMemory(row), deduplicated: false, reactivated: false };
 
@@ -183,7 +228,8 @@ export async function writeMemory(db, input, context = {}) {
       now, existing.id,
     );
     if (updated.content !== existing.content) invalidateEmbedding(db, existing.id);
-    return { memory: formatMemory(updated), deduplicated: true, reactivated };
+    const memory = formatMemory(trackMutationAccess(db, 'memories', updated, context.trackAccess));
+    return { memory, deduplicated: true, reactivated };
   });
   if (!result.deduplicated || result.reactivated) {
     void storeEmbedding(db, result.memory, context.embeddingEngine);
@@ -199,6 +245,7 @@ export async function writeMemory(db, input, context = {}) {
 }
 
 export async function updateMemory(db, input, context = {}) {
+  rejectAccessFields(input);
   const content = input.content === undefined ? undefined : requireContent(input.content);
   if (input.scope !== undefined && !MEMORY_SCOPES.includes(input.scope)) {
     throw new Error('Memory scope must be project or global');
@@ -251,7 +298,8 @@ export async function updateMemory(db, input, context = {}) {
         Date.now(), input.id,
       );
       if (changedContent) invalidateEmbedding(db, input.id);
-      return { memory: context.rawRow ? row : formatMemory(row), changedContent };
+      const accessed = trackMutationAccess(db, 'memories', row, context.trackAccess);
+      return { memory: context.rawRow ? accessed : formatMemory(accessed), changedContent };
     });
   } catch (error) {
     if (error.errcode === 2067 || error.code === 'SQLITE_CONSTRAINT_UNIQUE'
@@ -264,7 +312,7 @@ export async function updateMemory(db, input, context = {}) {
   return result.memory;
 }
 
-export function archiveMemory(db, input) {
+export function archiveMemory(db, input, { trackAccess } = {}) {
   const supersededBy = input.superseded_by ?? null;
   return inWriteTransaction(db, () => {
     if (supersededBy !== null) {
@@ -275,7 +323,7 @@ export function archiveMemory(db, input) {
     const row = db.prepare(`
       UPDATE memories SET status = ?, superseded_by = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ? RETURNING *
     `).get(supersededBy === null ? 'archived' : 'superseded', supersededBy, Date.now(), input.id);
-    return formatMemory(requireRow(row, 'Memory', input.id));
+    return formatMemory(trackMutationAccess(db, 'memories', requireRow(row, 'Memory', input.id), trackAccess));
   });
 }
 
@@ -331,11 +379,11 @@ export function writeNote(db, input, context = {}) {
     return db.prepare(`
       INSERT INTO notes (
         id, project_key, status, content, surface_condition, source_orchestrator,
-        source_session_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
+        source_session_id, created_at, updated_at, last_accessed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
     `).get(
       generateId(), projectKey, status, content, input.surface_condition ?? null,
-      input.source_orchestrator ?? null, input.source_session_id ?? null, now, now,
+      input.source_orchestrator ?? null, input.source_session_id ?? null, now, now, now,
     );
   });
 }
@@ -366,7 +414,8 @@ export function readNotes(db, input = {}, context = {}) {
   });
 }
 
-export function updateNote(db, input, { expectedUpdatedAt } = {}) {
+export function updateNote(db, input, { expectedUpdatedAt, trackAccess } = {}) {
+  rejectAccessFields(input);
   const content = input.content === undefined ? null : requireContent(input.content);
   function update() {
     if (expectedUpdatedAt !== undefined) {
@@ -381,11 +430,11 @@ export function updateNote(db, input, { expectedUpdatedAt } = {}) {
       content, input.status ?? null, Number(input.surface_condition !== undefined),
       input.surface_condition ?? null, Date.now(), input.id,
     );
-    return requireRow(row, 'Note', input.id);
+    return trackMutationAccess(db, 'notes', requireRow(row, 'Note', input.id), trackAccess);
   }
-  return expectedUpdatedAt === undefined ? update() : inWriteTransaction(db, update);
+  return trackAccess || expectedUpdatedAt !== undefined ? inWriteTransaction(db, update) : update();
 }
 
-export function dismissNote(db, id) {
-  return updateNote(db, { id, status: 'dismissed' });
+export function dismissNote(db, id, options) {
+  return updateNote(db, { id, status: 'dismissed' }, options);
 }

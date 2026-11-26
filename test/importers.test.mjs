@@ -177,6 +177,14 @@ test('all sources preserve provenance, deduplicate across schemas, and rerun ide
     assert.equal(markdownNote.project_key, projectKey);
     assert.equal(markdownNote.surface_condition, 'During review');
     assert.equal(note.get('Global note fixture').project_key, 'global');
+    for (const table of ['memories', 'notes']) {
+      const rows = db.prepare(`SELECT last_accessed_at, access_count FROM ${table}`).all();
+      assert.ok(rows.length);
+      for (const { last_accessed_at, access_count } of rows) {
+        assert.equal(last_accessed_at, null);
+        assert.equal(access_count, 0);
+      }
+    }
     for (const content of ['Checked fixture', 'Fenced fixture', 'Dismissed fixture']) assert.equal(note.get(content), undefined);
   } finally {
     db.close();

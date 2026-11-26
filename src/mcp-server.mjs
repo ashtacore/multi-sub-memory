@@ -9,7 +9,7 @@ import { expandSession } from './expand.mjs';
 import { runIndexers } from './indexers/runner.mjs';
 import {
   MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
-  archiveMemory, dismissNote, getMemory, listMemories, readNotes,
+  archiveMemory, dismissNote, getMemory, listMemories, readNotes, readWithAccess, recordAccess,
   updateMemory, updateNote, writeMemory, writeNote,
 } from './memory-service.mjs';
 import { hybridSearch, SEARCH_ORCHESTRATORS, SEARCH_SCOPES, SEARCH_SOURCES } from './search.mjs';
@@ -46,11 +46,11 @@ function toolHandler(run, format = JSON.stringify) {
 
 export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
   const server = new McpServer({ name: 'multi-sub-memory', version: '0.1.0' });
-  const context = { config, embeddingEngine, defaultCwd };
+  const context = { config, embeddingEngine, defaultCwd, trackAccess: true };
 
   server.registerTool('mem_memory', {
     description: 'Write, update, archive, get, or list durable project and global memories. Write requires content. Update, archive, and get require id.',
-    inputSchema: {
+    inputSchema: z.strictObject({
       ...recordFields,
       action: z.enum(['write', 'update', 'archive', 'get', 'list']),
       category: z.enum(MEMORY_CATEGORIES).optional(),
@@ -60,7 +60,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       superseded_by: z.string().trim().min(1).optional(),
       metadata: z.json().optional(),
       limit: z.number().int().optional(),
-    },
+    }),
   }, toolHandler((input) => {
     switch (input.action) {
       case 'write':
@@ -71,35 +71,37 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
         return updateMemory(db, input, context);
       case 'archive':
         requireId(input);
-        return archiveMemory(db, input);
-      case 'get':
-        return getMemory(db, requireId(input));
+        return archiveMemory(db, input, context);
+      case 'get': {
+        const id = requireId(input);
+        return readWithAccess(db, 'memories', () => [getMemory(db, id)])[0];
+      }
       case 'list':
-        return listMemories(db, input, context);
+        return readWithAccess(db, 'memories', () => listMemories(db, input, context));
     }
   }));
 
   server.registerTool('mem_note', {
     description: 'Write, read, update, or dismiss handoff notes. Write requires content. Update and dismiss require id.',
-    inputSchema: {
+    inputSchema: z.strictObject({
       ...recordFields,
       action: z.enum(['write', 'read', 'update', 'dismiss']),
       status: z.enum([...NOTE_STATUSES, 'all']).describe('New notes may be active or pending. Use all only for read.').optional(),
       surface_condition: z.string().nullable().optional(),
       include_global: z.boolean().optional(),
-    },
+    }),
   }, toolHandler((input) => {
     switch (input.action) {
       case 'write':
         return writeNote(db, input, context);
       case 'read':
-        return readNotes(db, input, context);
+        return readWithAccess(db, 'notes', () => readNotes(db, input, context));
       case 'update':
         requireId(input);
         if (input.status === 'all') throw new Error('Note status cannot be all for update');
-        return updateNote(db, input);
+        return updateNote(db, input, context);
       case 'dismiss':
-        return dismissNote(db, requireId(input));
+        return dismissNote(db, requireId(input), context);
     }
   }));
 
@@ -111,7 +113,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       include_notes: z.boolean().optional(),
     },
   }, toolHandler(({ cwd, token_budget, include_notes }) => formatBootstrap(db, {
-    cwd, defaultCwd, config, tokenBudget: token_budget, includeNotes: include_notes,
+    cwd, defaultCwd, config, tokenBudget: token_budget, includeNotes: include_notes, recordAccess: true,
   }), ({ text }) => text));
 
   server.registerTool('mem_search', {
@@ -125,7 +127,17 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       since: z.string().describe('Include records at or after this ISO 8601 date or timestamp.').optional(),
       limit: z.number().describe('Defaults to 10 and is clamped to 1–50.').optional(),
     },
-  }, toolHandler((input) => hybridSearch(db, { ...input, ...context })));
+  }, toolHandler(async (input) => {
+    const search = await hybridSearch(db, { ...input, ...context });
+    const memories = [];
+    const notes = [];
+    for (const { source, id } of search.results) {
+      if (source === 'memory') memories.push(id);
+      if (source === 'note') notes.push(id);
+    }
+    recordAccess(db, { memories, notes });
+    return search;
+  }));
 
   server.registerTool('mem_expand', {
     description: 'Read an indexed session by ID, optionally selecting a file ID and an inclusive message or line range.',

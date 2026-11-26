@@ -39,6 +39,9 @@ default browser. Stop the server with Ctrl+C.
 - Memory and note edits save only the changed fields. Saving an unchanged
   edit closes the dialog. Edits and quick status actions check the displayed
   record's revision and refresh the view when the server reports a conflict.
+- Memory provenance and note metadata show the last access time and access
+  count as read-only fields. An em dash indicates that no access timestamp
+  has been recorded. [MCP access tracking](MCP-Core.md#access-tracking)
 - **Dreamer** shows active leases, a configuration summary, and recent run
   history across projects. Sort using the **Started**, **Finished**, or
   **Run time** column headers and filter from the **Status** header.

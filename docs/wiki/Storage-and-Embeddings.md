@@ -26,6 +26,12 @@ memory or note is moved or removed. The migration starts with an empty
 registry, and the dashboard also discovers projects from existing records
 and the launch workspace. [Dashboard](Dashboard.md)
 
+Migration 7 adds nullable `last_accessed_at` timestamps in Unix epoch
+milliseconds and nonnegative `access_count` counters to memories and notes.
+Existing and newly imported rows start with a null timestamp and a count of
+zero. The memory and note FTS update triggers reindex only when the row ID
+or indexed fields change. [MCP core](MCP-Core.md#access-tracking)
+
 ## Design rules and why
 
 - Embedding rows require an explicit parent ID. The `transcript_embeddings` table uses `WITHOUT ROWID` so SQLite rejects a missing message ID instead of generating one.

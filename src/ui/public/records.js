@@ -22,6 +22,8 @@ function memoryDetails(memory, projectLabel) {
       ['Source session', memory.source_session_id],
       ['Created', dateText(memory.created_at)],
       ['Updated', dateText(memory.updated_at)],
+      ['Last accessed', dateText(memory.last_accessed_at)],
+      ['Access count', memory.access_count],
     ]),
     node('h4', { text: 'Metadata' }),
     node('pre', { text: prettyMetadata(memory.metadata_json) }),
@@ -109,6 +111,7 @@ export function renderRecords(list, records, kind, {
       node('p', { text: record.content, className: 'record-content' }),
       isMemory ? memoryDetails(record, projectLabel) : definitionList([
         ['Created', dateText(record.created_at)], ['Updated', dateText(record.updated_at)],
+        ['Last accessed', dateText(record.last_accessed_at)], ['Access count', record.access_count],
       ]),
       node('div', { className: 'actions' }, edit, ...(activate ? [activate] : []), changeStatus, remove),
     );

@@ -75,7 +75,12 @@ async function assertTranscript(tool, host, projectKey) {
 
 async function assertMemoryRecalled(tool, written) {
   const memories = await tool('mem_memory', { action: 'list', scope: 'project' });
-  assert.deepEqual(memories.find(({ id }) => id === written.id), written);
+  const recalled = memories.find(({ id }) => id === written.id);
+  assert.ok(recalled);
+  assert.ok(recalled.last_accessed_at >= written.last_accessed_at);
+  assert.deepEqual(recalled, {
+    ...written, access_count: written.access_count + 1, last_accessed_at: recalled.last_accessed_at,
+  });
 }
 
 const fixtureSessions = {
