@@ -8,9 +8,9 @@ import { createInterface } from 'node:readline';
 import { test } from 'node:test';
 import { setImmediate } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import { SKILLS_EXTENSION_ID, SkillsClient } from '@modelcontextprotocol/client/ext/skills';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { loadConfig } from '../src/config.mjs';
 import { estimateTokens, formatBootstrap } from '../src/bootstrap.mjs';
 import { openDatabase } from '../src/db.mjs';
@@ -21,6 +21,8 @@ import { resolveProjectKey } from '../src/project-id.mjs';
 import { initGit } from './git-fixtures.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
+const guidePath = new URL('../skills/multi-sub-memory/SKILL.md', import.meta.url);
+const guideFallbackUri = 'skill://multi-sub-memory/memory-guide';
 const toolNames = ['mem_bootstrap', 'mem_expand', 'mem_memory', 'mem_note', 'mem_search'];
 const uuidV7Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -762,12 +764,65 @@ test('MCP supports global memories outside Git and rejects project memory and no
   assert.match(project.project_key, /^local:/);
 });
 
-test('real stdio speaks JSON-RPC only and shuts down on EOF', { timeout: 20000 }, async (t) => {
+test('a modern stdio client discovers and reads the bundled skill', { timeout: 20000 }, async (t) => {
+  const cwd = tempDirectory(t);
+  const client = new Client({ name: 'skills-fixture', version: '1.0.0' }, {
+    versionNegotiation: { mode: 'auto' },
+  });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [cliPath, 'serve', '--cwd', cwd],
+    cwd,
+    env: {
+      MULTI_SUB_MEMORY_CONFIG: path.join(cwd, 'absent-config.yaml'),
+      MULTI_SUB_MEMORY_DB: ':memory:',
+      MULTI_SUB_MEMORY_NO_EMBEDDINGS: '1',
+    },
+  });
+  try {
+    await client.connect(transport, { timeout: 5000 });
+    assert.equal(client.getNegotiatedProtocolVersion(), '2026-07-28');
+    assert.ok(client.getServerCapabilities().extensions[SKILLS_EXTENSION_ID]);
+
+    const skills = new SkillsClient(client);
+    assert.equal(skills.supported, true);
+    const { skills: entries } = await skills.list({}, { timeout: 5000 });
+    assert.deepEqual(entries.map(({ frontmatter }) => frontmatter.name), ['multi-sub-memory']);
+    const [listed] = entries;
+    assert.equal(listed.uri, 'skill://multi-sub-memory/SKILL.md');
+    const { skill } = await skills.get(listed.uri, { timeout: 5000 });
+    assert.deepEqual(skill, listed);
+    const guide = await skills.read(skill, undefined, { timeout: 5000 });
+    assert.equal(guide.verified, true);
+    assert.equal(guide.text, fs.readFileSync(guidePath, 'utf8'));
+    const { contents } = await client.readResource({ uri: guideFallbackUri }, { timeout: 5000 });
+    assert.deepEqual(contents, [{ uri: guideFallbackUri, mimeType: 'text/markdown', text: guide.text }]);
+    const { tools } = await client.listTools({}, { timeout: 5000 });
+    assert.deepEqual(tools.map(({ name }) => name).sort(), toolNames);
+  } finally {
+    await transport.close();
+  }
+});
+
+test('legacy stdio serves all core tools and the guide using only JSON-RPC and exits on EOF', { timeout: 20000 }, async (t) => {
   const directory = tempDirectory(t);
   const workspace = path.join(directory, 'fixture workspace');
   fs.mkdirSync(workspace);
   initGit(workspace);
   const dbPath = path.join(directory, 'state.db');
+  const db = openDatabase(dbPath);
+  try {
+    const { lastInsertRowid } = db.prepare(`
+      INSERT INTO transcript_files (file_path, session_id, project_key, orchestrator, mtime_ms, last_indexed_at)
+      VALUES (?, 'legacy-fixture', ?, 'codex', 0, 0)
+    `).run(path.join(directory, 'absent-session.jsonl'), resolveProjectKey(workspace).projectKey);
+    db.prepare(`
+      INSERT INTO transcript_messages (file_id, seq, line_no, role, text)
+      VALUES (?, 0, 1, 'user', 'Legacy transcript fixture')
+    `).run(lastInsertRowid);
+  } finally {
+    db.close();
+  }
   const child = spawn(process.execPath, [cliPath, 'serve', '--cwd', workspace], {
     cwd: directory,
     env: {
@@ -805,22 +860,41 @@ test('real stdio speaks JSON-RPC only and shuts down on EOF', { timeout: 20000 }
   }
 
   send('initialize', {
-    protocolVersion: LATEST_PROTOCOL_VERSION,
+    protocolVersion: '2025-11-25',
     capabilities: {},
     clientInfo: { name: 'fixture', version: '1.0.0' },
   }, 1);
-  assert.equal((await receive(1)).serverInfo.name, 'multi-sub-memory');
+  const initialized = await receive(1);
+  assert.equal(initialized.serverInfo.name, 'multi-sub-memory');
+  assert.equal(initialized.protocolVersion, '2025-11-25');
+  assert.equal(initialized.capabilities.extensions?.[SKILLS_EXTENSION_ID], undefined);
   send('notifications/initialized');
   send('tools/list', {}, 2);
   assert.deepEqual((await receive(2)).tools.map(({ name }) => name).sort(), toolNames);
   send('tools/call', { name: 'mem_bootstrap', arguments: {} }, 3);
   const summary = await receive(3);
   assert.match(summary.content[0].text, /<project-memory project="fixture workspace"/);
+  send('tools/call', { name: 'mem_memory', arguments: { action: 'list' } }, 4);
+  assert.deepEqual(JSON.parse((await receive(4)).content[0].text), []);
+  send('tools/call', { name: 'mem_note', arguments: { action: 'read' } }, 5);
+  assert.deepEqual(JSON.parse((await receive(5)).content[0].text), []);
+  send('tools/call', { name: 'mem_search', arguments: { query: 'Legacy' } }, 6);
+  const { results: [hit] } = JSON.parse((await receive(6)).content[0].text);
+  assert.equal(hit.session_id, 'legacy-fixture');
+  send('tools/call', { name: 'mem_expand', arguments: { session_id: hit.session_id } }, 7);
+  const { messages } = JSON.parse((await receive(7)).content[0].text);
+  assert.equal(messages[0].text, 'Legacy transcript fixture');
+
+  send('resources/list', {}, 8);
+  const { resources } = await receive(8);
+  assert.ok(resources.some(({ uri, mimeType }) => uri === guideFallbackUri && mimeType === 'text/markdown'));
+  send('resources/read', { uri: guideFallbackUri }, 9);
+  const { contents } = await receive(9);
+  assert.deepEqual(contents, [{ uri: guideFallbackUri, mimeType: 'text/markdown', text: fs.readFileSync(guidePath, 'utf8') }]);
 
   child.stdin.end();
   assert.equal((await lines.next()).done, true);
   assert.deepEqual(await exited, [0, null], stderr);
-  assert.ok(fs.existsSync(dbPath));
 });
 
 test('MCP note transitions require comments and report same-status replay before staleness', async (t) => {
@@ -871,7 +945,7 @@ test('bootstrap gives topics priority and only includes a short latest comment w
 });
 
 test('MCP normalizes tags and filters lists and searches without mixing dictionaries', async (t) => {
-  const { db, client, memory, search, expectError } = await fixture(t);
+  const { db, memory, search, expectError } = await fixture(t);
   const { memory: saved } = await memory('write', {
     content: 'Tagged deployment fixture', tags: [' Release__Plan ', 'release plan', 'audit'],
     tag_descriptions: { ' Release Plan ': 'Release instructions' },
@@ -897,13 +971,6 @@ test('MCP normalizes tags and filters lists and searches without mixing dictiona
   assert.deepEqual(listTags(db, saved.project_key).map(({ tag }) => tag), saved.tags);
   assert.deepEqual((await memory('write', { content: saved.content })).memory.tags, saved.tags);
   assert.deepEqual((await memory('update', { id: saved.id, tags: [] })).tags, []);
-
-  const uri = 'skill://multi-sub-memory/memory-guide';
-  const { resources } = await client.listResources();
-  assert.ok(resources.some((item) => item.uri === uri && item.mimeType === 'text/markdown'));
-  const { contents } = await client.readResource({ uri });
-  const canonical = fs.readFileSync(new URL('../skills/multi-sub-memory/SKILL.md', import.meta.url), 'utf8');
-  assert.deepEqual(contents, [{ uri, mimeType: 'text/markdown', text: canonical }]);
 });
 
 test('MCP enforces strictTags from YAML on project and global memory writes', async (t) => {
