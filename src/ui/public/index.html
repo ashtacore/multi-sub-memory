@@ -59,6 +59,10 @@
         <label>Category
           <select id="mem-category" data-testid="mem-category"><option value="all">All categories</option></select>
         </label>
+        <label>Tag
+          <input id="mem-tag" data-testid="mem-tag" type="search" list="memory-tag-options" placeholder="Any tag">
+          <datalist id="memory-tag-options"></datalist>
+        </label>
         <label>Status
           <select id="mem-status" data-testid="mem-status">
             <option value="active">Active</option>
@@ -152,6 +156,7 @@
         <option value="global">Global</option>
       </select></label>
       <label>Category <select name="category"></select></label>
+      <label>Tags (up to 5, comma-separated) <input name="tags" type="text" data-testid="edit-memory-tags"></label>
       <label>Importance <input name="importance" type="number" min="1" max="5" step="1" required></label>
       <label>Status <select name="status">
         <option value="active">Active</option>

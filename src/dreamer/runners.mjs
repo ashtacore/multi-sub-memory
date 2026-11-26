@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { CLI_PRESETS, findExecutable } from '../cli/hosts.mjs';
-import { assertDreamerTrust } from '../config.mjs';
+import { assertDreamerTrust, TAG_PATTERN } from '../config.mjs';
 import { MEMORY_CATEGORIES } from '../memory-service.mjs';
 
 const nonBlank = z.string().trim().min(1);
@@ -34,7 +34,14 @@ const DreamOperationSchema = z.discriminatedUnion('type', [
     summary: nonBlank,
   }),
 ]);
-export const DreamPlanSchema = z.strictObject({ summary: z.string(), operations: z.array(DreamOperationSchema) });
+const tagName = z.string().regex(TAG_PATTERN);
+const tagOperation = z.discriminatedUnion('type', [
+  z.strictObject({ type: z.literal('merge'), from_tag: tagName, to_tag: tagName, description: nonBlank.optional() }),
+  z.strictObject({ type: z.literal('describe'), tag: tagName, description: nonBlank }),
+]);
+export const DreamPlanSchema = z.strictObject({
+  summary: z.string(), operations: z.array(DreamOperationSchema), tag_operations: z.array(tagOperation).optional(),
+});
 
 export function validateDreamPlan(value) {
   const result = DreamPlanSchema.safeParse(value);

@@ -65,7 +65,7 @@ input::placeholder { color: #969aaf; }
 
 .panel { padding: clamp(.73rem, 2vw, 1.15rem); background: var(--panel); border: 1px solid var(--line); border-radius: .75rem; }
 .panel-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: .4rem 1rem; margin-bottom: .85rem; }
-.filters { display: grid; grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr)); gap: .65rem; margin-bottom: 1rem; }
+.filters { display: grid; grid-template-columns: minmax(0, 2fr) repeat(5, minmax(0, 1fr)); gap: .65rem; margin-bottom: 1rem; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: .65rem 1rem; margin-bottom: .9rem; }
 .toolbar .subnav { margin-bottom: 0; }
 .sort-control { width: min(15rem, 100%); }

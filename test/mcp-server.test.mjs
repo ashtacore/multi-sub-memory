@@ -16,7 +16,8 @@ import { estimateTokens, formatBootstrap } from '../src/bootstrap.mjs';
 import { openDatabase } from '../src/db.mjs';
 import { decodeFloat32Vector } from '../src/embeddings.mjs';
 import { createMcpServer, hybridSearch } from '../src/mcp-server.mjs';
-import { updateMemory, updateNote } from '../src/memory-service.mjs';
+import { listTags, updateMemory, updateNote } from '../src/memory-service.mjs';
+import { resolveProjectKey } from '../src/project-id.mjs';
 import { initGit } from './git-fixtures.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
@@ -286,6 +287,7 @@ test('MCP search uses the server workspace and accepts source and date filters',
       source: 'memory', id: saved.id, score: 1 / 61, project_key: saved.project_key,
       orchestrator: 'codex', timestamp: new Date(saved.updated_at).toISOString(), category: 'GENERAL',
       preview: saved.content,
+      tags: [],
     }],
   });
   assert.deepEqual((await search({ query: '  ' })).results, []);
@@ -866,4 +868,92 @@ test('bootstrap gives topics priority and only includes a short latest comment w
   assert.match(full, /Primary topic — Latest comment: newestfixture &lt;tag&gt; x+…/);
   assert.doesNotMatch(full, /olderfixture|endfixture/);
   assert.deepEqual(await bootstrap({ token_budget: Math.ceil(withoutComments.length / 4) }), withoutComments);
+});
+
+test('MCP normalizes tags and filters lists and searches without mixing dictionaries', async (t) => {
+  const { db, client, memory, search, expectError } = await fixture(t);
+  const { memory: saved } = await memory('write', {
+    content: 'Tagged deployment fixture', tags: [' Release__Plan ', 'release plan', 'audit'],
+    tag_descriptions: { ' Release Plan ': 'Release instructions' },
+  });
+  const { memory: global } = await memory('write', {
+    scope: 'global', content: 'Tagged deployment guide', tags: ['release-plan'],
+  });
+  assert.deepEqual(saved.tags, ['audit', 'release-plan']);
+  assert.equal(listTags(db, saved.project_key).find(({ tag }) => tag === 'release-plan').description, 'Release instructions');
+  assert.equal(listTags(db, 'global')[0].description, '');
+  assert.equal(listTags(db, 'global')[0].count, 1);
+  assert.deepEqual((await memory('list', { tag: 'AUDIT' })).map(({ id }) => id), [saved.id]);
+  assert.deepEqual((await search({ query: 'deployment', tag: ' Audit ' })).results
+    .map(({ id, tags }) => ({ id, tags })), [{ id: saved.id, tags: saved.tags }]);
+  assert.deepEqual((await memory('list', { scope: 'global', tag: 'release-plan' })).map(({ id }) => id), [global.id]);
+
+  await expectError('mem_memory', { action: 'update', id: saved.id, tags: ['a', 'b', 'c', 'd', 'e', 'f'] }, /at most 5/);
+  await expectError('mem_memory', { action: 'update', id: saved.id, tags: ['-bad'] }, /Invalid tag/);
+  for (const tag of ['release--plan', 'release-', 'a'.repeat(49)]) {
+    await expectError('mem_memory', { action: 'write', content: 'Invalid tag fixture', tags: [tag] }, /Invalid tag/);
+    await expectError('mem_memory', { action: 'update', id: saved.id, tags: [tag] }, /Invalid tag/);
+  }
+  assert.deepEqual(listTags(db, saved.project_key).map(({ tag }) => tag), saved.tags);
+  assert.deepEqual((await memory('write', { content: saved.content })).memory.tags, saved.tags);
+  assert.deepEqual((await memory('update', { id: saved.id, tags: [] })).tags, []);
+
+  const uri = 'skill://multi-sub-memory/memory-guide';
+  const { resources } = await client.listResources();
+  assert.ok(resources.some((item) => item.uri === uri && item.mimeType === 'text/markdown'));
+  const { contents } = await client.readResource({ uri });
+  const canonical = fs.readFileSync(new URL('../skills/multi-sub-memory/SKILL.md', import.meta.url), 'utf8');
+  assert.deepEqual(contents, [{ uri, mimeType: 'text/markdown', text: canonical }]);
+});
+
+test('MCP enforces strictTags from YAML on project and global memory writes', async (t) => {
+  const cwd = initGit(tempDirectory(t));
+  const { projectKey } = resolveProjectKey(cwd);
+  const userConfigPath = path.join(cwd, 'user-config.yaml');
+  fs.writeFileSync(userConfigPath, [
+    'strictTags: true',
+    'tags: { definitions: { global-tag: Global definition } }',
+    'projects:',
+    `  "${projectKey}":`,
+    '    strictTags: true',
+    '    tags: { strict: false, definitions: { project-tag: Project definition } }',
+  ].join('\n'));
+  const config = loadConfig({ cwd, env: {}, userConfigPath });
+  const { memory, expectError } = await fixture(t, { defaultCwd: cwd, config });
+
+  for (const [scope, tag] of [['project', 'project-tag'], ['global', 'global-tag']]) {
+    await expectError('mem_memory', {
+      action: 'write', scope, content: 'Unknown tagged memory', tags: ['unknown'],
+    }, /Unknown tags: unknown/);
+    const saved = await memory('write', { scope, content: 'Allowed tagged memory', tags: [tag] });
+    assert.deepEqual(saved.memory.tags, [tag]);
+  }
+});
+
+test('MCP strict tag settings use the destination dictionary, including for moves across workspaces', async (t) => {
+  const cwd = initGit(tempDirectory(t));
+  const other = initGit(tempDirectory(t));
+  const { projectKey } = resolveProjectKey(cwd);
+  const { projectKey: otherKey } = resolveProjectKey(other);
+  const config = loadConfig({ cwd, env: {}, userConfigData: {
+    tags: { strict: true, definitions: { 'global-only': 'A global tag' } },
+    projects: {
+      [projectKey]: { tags: { definitions: { 'project-only': 'A project tag' } } },
+      [otherKey]: { tags: { strict: false } },
+    },
+  } });
+  const { db, memory, expectError } = await fixture(t, { defaultCwd: cwd, config });
+  await expectError('mem_memory', {
+    action: 'write', content: 'Unknown project tag', tags: ['global-only'],
+  }, /Unknown tags: global-only.*Available tags: project-only/);
+  const { memory: saved } = await memory('write', { content: 'Move fixture', tags: ['project-only'] });
+  assert.equal(listTags(db, projectKey)[0].description, 'A project tag');
+  await expectError('mem_memory', { action: 'update', id: saved.id, scope: 'global' }, /Available tags: global-only/);
+  assert.equal((await memory('get', { id: saved.id })).project_key, projectKey);
+  const moved = await memory('update', { id: saved.id, scope: 'global', tags: ['global-only'] });
+  assert.deepEqual(moved.tags, ['global-only']);
+  assert.equal(listTags(db, projectKey)[0].count, 0);
+  const differentProject = (await memory('write', { cwd: other, content: 'Other fixture', tags: ['project-only'] })).memory;
+  assert.equal(differentProject.project_key, otherKey);
+  assert.equal(listTags(db, otherKey)[0].description, '');
 });

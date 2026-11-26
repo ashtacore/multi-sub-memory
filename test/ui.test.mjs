@@ -89,7 +89,7 @@ test('dashboard binds to IPv4 loopback and keeps a supplied database open', asyn
   for (const id of [
     'project', 'stats', 'error-banner', 'error-message', 'retry', 'toast-region',
     'view-memories', 'view-notes', 'view-dreamer',
-    'memories-heading', 'mem-search', 'mem-count', 'mem-scope', 'mem-category', 'mem-status', 'memory-list',
+    'memories-heading', 'mem-search', 'mem-count', 'mem-scope', 'mem-category', 'mem-status', 'mem-tag', 'memory-list',
     'notes-heading', 'note-list', 'notes-load-more',
     'dream-trigger', 'dream-dryrun', 'dream-hint', 'dream-result', 'dream-status', 'dream-config', 'dream-history',
     'edit-memory-dialog', 'edit-note-dialog', 'confirm-dialog', 'confirm-title', 'confirm-description',
@@ -1029,4 +1029,33 @@ test('a note delete with a stale confirmation preserves the note and its new com
   assert.deepEqual(confirmed.json, { deleted: true, id });
   assert.equal((await request(path + '/comments')).status, 404);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM note_comments WHERE note_id = ?').get(id).count, 0);
+});
+
+test('dashboard lists scoped tag dictionaries and filters, validates, and clears memory tags', async (t) => {
+  const { cwd, db, projectKey, request, mutate } = await fixture(t);
+  const { memory: saved } = await writeMemory(db, { cwd, content: 'Searchable deployment', tags: ['Audit'] });
+  const { memory: global } = await writeMemory(db, { scope: 'global', content: 'Searchable setup', tags: ['tools'] });
+  assert.deepEqual((await request('/api/tags?project_key=' + encodeURIComponent(projectKey))).json, {
+    tags: [{ tag: 'audit', description: '', count: 1 }],
+  });
+  assert.deepEqual((await request('/api/tags?project_key=global')).json, {
+    tags: [{ tag: 'tools', description: '', count: 1 }],
+  });
+  assert.equal((await request('/api/tags?project_key=all')).status, 400);
+  assert.equal((await request('/api/memories?tag=-bad')).status, 400);
+  for (const suffix of ['', '&q=searchable']) {
+    const { json } = await request('/api/memories?tag=Audit' + suffix);
+    assert.deepEqual(json.memories.map(({ id, tags }) => ({ id, tags })), [{ id: saved.id, tags: ['audit'] }]);
+  }
+  const url = '/api/memories/' + saved.id;
+  const invalid = await mutate('PATCH', url, { tags: ['a', 'b', 'c', 'd', 'e', 'f'] });
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.json.error, /at most 5/);
+  const updated = await mutate('PATCH', url, { tags: ['CI_Checks', 'Security', 'CI checks'] });
+  assert.equal(updated.status, 200);
+  assert.deepEqual(updated.json.memory.tags, ['ci-checks', 'security']);
+  assert.deepEqual((await request('/api/memories?tag=ci-checks')).json.memories.map(({ id }) => id), [saved.id]);
+  assert.deepEqual((await mutate('PATCH', url, { tags: [] })).json.memory.tags, []);
+  assert.deepEqual((await request('/api/memories?tag=ci-checks')).json.memories, []);
+  assert.deepEqual((await request('/api/memories?tag=tools')).json.memories.map(({ id }) => id), [global.id]);
 });

@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { ConfigSchema, expandHome, loadConfig, parseYaml, writeConfig } from '../src/config.mjs';
+import { ConfigSchema, expandHome, loadConfig, parseYaml, tagSettings, writeConfig } from '../src/config.mjs';
+import { resolveProjectKey } from '../src/project-id.mjs';
 import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
 const defaultDreamer = {
@@ -32,6 +33,7 @@ test('loads defaults and expands only the current home marker', (t) => {
     embedding: { model: 'BAAI/bge-base-en-v1.5', enabled: true },
     bootstrap: { tokenBudget: 2500 },
     dreamer: defaultDreamer,
+    tags: { strict: false, definitions: {} },
     indexers: defaultIndexers,
   });
   assert.equal(expandHome('~', homeDir), homeDir);
@@ -81,6 +83,7 @@ test('merges global and repository YAML settings before applying environment ove
     embedding: { model: 'project-model', enabled: false },
     bootstrap: { tokenBudget: 1200 },
     dreamer: defaultDreamer,
+    tags: { strict: false, definitions: {} },
     indexers: {
       ...defaultIndexers, backgroundRefresh: true, refreshIntervalMs: 30_000,
       omp: { sessionsDir: path.join(homeDir, 'user-omp') }, claude: { sessionsDir: path.join(homeDir, 'project-claude') },
@@ -101,11 +104,47 @@ test('merges global and repository YAML settings before applying environment ove
     embedding: { model: 'env-model', enabled: false },
     bootstrap: { tokenBudget: 1800 },
     dreamer: defaultDreamer,
+    tags: { strict: false, definitions: {} },
     indexers: defaultIndexers,
   });
   env.MULTI_SUB_MEMORY_NO_EMBEDDINGS = 'no';
   assert.equal(loadConfig({ ...options, env }).embedding.enabled, true);
   assert.equal(loadConfig({ ...options, env, userConfigPath }).bootstrap.tokenBudget, 1200);
+});
+
+test('loads strictTags from YAML with project overrides and precedence over the alias in each scope', (t) => {
+  const options = configFixture(t);
+  initGit(options.cwd);
+  const { projectKey } = resolveProjectKey(options.cwd);
+  const userConfigPath = path.join(options.homeDir, 'tags.yaml');
+  fs.writeFileSync(userConfigPath, [
+    'strictTags: true',
+    'tags: { strict: false, definitions: { global-tag: Global definition } }',
+    'projects:',
+    `  "${projectKey}":`,
+    '    strictTags: false',
+    '    tags: { strict: true, definitions: { project-tag: Project definition } }',
+    '  github.com/example/alias:',
+    '    tags: { strict: false }',
+  ].join('\n'));
+
+  const config = loadConfig({ ...options, userConfigPath });
+  assert.deepEqual(config.tags, { strict: false, definitions: { 'project-tag': 'Project definition' } });
+  assert.deepEqual(tagSettings(config, 'global'), { strict: true, definitions: { 'global-tag': 'Global definition' } });
+  assert.equal(tagSettings(config, 'github.com/example/alias').strict, false);
+  assert.equal(tagSettings(config, 'github.com/example/unconfigured').strict, true);
+});
+
+test('rejects empty kebab-case segments and overlong tag definitions in either scope', (t) => {
+  const options = configFixture(t);
+  const userConfigPath = path.join(options.homeDir, 'tag-validation.yaml');
+  for (const tag of ['release--plan', 'release-', 'a'.repeat(49)]) {
+    const tags = { definitions: { [tag]: 'Fixture' } };
+    for (const settings of [{ tags }, { projects: { 'github.com/example/repo': { tags } } }]) {
+      fs.writeFileSync(userConfigPath, JSON.stringify(settings));
+      assert.throws(() => loadConfig({ ...options, userConfigPath }), /Invalid config at/);
+    }
+  }
 });
 
 test('rejects invalid values and unknown keys in individual config layers', (t) => {
@@ -117,8 +156,13 @@ test('rejects invalid values and unknown keys in individual config layers', (t) 
     { bootstrap: { tokenBudget: 1.5 } },
     { embedding: { unknown: true } },
     { unexpected: true },
+    { strictTags: 'true' },
+    { tags: { strict: 'yes' } },
+    { tags: { definitions: { 'Bad Tag': 'invalid' } } },
+    { tags: { definitions: { good: false } } },
     { projects: { 'dir:legacy': {} } },
     { projects: { 'github.com/example/repo': { forkMode: 'fork' } } },
+    { projects: { 'github.com/example/repo': { strictTags: 1 } } },
     { projects: { 'github.com/example/repo': { bootstrap: { unknown: true } } } },
     { dbPath: '' },
     { dreamer: { http: { baseUrl: 'ftp://example.test' } } },

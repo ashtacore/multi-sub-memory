@@ -209,9 +209,17 @@ export function dreamResult(result) {
   const compactions = result.operations?.filter(({ type }) => type === 'compact_note_comments') ?? [];
   const commentActivity = compactions.length
     ? `${compactions.length} note ${compactions.length === 1 ? 'chain' : 'chains'} ${result.dryRun ? 'proposed for compaction' : 'compacted'}.` : '';
+  const tagOperations = result.tag_operations ?? [];
+  const tagActivity = tagOperations.length
+    ? `${tagOperations.length} tag ${tagOperations.length === 1 ? 'change' : 'changes'} ${result.dryRun ? 'proposed' : 'applied'}.` : '';
   const message = [title, result.memoriesReviewed + ' reviewed, ' + result.memoriesMerged + ' merged, '
-    + result.memoriesArchived + ' archived.', commentActivity, result.summary].filter(Boolean).join(' ');
+    + result.memoriesArchived + ' archived.', commentActivity, tagActivity, result.summary].filter(Boolean).join(' ');
   if (!result.dryRun) return message;
-  return [message, ...compactions.map(({ note_id, source_comment_ids, summary }) =>
-    `Note ${note_id} · Source comments ${source_comment_ids.join(', ')}\n${summary}`)].join('\n');
+  const comments = compactions.map(({ note_id, source_comment_ids, summary }) =>
+    `Note ${note_id} · Source comments ${source_comment_ids.join(', ')}\n${summary}`);
+  const tags = tagOperations.map(({ type, tag, from_tag, to_tag, description }) => {
+    const action = type === 'merge' ? `Merge tag ${from_tag} into ${to_tag}` : `Describe tag ${tag}`;
+    return description ? action + ' · ' + description : action;
+  });
+  return [message, ...comments, ...tags].join('\n');
 }

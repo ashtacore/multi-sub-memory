@@ -12,7 +12,7 @@ import { acquireLease, hashNormalizedContent, openDatabase, releaseLease } from 
 import { maybeTriggerAutoDream, runDream, shouldTriggerAutoDream } from '../src/dreamer/engine.mjs';
 import { createCliLlmRunner, createDreamRunner, createHttpLlmRunner, extractJsonPlan } from '../src/dreamer/runners.mjs';
 import { runIndexers } from '../src/indexers/runner.mjs';
-import { addNoteComment, getNote, listNoteComments, recordAccess, updateNote, updateNoteComment, writeMemory } from '../src/memory-service.mjs';
+import { addNoteComment, getNote, listNoteComments, listTags, memoryTags, recordAccess, updateNote, updateNoteComment, upsertTagDefinition, writeMemory } from '../src/memory-service.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
 import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
@@ -1246,4 +1246,138 @@ test('Dreamer rejects a comment summary planned before a human topic edit', asyn
   assert.equal(getNote(db, id).content, revisedContent);
   assert.deepEqual(chain.comments(), original);
   assert.equal(runs().at(-1).status, 'failed');
+});
+
+test('CLI Dreamer reviews an unreviewed memory within the prompt budget despite a large tag dictionary', async (t) => {
+  const { db, dream, memory } = fixture(t);
+  const { calls, spawnImpl } = spawnFixture();
+  const runner = createCliLlmRunner({ orchestrator: 'codex', spawnImpl });
+  const { limit, measure } = runner.promptBudget;
+  const content = 'm'.repeat(1_600);
+  addMemory(db, 'pending', { content });
+  for (let index = 0; index < Math.ceil(limit / 512); index++) {
+    upsertTagDefinition(db, projectKey, 'tag-' + index, 'd'.repeat(512));
+  }
+
+  const result = await dream(runner, { now: () => 100 });
+  const prompt = calls[0][1].at(-1);
+  const { memories, tag_dictionary } = JSON.parse(prompt.slice(prompt.indexOf('\n\n') + 2));
+  assert.ok(measure(prompt) <= limit);
+  assert.deepEqual(memories.map(({ id, content }) => ({ id, content })), [{ id: 'pending', content }]);
+  assert.ok(tag_dictionary.length > 0 && tag_dictionary.length < listTags(db, projectKey).length);
+  assert.equal(result.memoriesReviewed, 1);
+  assert.equal(memory('pending').last_dreamed_at, 100);
+});
+
+test('Dreamer repeatedly includes eligible note history before fitting a large tag dictionary', async (t) => {
+  const { db, dream } = fixture(t);
+  const chain = noteChain(db, 'eligible', 5);
+  const sourceIds = chain.progress.map(({ id }) => id);
+  for (let index = 0; index < 100; index++) {
+    upsertTagDefinition(db, projectKey, 'tag-' + index, 'd'.repeat(256));
+  }
+
+  const summary = 'Consolidated fixture progress';
+  const limit = 24_000;
+  const runner = Object.assign(({ systemPrompt, userPrompt }) => {
+    const { notes, tag_dictionary } = JSON.parse(userPrompt);
+    assert.match(systemPrompt, /compact_note_comments/);
+    assert.deepEqual(notes.map(({ id }) => id), ['eligible']);
+    assert.deepEqual(notes[0].comments.map(({ id }) => id).sort(), sourceIds.toSorted());
+    assert.ok(tag_dictionary.length > 0 && tag_dictionary.length < 100);
+    assert.ok(systemPrompt.length + 2 + userPrompt.length <= limit);
+    return resultFor([{
+      type: 'compact_note_comments', note_id: 'eligible', source_comment_ids: sourceIds, summary,
+    }]);
+  }, { promptBudget: { limit } });
+
+  const original = chain.comments();
+  assert.equal((await dream(runner, { dryRun: true })).operations[0].summary, summary);
+  assert.deepEqual(chain.comments(), original);
+  const applied = await dream(runner);
+  assert.equal(applied.status, 'completed');
+  const progress = chain.comments().filter(({ from_status }) => from_status === null);
+  assert.equal(progress.length, 1);
+  assert.equal(progress[0].body, summary);
+  assert.deepEqual(JSON.parse(progress[0].compacted_from_json), {
+    run_id: applied.runId, source_comment_ids: sourceIds,
+  });
+});
+
+test('Dreamer rejects tag operations with empty kebab-case segments or overlong names', async (t) => {
+  const { db, dream } = fixture(t);
+  upsertTagDefinition(db, projectKey, 'release-plan');
+  for (const tag of ['release--plan', 'release-', 'a'.repeat(49)]) {
+    for (const operation of [
+      { type: 'describe', tag, description: 'Fixture' },
+      { type: 'merge', from_tag: tag, to_tag: 'release-plan' },
+      { type: 'merge', from_tag: 'release-plan', to_tag: tag },
+    ]) {
+      await assert.rejects(
+        dream(() => ({ plan: { ...emptyPlan, tag_operations: [operation] } })),
+        /Dream plan failed validation: tag_operations\.0\./,
+      );
+    }
+  }
+  assert.deepEqual(listTags(db, projectKey).map(({ tag }) => tag), ['release-plan']);
+});
+
+test('Dreamer proposes and applies scoped tag merges and description refinements', async (t) => {
+  const { db, dream, memory } = fixture(t);
+  addMemory(db, 'a');
+  addMemory(db, 'b', { status: 'archived' });
+  addMemory(db, 'g', { project: 'global', scope: 'global' });
+  addMemory(db, 'other', { project: 'another-project' });
+  for (const tag of ['alias', 'canonical', 'one', 'two', 'three']) upsertTagDefinition(db, projectKey, tag);
+  upsertTagDefinition(db, 'global', 'alias', 'Global description');
+  upsertTagDefinition(db, 'another-project', 'alias', 'Other project description');
+  const addTag = db.prepare('INSERT INTO memory_tags VALUES (?, ?)');
+  for (const tag of ['alias', 'canonical', 'one', 'two', 'three']) addTag.run('a', tag);
+  for (const id of ['b', 'g', 'other']) addTag.run(id, 'alias');
+  const descriptions = listTags(db, projectKey);
+
+  const tag_operations = [
+    { type: 'merge', from_tag: 'alias', to_tag: 'canonical', description: 'Canonical subject' },
+    { type: 'describe', tag: 'one', description: 'A narrower subject' },
+  ];
+  const runner = ({ userPrompt }) => {
+    const { tag_dictionary, memories } = JSON.parse(userPrompt);
+    assert.deepEqual(tag_dictionary.find(({ tag }) => tag === 'alias'), { tag: 'alias', description: '', count: 2 });
+    assert.deepEqual(memories[0].tags, ['alias', 'canonical', 'one', 'three', 'two']);
+    return { plan: { ...emptyPlan, tag_operations } };
+  };
+  assert.deepEqual((await dream(runner, { dryRun: true })).tag_operations, tag_operations);
+  assert.deepEqual(listTags(db, projectKey), descriptions);
+  assert.deepEqual(memoryTags(db, 'b'), ['alias']);
+  assert.equal(memory('a').updated_at, 1);
+
+  const missing = [{ type: 'merge', from_tag: 'alias', to_tag: 'other' }];
+  for (const dryRun of [true, false]) {
+    await assert.rejects(dream(() => ({ plan: { ...emptyPlan, tag_operations: missing } }), { dryRun }), /unavailable/);
+  }
+  const live = await dream(runner);
+  assert.equal(live.status, 'completed');
+  assert.equal(JSON.parse(memory('a').metadata_json).dream_run_id, live.runId);
+  assert.deepEqual(memoryTags(db, 'a'), ['canonical', 'one', 'three', 'two']);
+  assert.deepEqual(memoryTags(db, 'b'), ['canonical']);
+  assert.ok(memory('a').updated_at > 1);
+  assert.equal(listTags(db, projectKey).find(({ tag }) => tag === 'alias'), undefined);
+  assert.equal(listTags(db, projectKey).find(({ tag }) => tag === 'canonical').description, 'Canonical subject');
+  assert.equal(listTags(db, projectKey).find(({ tag }) => tag === 'one').description, 'A narrower subject');
+  assert.deepEqual(memoryTags(db, 'g'), ['alias']);
+  assert.deepEqual(memoryTags(db, 'other'), ['alias']);
+  assert.equal(listTags(db, 'global')[0].description, 'Global description');
+});
+
+test('Dreamer reuses target tags and fills remaining slots from merged memories', async (t) => {
+  const { db, dream } = fixture(t);
+  addMemory(db, 'a');
+  addMemory(db, 'b');
+  for (const tag of ['a', 'b', 'c', 'd', 'e', 'z']) upsertTagDefinition(db, projectKey, tag);
+  const addTag = db.prepare('INSERT INTO memory_tags VALUES (?, ?)');
+  for (const tag of ['b', 'c', 'd', 'z']) addTag.run('a', tag);
+  for (const tag of ['a', 'b', 'e']) addTag.run('b', tag);
+  await dream(() => resultFor([{ type: 'merge', source_ids: ['a', 'b'], content: 'a' }]));
+  assert.deepEqual(memoryTags(db, 'a'), ['a', 'b', 'c', 'd', 'z']);
+  assert.deepEqual(memoryTags(db, 'b'), ['a', 'b', 'e']);
 });

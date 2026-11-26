@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { hashNormalizedContent } from './db.mjs';
 import { maybeTriggerAutoDream } from './dreamer/trigger.mjs';
 import { encodeFloat32Vector } from './embeddings.mjs';
-import { resolveConfigProject } from './config.mjs';
+import { resolveConfigProject, TAG_PATTERN, tagSettings } from './config.mjs';
 
 export const GLOBAL_PROJECT_KEY = 'global';
 export const MEMORY_CATEGORIES = Object.freeze([
@@ -90,9 +90,100 @@ function recordProject(db, projectKey, projectRoot, now) {
   `).run(projectKey, projectRoot, now);
 }
 
-function formatMemory(row) {
+export class TagValidationError extends Error {}
+
+export function normalizeTag(value) {
+  const tag = typeof value === 'string' ? value.trim().toLowerCase().replace(/[\s_]+/g, '-') : '';
+  if (!TAG_PATTERN.test(tag)) {
+    throw new TagValidationError('Invalid tag ' + JSON.stringify(value) +
+      '. Use 1-48 characters in lowercase alphanumeric groups separated by single hyphens.');
+  }
+  return tag;
+}
+
+function normalizeTags(values) {
+  if (!Array.isArray(values)) throw new TagValidationError('Tags must be an array');
+  const tags = [...new Set(values.map(normalizeTag))].sort();
+  if (tags.length > 5) throw new TagValidationError('A memory can have at most 5 tags');
+  return tags;
+}
+
+export function memoryTags(db, id) {
+  return db.prepare('SELECT tag FROM memory_tags WHERE memory_id = ? ORDER BY tag').all(id).map(({ tag }) => tag);
+}
+
+export function listTags(db, projectKey, config) {
+  const rows = db.prepare(`
+    SELECT d.tag, d.description, COUNT(m.id) AS count
+    FROM tag_dictionary d
+    LEFT JOIN memory_tags mt ON mt.tag = d.tag
+    LEFT JOIN memories m ON m.id = mt.memory_id AND m.project_key = d.project_key
+    WHERE d.project_key = ?
+    GROUP BY d.tag
+    ORDER BY d.tag
+  `).all(projectKey);
+  const tags = new Map(rows.map((row) => [row.tag, row]));
+  for (const [tag, description] of Object.entries(tagSettings(config, projectKey).definitions ?? {})) {
+    if (!tags.has(tag)) tags.set(tag, { tag, description, count: 0 });
+  }
+  return [...tags.values()].sort((a, b) => a.tag < b.tag ? -1 : Number(a.tag > b.tag));
+}
+
+export function upsertTagDefinition(db, projectKey, value, description = '') {
+  const tag = normalizeTag(value);
+  if (typeof description !== 'string') throw new TagValidationError('Tag description must be a string');
+  const now = Date.now();
+  return db.prepare(`
+    INSERT INTO tag_dictionary (project_key, tag, description, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT (project_key, tag) DO UPDATE SET
+      description = excluded.description, updated_at = MAX(excluded.updated_at, tag_dictionary.updated_at + 1)
+    RETURNING tag, description
+  `).get(projectKey, tag, description, now, now);
+}
+
+export function seedTagDefinitions(db, projectKey, config) {
+  const settings = tagSettings(config, projectKey);
+  const insert = db.prepare(`
+    INSERT INTO tag_dictionary (project_key, tag, description, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?) ON CONFLICT (project_key, tag) DO NOTHING
+  `);
+  const now = Date.now();
+  for (const [tag, description] of Object.entries(settings.definitions ?? {})) {
+    insert.run(projectKey, tag, description, now, now);
+  }
+  return settings.strict;
+}
+
+function setMemoryTags(db, row, tags, config, descriptions = {}) {
+  const { id, project_key: projectKey } = row;
+  const strict = seedTagDefinitions(db, projectKey, config);
+  const available = new Set(db.prepare('SELECT tag FROM tag_dictionary WHERE project_key = ? ORDER BY tag')
+    .all(projectKey).map(({ tag }) => tag));
+  const unknown = tags.filter((tag) => !available.has(tag));
+  if (strict && unknown.length) {
+    throw new TagValidationError(`Unknown tags: ${unknown.join(', ')}. Available tags: ${[...available].join(', ') || '(none)'}.`);
+  }
+  for (const tag of unknown) {
+    upsertTagDefinition(db, projectKey, tag, Object.hasOwn(descriptions, tag) ? descriptions[tag] : '');
+  }
+  db.prepare('DELETE FROM memory_tags WHERE memory_id = ?').run(id);
+  const insert = db.prepare('INSERT INTO memory_tags (memory_id, tag) VALUES (?, ?)');
+  for (const tag of tags) insert.run(id, tag);
+}
+
+function tagDescriptions(input) {
+  if (input.tag_descriptions === undefined) return {};
+  if (!isPlainObject(input.tag_descriptions)) throw new TagValidationError('Tag descriptions must be a map');
+  return Object.fromEntries(Object.entries(input.tag_descriptions).map(([tag, description]) => {
+    if (typeof description !== 'string') throw new TagValidationError('Tag description must be a string');
+    return [normalizeTag(tag), description];
+  }));
+}
+
+export function formatMemory(db, row) {
   const { metadata_json, last_dreamed_at, ...memory } = row;
-  return { ...memory, metadata: JSON.parse(metadata_json) };
+  return { ...memory, tags: memoryTags(db, row.id), metadata: JSON.parse(metadata_json) };
 }
 
 function isPlainObject(value) {
@@ -204,6 +295,8 @@ export async function writeMemory(db, input, context = {}) {
   if (!MEMORY_SCOPES.includes(scope)) throw new Error('Memory scope must be project or global');
   const { projectKey, projectRoot } = projectIdentityFor(scope, input, context);
   const hash = hashNormalizedContent(content);
+  const tags = input.tags === undefined ? undefined : normalizeTags(input.tags);
+  const descriptions = tagDescriptions(input);
   const result = inWriteTransaction(db, () => {
     const now = Date.now();
     recordProject(db, projectKey, projectRoot, now);
@@ -219,7 +312,10 @@ export async function writeMemory(db, input, context = {}) {
       input.source_orchestrator ?? null, input.source_session_id ?? null,
       mergeMetadata(null, input.metadata), now, now, now,
     );
-    if (row) return { memory: formatMemory(row), deduplicated: false, reactivated: false };
+    if (row) {
+      setMemoryTags(db, row, tags ?? [], context.config, descriptions);
+      return { memory: formatMemory(db, row), deduplicated: false, reactivated: false };
+    }
 
     const existing = db.prepare(`
       SELECT * FROM memories WHERE project_key = ? AND scope = ? AND normalized_hash = ?
@@ -237,7 +333,8 @@ export async function writeMemory(db, input, context = {}) {
       now, existing.id,
     );
     if (updated.content !== existing.content) invalidateEmbedding(db, existing.id);
-    const memory = formatMemory(trackMutationAccess(db, 'memories', updated, context.trackAccess));
+    if (tags !== undefined) setMemoryTags(db, updated, tags, context.config, descriptions);
+    const memory = formatMemory(db, trackMutationAccess(db, 'memories', updated, context.trackAccess));
     return { memory, deduplicated: true, reactivated };
   });
   if (!result.deduplicated || result.reactivated) {
@@ -255,6 +352,8 @@ export async function writeMemory(db, input, context = {}) {
 
 export async function updateMemory(db, input, context = {}) {
   rejectAccessFields(input);
+  const tags = input.tags === undefined ? undefined : normalizeTags(input.tags);
+  const descriptions = tagDescriptions(input);
   const content = input.content === undefined ? undefined : requireContent(input.content);
   if (input.scope !== undefined && !MEMORY_SCOPES.includes(input.scope)) {
     throw new Error('Memory scope must be project or global');
@@ -307,8 +406,12 @@ export async function updateMemory(db, input, context = {}) {
         Date.now(), input.id,
       );
       if (changedContent) invalidateEmbedding(db, input.id);
+      if (tags !== undefined || projectKey !== existing.project_key) {
+        setMemoryTags(db, row, tags ?? normalizeTags(memoryTags(db, row.id)), context.config, descriptions);
+      }
       const accessed = trackMutationAccess(db, 'memories', row, context.trackAccess);
-      return { memory: context.rawRow ? accessed : formatMemory(accessed), changedContent };
+      const memory = context.rawRow ? { ...accessed, tags: memoryTags(db, row.id) } : formatMemory(db, accessed);
+      return { memory, changedContent };
     });
   } catch (error) {
     if (error.errcode === 2067 || error.code === 'SQLITE_CONSTRAINT_UNIQUE'
@@ -332,15 +435,16 @@ export function archiveMemory(db, input, { trackAccess } = {}) {
     const row = db.prepare(`
       UPDATE memories SET status = ?, superseded_by = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ? RETURNING *
     `).get(supersededBy === null ? 'archived' : 'superseded', supersededBy, Date.now(), input.id);
-    return formatMemory(trackMutationAccess(db, 'memories', requireRow(row, 'Memory', input.id), trackAccess));
+    const accessed = trackMutationAccess(db, 'memories', requireRow(row, 'Memory', input.id), trackAccess);
+    return formatMemory(db, accessed);
   });
 }
 
 export function getMemory(db, id) {
-  return formatMemory(memoryRow(db, id));
+  return formatMemory(db, memoryRow(db, id));
 }
 
-export function selectMemories(db, { projectKey, scope, status, category, limit }) {
+export function selectMemories(db, { projectKey, scope, status, category, tag, limit }) {
   const filters = [];
   const parameters = [];
   if (scope === 'all') {
@@ -358,6 +462,10 @@ export function selectMemories(db, { projectKey, scope, status, category, limit 
     filters.push('category = ?');
     parameters.push(category);
   }
+  if (tag !== undefined) {
+    filters.push('id IN (SELECT memory_id FROM memory_tags WHERE tag = ?)');
+    parameters.push(normalizeTag(tag));
+  }
   if (limit !== undefined) parameters.push(limit);
   return db.prepare(`
     SELECT * FROM memories WHERE ${filters.join(' AND ')}
@@ -372,9 +480,9 @@ export function listMemories(db, input = {}, context = {}) {
     projectKey: scope === 'all'
       ? resolveCachedProjectKey(input.cwd ?? context.defaultCwd, context.config, { optional: true })?.projectKey ?? GLOBAL_PROJECT_KEY
       : projectKeyFor(scope, input, context),
-    scope, status, category,
+    scope, status, category, tag: input.tag,
     limit: Math.max(1, Math.min(MAX_LIST_LIMIT, Math.trunc(limit))),
-  }).map(formatMemory);
+  }).map((row) => formatMemory(db, row));
 }
 
 export function writeNote(db, input, context = {}) {

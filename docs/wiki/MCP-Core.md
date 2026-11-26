@@ -42,20 +42,47 @@ process. [Dreamer](Dreamer.md)
 | Tool | Action | Behavior |
 |---|---|---|
 | `mem_memory` | `write` | Stores content under the current project or the shared global key. Defaults to category `GENERAL` and importance 3. Returns the memory and flags for deduplication and reactivation. |
-| `mem_memory` | `get`, `update`, `archive` | Looks up a memory by ID. Updates can change content, category, importance, scope, status, or metadata. To mark a memory as superseded, use `archive` with `superseded_by` set to the ID of a different, existing memory. |
-| `mem_memory` | `list` | Lists active memories from the current project and global scope by default. Accepts scope, status, category, and limit filters. The default limit is 50 and the maximum is 200. |
+| `mem_memory` | `get`, `update`, `archive` | Looks up a memory by ID. Updates can change content, category, importance, scope, status, metadata, or tags. To mark a memory as superseded, use `archive` with `superseded_by` set to the ID of a different, existing memory. |
+| `mem_memory` | `list` | Lists active memories from the current project and global scope by default. Accepts scope, status, category, tag, and limit filters. The default limit is 50 and the maximum is 200. |
 | `mem_note` | `write` | Creates a current-project topic with `content` and an optional `surface_condition`. Topics start active by default and can start pending. |
 | `mem_note` | `read` | Lists active and pending topics for the current project by default. Accepts a status filter or `all` and can include global topics with `include_global`. |
 | `mem_note` | `get` | Returns `note`, `comments`, and `next_cursor` for a topic ID. The comment limit defaults to 50 and is capped at 200. |
 | `mem_note` | `update`, `dismiss` | Edits a topic or sets its status to dismissed by ID. A status transition requires a nonblank `comment`. |
 | `mem_note` | `comment` | Appends a nonblank progress `comment` by topic ID. Returns `note` and `comment`. |
 | `mem_bootstrap` | | Returns a Markdown summary of active memories and project notes. Accepts `token_budget`, `include_notes`, and `cwd`. |
-| `mem_search` | | Searches memories, notes, and indexed transcript messages. Accepts `query`, `cwd`, `sources`, `scope`, `orchestrators`, `since`, and `limit`. |
+| `mem_search` | | Searches memories, notes, and indexed transcript messages. Accepts `query`, `cwd`, `sources`, `scope`, `orchestrators`, `since`, `tag`, and `limit`. |
 | `mem_expand` | | Reads an indexed transcript by `session_id` and optional `file_id`. Accepts inclusive `start_seq` and `end_seq`, inclusive `line_start` and `line_end`, and `max_chars`. |
 
 Memory, note, search, and expansion results contain JSON in the MCP text
 response. Validation and tool errors use MCP text responses with the error flag
 set. Bootstrap returns the summary as plain text.
+
+## Memory tags
+
+Each memory has one category and a sorted array of up to five optional tags.
+Writes and updates trim tags, lowercase them, and replace runs of whitespace
+and underscores with a hyphen before deduplication. A tag uses up to 48
+characters in nonempty groups of ASCII lowercase letters and digits,
+separated by single hyphens. Send `tags` to replace the current assignment or `tags: []` to
+clear it. Omitting tags preserves existing assignments on updates and
+deduplicated writes.
+
+Each repository has its own dictionary. Global memories use the global
+dictionary. Permissive settings allow new tags and accept an optional
+`tag_descriptions` map for those new entries. Strict settings reject unknown
+tags and report the available names. Moves validate or create the submitted
+tags in the destination dictionary. Omitting tags during a move carries the
+existing assignments into that destination.
+[Tag settings](Setup-and-Doctor.md#tag-settings)
+
+## Memory guide
+
+The server publishes the bundled authoring guide at
+`skill://multi-sub-memory/memory-guide` via `resources/list` and
+`resources/read`. The pinned TypeScript SDK provides resources through
+protocol revision `2025-11-25`. Native Skills extension negotiation requires
+a newer protocol and SDK. Setup can install the same guide for local hosts.
+[Local skills](Setup-and-Doctor.md#local-skills)
 
 ## Note topics and comments
 
@@ -124,6 +151,9 @@ start at midnight UTC. Memories and notes use their update time. Transcript
 messages use their own timestamp when valid and the file's last index time
 otherwise. Transcript indexing accepts ISO timestamps and epoch
 milliseconds from transcripts and stores valid values as UTC ISO 8601.
+
+The `tag` filter limits results to memories with that exact normalized tag
+within the selected search scope. Memory hits include their sorted tags.
 
 FTS5 treats user input as quoted search terms and ranks candidates with BM25.
 Search attempts query embedding only when the engine can attempt inference and a

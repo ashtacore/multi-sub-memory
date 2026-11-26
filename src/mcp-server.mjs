@@ -12,6 +12,7 @@ import {
   addNoteComment, archiveMemory, dismissNote, getMemory, getNote, listMemories, listNoteComments, readNotes,
   readWithAccess, recordAccess, updateMemory, updateNote, writeMemory, writeNote,
 } from './memory-service.mjs';
+import { MEMORY_GUIDE_URI, readMemoryGuide } from './memory-guide.mjs';
 import { hybridSearch, SEARCH_ORCHESTRATORS, SEARCH_SCOPES, SEARCH_SOURCES } from './search.mjs';
 
 export { expandSession, hybridSearch };
@@ -48,6 +49,12 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
   const server = new McpServer({ name: 'multi-sub-memory', version: '0.1.0' });
   const context = { config, embeddingEngine, defaultCwd, trackAccess: true };
 
+  server.registerResource('memory-guide', MEMORY_GUIDE_URI, {
+    title: 'Memory guide', mimeType: 'text/markdown',
+  }, (uri) => ({
+    contents: [{ uri: uri.href, mimeType: 'text/markdown', text: readMemoryGuide() }],
+  }));
+
   server.registerTool('mem_memory', {
     description: 'Write, update, archive, get, or list durable project and global memories. Write requires content. Update, archive, and get require id.',
     inputSchema: z.strictObject({
@@ -59,6 +66,9 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       status: z.enum([...MEMORY_STATUSES, 'all']).describe('Use all only for list.').optional(),
       superseded_by: z.string().trim().min(1).optional(),
       metadata: z.json().optional(),
+      tags: z.array(z.string()).describe('Tags for write or update.').optional(),
+      tag_descriptions: z.record(z.string(), z.string()).optional(),
+      tag: z.string().describe('Tag filter for list.').optional(),
       limit: z.number().int().optional(),
     }),
   }, toolHandler((input) => {
@@ -137,6 +147,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
     description: 'Search memories, handoff notes, and indexed transcript messages. Use a transcript hit’s session_id, file_id, and seq to expand it.',
     inputSchema: {
       query: z.string(),
+      tag: z.string().describe('Search only memories with this tag.').optional(),
       cwd: cwdField,
       sources: z.array(z.enum(SEARCH_SOURCES)).optional(),
       scope: z.enum(SEARCH_SCOPES).optional(),

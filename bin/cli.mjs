@@ -128,6 +128,10 @@ async function dream(args) {
     console.log(`Dreamer ${result.status}. Reviewed ${memoriesReviewed} memories.`);
     console.log(`Merges ${memoriesMerged}, archives ${memoriesArchived}, updates ${memoriesUpdated}, additions ${memoriesAdded}.`);
     if (summary) console.log(summary);
+    if (result.dryRun && result.tag_operations?.length) {
+      console.log('Proposed tag operations');
+      for (const operation of result.tag_operations) console.log('- ' + JSON.stringify(operation));
+    }
     if (result.dryRun && result.operations?.length) {
       console.log('Proposed operations');
       for (const operation of result.operations) {

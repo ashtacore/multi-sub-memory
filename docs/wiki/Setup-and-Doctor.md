@@ -30,6 +30,32 @@ A checkout with both remotes uses the upstream key by default. Set
 settings only for checkouts with that origin. Use the `local:<hash>` key for a
 repository without a usable remote. See [project identity](MCP-Core.md#project-identity).
 
+## Tag settings
+
+`strictTags` defaults to `false`. Set it at the top level to establish the
+default strictness for all scopes, and override it under a repository key
+as needed. Both scopes also accept `tags.strict`. When a scope sets both keys,
+`strictTags` takes precedence within that scope. Top-level definitions seed the
+global dictionary. Repository definitions seed only that repository. A
+successful tag write for a scope adds its missing definitions, keeping
+descriptions already stored there.
+A definition still present in the YAML remains configured even if Dreamer
+merges the stored tag. Remove retired names from YAML to keep them retired
+in strict mode.
+
+```yaml
+strictTags: true
+tags:
+  definitions:
+    tooling: Tools shared across repositories
+projects:
+  github.com/example/repo:
+    strictTags: false
+    tags:
+      definitions:
+        release: Release workflow and decisions
+```
+
 ## MCP registration
 
 Setup detects hosts through their settings, transcript directories, and executables on `PATH`. Select `omp`, `claude`, `codex`, or `agy` by name. `--host all` selects every supported host, and `--host none` prints manual snippets for all hosts. Without an explicit selection, `--yes` registers detected hosts. Each snippet configures a stdio server that runs `npx -y multi-sub-memory`.
@@ -42,6 +68,23 @@ Setup detects hosts through their settings, transcript directories, and executab
 | Antigravity | `~/.gemini/antigravity/mcp_config.json` | `~/.gemini/antigravity/brain` |
 
 Setup merges the server's command and arguments into the selected host files and saves a `.bak` copy before replacing an existing file. The backup contains the original host settings and may include credentials. For JSON hosts, the edit preserves unrelated settings, formatting, and large integer values byte-for-byte. For Codex, the automatic edit targets the server's TOML table. An existing remote MCP registration requires a manual edit. If setup reports that it cannot safely edit the file, use the printed snippet as a guide to edit the existing registration. Commands accept `--home` and `--omp-config`, `--claude-config`, `--codex-config`, and `--agy-config` to select alternative paths.
+
+## Local skills
+
+Pass `--skills` during setup to install the bundled memory guide for
+the selected MCP hosts. Use `--install-skills <omp|claude|codex|agy|all>`
+or `--uninstall-skills <omp|claude|codex|agy|all>` to manage just the guide.
+Both explicit flags accept repeated hosts or a comma-separated list. Skill-only
+commands can run without prompts and leave settings and storage untouched.
+Setup checks the marker and content digest before updating or removing a
+skill. User-edited and unmanaged files are preserved.
+
+| Host | Skill directory |
+|---|---|
+| OMP | `~/.omp/agent/skills/multi-sub-memory/` |
+| Claude Code | `~/.claude/skills/multi-sub-memory/` |
+| Codex | `~/.agents/skills/multi-sub-memory/` |
+| Antigravity App and IDE | `~/.gemini/config/skills/multi-sub-memory/` |
 
 ## Startup hooks
 

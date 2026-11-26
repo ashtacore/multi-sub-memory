@@ -7,6 +7,8 @@ const categories = ['ARCHITECTURE', 'CONFIG_VALUES', 'CONSTRAINTS', 'PROJECT_RUL
 const projectSelect = byId('project');
 const editMemoryProjectSelect = byId('edit-memory-dialog').querySelector('select[name="project_key"]');
 const search = byId('mem-search');
+const memTag = byId('mem-tag');
+const tagOptions = byId('memory-tag-options');
 const memSort = byId('mem-sort');
 const memoryCount = byId('mem-count');
 const notesLoadMore = byId('notes-load-more');
@@ -218,6 +220,21 @@ function handleDreamSort(column) {
   void refreshView();
 }
 
+async function refreshTagOptions(projectKey, request) {
+  if (projectKey === 'all' || !projectKey) {
+    tagOptions.replaceChildren();
+    return;
+  }
+  try {
+    const { tags } = await api('tags', { params: { project_key: projectKey }, signal: request.signal });
+    if (!request.signal.aborted) {
+      tagOptions.replaceChildren(...tags.map(({ tag, description }) => new Option(description, tag)));
+    }
+  } catch {
+    if (!request.signal.aborted) tagOptions.replaceChildren();
+  }
+}
+
 async function refreshView({ quiet = false, append = false } = {}) {
   clearTimeout(searchTimer);
   viewRequest?.abort();
@@ -232,6 +249,11 @@ async function refreshView({ quiet = false, append = false } = {}) {
       q: search.value, scope: byId('mem-scope').value, category: byId('mem-category').value,
       status: byId('mem-status').value, ...splitSort(savedMemorySort ?? memSort.value),
     });
+    if (memTag.value.trim()) params.tag = memTag.value.trim();
+    const tagProject = params.project_key === 'all' && params.scope === 'global' ? 'global' : params.project_key;
+    if (tagOptions.dataset.projectKey !== tagProject) tagOptions.replaceChildren();
+    tagOptions.dataset.projectKey = tagProject;
+    void refreshTagOptions(tagProject, request);
     if (!quiet) memoryCount.textContent = 'Loading…';
   }
   if (current === 'notes') {
@@ -368,6 +390,7 @@ projectSelect.addEventListener('change', () => {
   void refreshView();
 });
 search.addEventListener('input', scheduleSearch);
+memTag.addEventListener('input', scheduleSearch);
 for (const id of ['mem-scope', 'mem-category', 'mem-status', 'mem-sort', 'note-sort']) {
   byId(id).addEventListener('change', () => void refreshView());
 }

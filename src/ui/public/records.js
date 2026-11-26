@@ -156,13 +156,21 @@ export function renderRecords(list, records, kind, {
     projectBadge.dataset.projectKey = record.project_key;
     projectBadge.title = record.project_key;
     tags.push(badge(categoryText(record.status), toneFor(record.status)), projectBadge);
+    if (isMemory) {
+      for (const tag of record.tags ?? []) {
+        const label = badge(tag);
+        label.dataset.testid = 'mem-tag-badge';
+        tags.push(label);
+      }
+    }
     if (!isMemory && record.surface_condition) tags.push(badge(record.surface_condition));
 
     const edit = button('Edit', prefix + '-edit', (trigger) => {
       if (isMemory) {
-        const { content, category, importance, status, project_key } = record;
-        editMemory(trigger, { content, category, importance, status, project_key },
+        const { content, category, importance, status, project_key, tags = [] } = record;
+        editMemory(trigger, { content, category, importance, status, project_key, tags: tags.join(', ') },
           (values) => {
+            if ('tags' in values) values.tags = values.tags.split(',').map((tag) => tag.trim()).filter(Boolean);
             if ('importance' in values) values.importance = Number(values.importance);
             if ('project_key' in values) {
               values.scope = values.project_key === 'global' ? 'global' : 'project';

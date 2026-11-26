@@ -1,7 +1,7 @@
 import {
   cosineSimilarity, decodeFloat32Vector, DEFAULT_EMBEDDING_DIMS, DEFAULT_EMBEDDING_MODEL,
 } from './embeddings.mjs';
-import { MAX_LIST_LIMIT, resolveCachedProjectKey } from './memory-service.mjs';
+import { MAX_LIST_LIMIT, memoryTags, normalizeTag, resolveCachedProjectKey } from './memory-service.mjs';
 
 export const SEARCH_SOURCES = Object.freeze(['memory', 'note', 'transcript']);
 export const SEARCH_SCOPES = Object.freeze(['current_project', 'all_projects']);
@@ -86,7 +86,7 @@ function parseSince(since) {
   throw new Error('since must be a valid ISO 8601 date');
 }
 
-function sourceFilter(source, { scope, projectKey, orchestrators, sinceMs, memoryFilters }) {
+function sourceFilter(source, { scope, projectKey, orchestrators, sinceMs, memoryFilters, tag }) {
   const clauses = [];
   const params = [];
   if (source === sourceQueries.memory && memoryFilters) {
@@ -100,6 +100,10 @@ function sourceFilter(source, { scope, projectKey, orchestrators, sinceMs, memor
       }
     }
   } else if (source.status) clauses.push(source.status);
+  if (source === sourceQueries.memory && tag !== undefined) {
+    clauses.push('m.id IN (SELECT memory_id FROM memory_tags WHERE tag = ?)');
+    params.push(tag);
+  }
   if (scope === 'current_project') {
     clauses.push(source.project);
     params.push(projectKey);
@@ -307,7 +311,9 @@ export async function hybridSearch(db, options = {}) {
   } = options;
   if (!SEARCH_SCOPES.includes(scope)) throw new Error('scope must be current_project or all_projects');
   if (!Number.isFinite(rrfK) || rrfK <= 0) throw new Error('rrfK must be positive and finite');
-  const sources = validateSelection('sources', requestedSources, SEARCH_SOURCES);
+  const tag = options.tag === undefined ? undefined : normalizeTag(options.tag);
+  const sources = validateSelection('sources', requestedSources, SEARCH_SOURCES)
+    .filter((source) => tag === undefined || source === 'memory');
   const orchestrators = options.orchestrators === undefined
     ? undefined : validateSelection('orchestrators', options.orchestrators, SEARCH_ORCHESTRATORS);
   const sinceMs = since === undefined ? undefined : parseSince(since);
@@ -320,7 +326,7 @@ export async function hybridSearch(db, options = {}) {
 
   const candidateLimit = Math.min(Math.max(limit * 4, 50), 200);
   const match = sanitizeFtsQuery(trimmedQuery);
-  const filters = { scope, projectKey, orchestrators, sinceMs, memoryFilters };
+  const filters = { scope, projectKey, orchestrators, sinceMs, memoryFilters, tag };
   const fts = [];
   const embedding = embeddingEngine && hasEligibleVectors(db, sources, filters, embeddingEngine)
     ? await embedQuery(embeddingEngine, trimmedQuery) : null;
@@ -338,6 +344,7 @@ export async function hybridSearch(db, options = {}) {
   fts.sort((a, b) => a.rank_score - b.rank_score || compareCandidates(a, b));
   const vectors = embedding ? readVectorCandidates(db, sources, filters, embedding, candidateLimit) : [];
   result.mode = vectors.length > 0 ? 'hybrid' : 'fts-only';
-  result.results = fuseRanks(fts.slice(0, candidateLimit), vectors, rrfK, limit);
+  result.results = fuseRanks(fts.slice(0, candidateLimit), vectors, rrfK, limit).map((hit) =>
+    hit.source === 'memory' ? { ...hit, tags: memoryTags(db, hit.id) } : hit);
   return result;
 }
