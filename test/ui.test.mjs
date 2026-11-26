@@ -677,13 +677,13 @@ test('global Dreamer retains the most recently used available checkout after res
   assert.equal((await mutate('POST', endpoint, { project_key: projectKey, checkout: configured, dry_run: true })).status, 400);
 });
 
-test('global Dreamer discovers both checkouts after normal project writes and retains them after restart', async (t) => {
+test('global Dreamer defaults to the most recent available checkout after normal writes and restart', async (t) => {
   const projectKey = 'example.test/owner/shared';
   const roots = [];
   const { request, restart } = await fixture(t, {
     globalMode: true,
     async beforeStart({ cwd, dbPath }) {
-      for (const name of ['first', 'second']) {
+      for (const name of ['first', 'second', 'third']) {
         const checkout = path.join(cwd, name);
         await mkdir(checkout);
         initGit(checkout);
@@ -696,6 +696,7 @@ test('global Dreamer discovers both checkouts after normal project writes and re
           db.close();
         }
       }
+      await rm(roots[2], { recursive: true });
     },
   });
   const endpoint = '/api/dreamer?project_key=' + encodeURIComponent(projectKey);

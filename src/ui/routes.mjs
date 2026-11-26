@@ -177,8 +177,10 @@ function projectCheckouts(context, settings, projectKey) {
   const { db, defaultProjectKey, defaultProjectRoot, configOptions, checkoutState } = context;
   const remembered = checkoutState.get(projectKey);
   const registered = db.prepare('SELECT project_root FROM projects WHERE project_key = ?').get(projectKey);
-  const observed = db.prepare('SELECT project_root FROM project_checkouts WHERE project_key = ? ORDER BY project_root')
-    .all(projectKey);
+  const observed = db.prepare(`
+    SELECT project_root FROM project_checkouts WHERE project_key = ?
+    ORDER BY last_used_order DESC, project_root
+  `).all(projectKey);
   const transcripts = db.prepare(`
     SELECT project_root FROM transcript_files WHERE project_key = ? AND project_root IS NOT NULL
     GROUP BY project_root ORDER BY MAX(last_indexed_at) DESC
@@ -187,8 +189,8 @@ function projectCheckouts(context, settings, projectKey) {
     ...remembered.recent,
     registered?.project_root,
     ...(settings.projects?.[projectKey]?.checkouts ?? []),
-    ...remembered.checkouts,
     ...observed.map(({ project_root }) => project_root),
+    ...remembered.checkouts,
     ...transcripts.map(({ project_root }) => project_root),
     projectKey === defaultProjectKey ? defaultProjectRoot : null,
   ]);

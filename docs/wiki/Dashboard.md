@@ -105,8 +105,9 @@ Successful manual runs, including dry runs, record checkout usage in
 `<database>.dreamer-checkouts.json` beside the active SQLite database. The
 dashboard prefers the most recently used checkout that still exists and belongs
 to the repository. With no usable run history, it tries the current registry
-root, configured paths in YAML order, previously discovered roots, recently
-indexed paths, and the launch workspace. If checkout history cannot be saved,
+root, configured paths in YAML order, roots observed in project writes from
+most to least recent, other remembered roots, recently indexed paths, and
+the launch workspace. If checkout history cannot be saved,
 the dashboard returns the completed result with a warning. Live runs use
 the selected repository's embedding settings.
 
