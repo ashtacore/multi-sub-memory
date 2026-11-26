@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 let startup;
 let stopping = false;
 let stopped = false;
+const smokeTest = process.argv.includes('--smoke-test');
 
 app.on('before-quit', (event) => {
   if (!startup || stopped) return;
@@ -34,6 +35,7 @@ app.whenReady().then(async () => {
 
   const window = new BrowserWindow({
     title: 'Multi-Sub Memory',
+    show: !smokeTest,
     width: 1200,
     height: 820,
     webPreferences: {
@@ -53,7 +55,23 @@ app.whenReady().then(async () => {
   window.webContents.on('will-frame-navigate', restrictNavigation);
   window.webContents.on('will-redirect', restrictNavigation);
   await window.loadURL(dashboard.url + '/');
-}).catch((error) => {
+  if (smokeTest) {
+    const response = await fetch(dashboard.url + '/api/overview');
+    if (!response.ok || !(await response.json()).db?.ok) {
+      throw new Error('Packaged dashboard did not report a healthy database');
+    }
+    app.quit();
+  }
+}).catch(async (error) => {
+  if (smokeTest) {
+    console.error(error);
+    try {
+      await startup?.then((dashboard) => dashboard.close());
+    } finally {
+      app.exit(1);
+    }
+    return;
+  }
   if (!stopping) dialog.showErrorBox('Could not open Multi-Sub Memory', error.message);
   app.quit();
 });

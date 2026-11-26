@@ -12,7 +12,10 @@ import { normalizePath, resolveProjectKey } from '../src/project-id.mjs';
 import { allowedLoopbackGuards, startDashboardServer } from '../src/ui/server.mjs';
 import { fixtureGit, initGit, writeProjectConfig } from './git-fixtures.mjs';
 
-async function fixture(t, { dreamer, env = {}, embeddingEngine, gitWorkspace = true, globalMode = false } = {}) {
+async function fixture(t, {
+  dreamer, env = {}, embedding = { enabled: false }, embeddingEngine, gitWorkspace = true, globalMode = false,
+  beforeStart,
+} = {}) {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'multi-sub-memory-ui-'));
   if (gitWorkspace) initGit(cwd);
   const dbPath = path.join(cwd, 'dashboard.db');
@@ -28,7 +31,7 @@ async function fixture(t, { dreamer, env = {}, embeddingEngine, gitWorkspace = t
     }
   });
   await writeFile(userConfigPath, JSON.stringify({
-    dbPath, embedding: { enabled: false }, ...(dreamer ? { dreamer } : {}),
+    dbPath, embedding, ...(dreamer ? { dreamer } : {}),
   }));
   async function restart(dashboardEnv) {
     await dashboard?.close();
@@ -38,6 +41,7 @@ async function fixture(t, { dreamer, env = {}, embeddingEngine, gitWorkspace = t
     dashboard = await startDashboardServer({ cwd, globalMode, userConfigPath, db, env: dashboardEnv, embeddingEngine, port: 0 });
     return db;
   }
+  await beforeStart?.({ cwd, dbPath });
   await restart(env);
   const projectKey = resolveProjectKey(cwd, { optional: true })?.projectKey ?? null;
 
@@ -571,7 +575,7 @@ test('Dreamer rejects unknown checkouts and uses the launch workspace settings b
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM dream_runs').get().count, 0);
 });
 
-test('global Dreamer preserves a registry-only checkout after using a configured checkout and restarting', async (t) => {
+test('global Dreamer retains the most recently used available checkout after restarting', async (t) => {
   const models = [];
   const runner = createServer(async (req, res) => {
     const chunks = [];
@@ -599,6 +603,7 @@ test('global Dreamer preserves a registry-only checkout after using a configured
   }
   const registered = await checkout('registered', projectKey);
   const configured = await checkout('configured', projectKey);
+  const newer = await checkout('newer', projectKey);
   const unlisted = await checkout('unlisted', projectKey);
   const another = await checkout('another', anotherKey);
   const missing = path.join(cwd, 'removed');
@@ -615,7 +620,7 @@ test('global Dreamer preserves a registry-only checkout after using a configured
     dbPath,
     dreamer,
     projects: {
-      [projectKey]: { checkouts: [configured, another, missing, nonRoot], dreamer: { http: { model: 'shared-model' } } },
+      [projectKey]: { checkouts: [configured, newer, another, missing, nonRoot], dreamer: { http: { model: 'shared-model' } } },
       [anotherKey]: { checkouts: [another] },
     },
   });
@@ -633,7 +638,7 @@ test('global Dreamer preserves a registry-only checkout after using a configured
   const status = async (key) => request('/api/dreamer?project_key=' + encodeURIComponent(key));
   const info = await status(projectKey);
   assert.equal(info.status, 200, info.text);
-  assert.deepEqual(info.json.checkouts, [registered, configured]);
+  assert.deepEqual(info.json.checkouts, [registered, configured, newer]);
   assert.deepEqual((await status(anotherKey)).json.checkouts, [another]);
   assert.equal(info.json.config.runner.model, 'shared-model');
   for (const checkout of [another, missing, unlisted, nonRoot]) {
@@ -648,28 +653,61 @@ test('global Dreamer preserves a registry-only checkout after using a configured
   });
   assert.equal(response.status, 200, response.text);
   assert.equal(response.json.status, 'dry-run');
-  assert.deepEqual((await status(projectKey)).json.checkouts, [configured, registered]);
+  assert.deepEqual((await status(projectKey)).json.checkouts, [configured, registered, newer]);
+  const newerRun = await mutate('POST', endpoint, { project_key: projectKey, checkout: newer, dry_run: true });
+  assert.equal(newerRun.status, 200, newerRun.text);
   const defaultRun = await mutate('POST', endpoint, { project_key: anotherKey, dry_run: true });
   assert.equal(defaultRun.status, 200, defaultRun.text);
   assert.equal(defaultRun.json.status, 'dry-run');
-  assert.deepEqual(models, ['shared-model', 'default-model']);
+  assert.deepEqual(models, ['shared-model', 'shared-model', 'default-model']);
 
   const reopenedDb = await restart({});
   assert.equal(reopenedDb.prepare('SELECT project_root FROM projects WHERE project_key = ?').get(projectKey).project_root,
     registered);
   const checkoutState = JSON.parse(await readFile(dbPath + '.dreamer-checkouts.json', 'utf8'));
-  assert.equal(checkoutState[projectKey].lastCheckout, configured);
-  assert.deepEqual(new Set(checkoutState[projectKey].checkouts), new Set([registered, configured]));
+  assert.deepEqual(checkoutState[projectKey].recent, [newer, configured]);
+  assert.deepEqual(new Set(checkoutState[projectKey].checkouts), new Set([registered, configured, newer]));
   assert.equal(await readFile(userConfigPath, 'utf8'), configBeforeRun);
-  assert.deepEqual((await status(projectKey)).json.checkouts, [configured, registered]);
+  assert.deepEqual((await status(projectKey)).json.checkouts, [newer, configured, registered]);
 
+  await rm(newer, { recursive: true, force: true });
+  assert.deepEqual((await status(projectKey)).json.checkouts, [configured, registered]);
   await rm(configured, { recursive: true, force: true });
   assert.deepEqual((await status(projectKey)).json.checkouts, [registered]);
   assert.equal((await mutate('POST', endpoint, { project_key: projectKey, checkout: configured, dry_run: true })).status, 400);
 });
 
-test('overview includes a YAML-only project with no checkout on disk', async (t) => {
-  const { cwd, db, dbPath, request, userConfigPath } = await fixture(t, { globalMode: true });
+test('global Dreamer discovers both checkouts after normal project writes and retains them after restart', async (t) => {
+  const projectKey = 'example.test/owner/shared';
+  const roots = [];
+  const { request, restart } = await fixture(t, {
+    globalMode: true,
+    async beforeStart({ cwd, dbPath }) {
+      for (const name of ['first', 'second']) {
+        const checkout = path.join(cwd, name);
+        await mkdir(checkout);
+        initGit(checkout);
+        fixtureGit(checkout, 'remote', 'add', 'origin', 'https://' + projectKey + '.git');
+        roots.push(normalizePath(checkout));
+        const db = openDatabase(dbPath);
+        try {
+          await writeMemory(db, { cwd: checkout, content: 'Written from ' + name });
+        } finally {
+          db.close();
+        }
+      }
+    },
+  });
+  const endpoint = '/api/dreamer?project_key=' + encodeURIComponent(projectKey);
+  const info = await request(endpoint);
+  assert.equal(info.status, 200, info.text);
+  assert.deepEqual(info.json.checkouts, [roots[1], roots[0]]);
+  await restart({});
+  assert.deepEqual((await request(endpoint)).json.checkouts, [roots[1], roots[0]]);
+});
+
+test('a YAML-only project is a memory destination with no checkout on disk', async (t) => {
+  const { cwd, db, dbPath, request, mutate, userConfigPath } = await fixture(t, { globalMode: true });
   const projectKey = 'example.test/owner/yaml-only';
   const missing = path.join(cwd, 'missing-checkout');
   writeConfig(userConfigPath, { dbPath, projects: { [projectKey]: { checkouts: [missing] } } });
@@ -687,6 +725,68 @@ test('overview includes a YAML-only project with no checkout on disk', async (t)
   assert.equal(info.json.project_key, projectKey);
   assert.equal(info.json.runnable_project_key, null);
   assert.deepEqual(info.json.checkouts, []);
+  assert.equal((await mutate('POST', '/api/dreamer/run', { project_key: projectKey, dry_run: true })).status, 400);
+
+  const { memory } = await writeMemory(db, { scope: 'global', content: 'Offline project fixture' });
+  const endpoint = '/api/memories/' + memory.id;
+  assert.equal((await mutate('PATCH', endpoint, { project_key: 'example.test/owner/unknown' })).status, 400);
+  const moved = await mutate('PATCH', endpoint, { scope: 'project', project_key: projectKey });
+  assert.equal(moved.status, 200, moved.text);
+  assert.equal(moved.json.memory.project_key, projectKey);
+  assert.equal(moved.json.memory.project_name, project.display_name);
+
+  await writeFile(userConfigPath, 'projects: [');
+  assert.equal((await request('/api/memories')).status, 200);
+  const edited = await mutate('PATCH', endpoint, { content: 'Edited while settings are unavailable' });
+  assert.equal(edited.status, 200, edited.text);
+  assert.equal(edited.json.memory.project_key, projectKey);
+});
+
+test('a live project run uses its embedding override and succeeds when checkout history cannot be saved', async (t) => {
+  let embeddingCalls = 0;
+  let memoryId;
+  const runner = createServer(async (req, res) => {
+    for await (const _ of req) { /* Consume the request before sending the fixture response. */ }
+    const content = JSON.stringify({
+      summary: 'Fixture plan',
+      operations: [{ type: 'update', id: memoryId, content: 'An updated durable fixture memory' }],
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+      choices: [{ message: { content } }],
+    }));
+  });
+  runner.listen(0, '127.0.0.1');
+  await once(runner, 'listening');
+  t.after(() => new Promise((resolve, reject) => runner.close((error) => error ? reject(error) : resolve())));
+  const { cwd, dbPath, db, mutate, userConfigPath } = await fixture(t, {
+    globalMode: true,
+    embedding: { enabled: true },
+    embeddingEngine: { embed() { embeddingCalls++; return [1, 0]; } },
+  });
+  const { projectKey } = resolveProjectKey(cwd);
+  const { memory } = await writeMemory(db, { cwd, content: 'Original fixture memory' });
+  memoryId = memory.id;
+  writeConfig(userConfigPath, {
+    dbPath,
+    embedding: { enabled: true },
+    dreamer: {
+      enabled: true, mode: 'http',
+      http: { baseUrl: 'http://127.0.0.1:' + runner.address().port + '/v1', model: 'fixture' },
+    },
+    projects: { [projectKey]: { checkouts: [cwd], embedding: { enabled: false } } },
+  });
+  await mkdir(dbPath + '.dreamer-checkouts.json');
+
+  const response = await mutate('POST', '/api/dreamer/run', { project_key: projectKey });
+  assert.equal(response.status, 200, response.text);
+  assert.equal(response.json.status, 'completed');
+  assert.equal(response.json.memoriesUpdated, 1);
+  assert.equal(response.json.embeddingsWritten, 0);
+  assert.equal(embeddingCalls, 0);
+  assert.match(response.json.warning, /could not save checkout history/);
+  assert.equal(db.prepare('SELECT content FROM memories WHERE project_key = ?').get(projectKey).content,
+    'An updated durable fixture memory');
+  assert.equal(db.prepare('SELECT status FROM dream_runs WHERE id = ?').get(response.json.runId).status, 'completed');
 });
 
 test('Dreamer uses fresh authorization, redacts secrets, and records a dry run without applying it', async (t) => {

@@ -292,6 +292,34 @@ export const MIGRATIONS = [{
       CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags (tag, memory_id);
     `);
   },
+}, {
+  version: 10,
+  up(db) {
+    // Assign order under the SQLite write lock, including writes in the same millisecond.
+    const recordCheckout = `
+      INSERT INTO project_checkouts (project_key, project_root, last_used_order)
+      SELECT new.project_key, new.project_root, COALESCE(MAX(last_used_order), 0) + 1
+      FROM project_checkouts WHERE project_key = new.project_key
+      ON CONFLICT (project_key, project_root) DO UPDATE SET last_used_order = excluded.last_used_order;
+    `;
+    db.exec(`
+      CREATE TABLE project_checkouts (
+        project_key TEXT NOT NULL,
+        project_root TEXT NOT NULL,
+        last_used_order INTEGER NOT NULL,
+        PRIMARY KEY (project_key, project_root)
+      ) WITHOUT ROWID;
+      INSERT INTO project_checkouts (project_key, project_root, last_used_order)
+      SELECT project_key, project_root, 1 FROM projects;
+
+      CREATE TRIGGER projects_checkout_insert AFTER INSERT ON projects BEGIN
+        ${recordCheckout}
+      END;
+      CREATE TRIGGER projects_checkout_update AFTER UPDATE OF project_root ON projects BEGIN
+        ${recordCheckout}
+      END;
+    `);
+  },
 }];
 
 const busyWait = new Int32Array(new SharedArrayBuffer(4));

@@ -25,6 +25,9 @@
       { "from": ".dashboard/node_modules", "to": "dashboard/node_modules" }
     ],
     "win": { "target": ["nsis", "portable"] },
-    "linux": { "target": ["AppImage"], "category": "Utility" }
+    "linux": { "target": ["AppImage"], "category": "Utility" },
+    "nsis": { "artifactName": "multi-sub-memory-desktop-${version}-${arch}-setup.${ext}" },
+    "portable": { "artifactName": "multi-sub-memory-desktop-${version}-${arch}-portable.${ext}" },
+    "appImage": { "artifactName": "multi-sub-memory-desktop-${version}-${arch}.${ext}" }
   }
 }

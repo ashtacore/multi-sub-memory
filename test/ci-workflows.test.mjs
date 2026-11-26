@@ -60,7 +60,7 @@ test('release verifies before publishing and defaults manual runs to dry runs', 
   assert.equal(dryRun.type, 'boolean');
   assert.equal(dryRun.default, true);
   assert.deepEqual(workflow.permissions, { contents: 'read' });
-  assert.deepEqual(Object.keys(workflow.jobs).sort(), ['github-release', 'publish-npm', 'verify']);
+  assert.deepEqual(Object.keys(workflow.jobs).sort(), ['build-desktop', 'github-release', 'publish-npm', 'verify']);
 
   const { verify, 'publish-npm': publish, 'github-release': release } = workflow.jobs;
   assert.deepEqual(verify.permissions, { contents: 'read' });
@@ -74,7 +74,7 @@ test('release verifies before publishing and defaults manual runs to dry runs', 
   assert.match(validateDryRunTag.run, /"\$GITHUB_REF_NAME" != "\$tag"/);
   assert.match(validateDryRunTag.run, /exit 1/);
 
-  assert.equal(publish.needs, 'verify');
+  assert.deepEqual(publish.needs, ['verify', 'build-desktop']);
   assert.equal(
     publish.if.trim(),
     "(github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted) || " +
@@ -107,11 +107,13 @@ test('release verifies before publishing and defaults manual runs to dry runs', 
     /if \[\[ "\$REPO_PRIVATE" == false \]\]; then\s+npm publish --provenance --access public\s+else\s+npm publish --access public\s+fi/,
   );
 
-  assert.equal(release.needs, 'publish-npm');
+  assert.deepEqual(release.needs, ['publish-npm', 'build-desktop']);
   assert.equal(release.if, undefined);
   assert.deepEqual(release.permissions, { contents: 'write' });
   assert.equal(release['runs-on'], 'ubuntu-latest');
-  const [publishRelease] = release.steps;
+  const [download, publishRelease] = release.steps;
+  assert.equal(download.uses, 'actions/download-artifact@v4');
+  assert.deepEqual(download.with, { pattern: 'desktop-*', path: 'desktop-release', 'merge-multiple': true });
   assert.deepEqual(publishRelease.env, {
     GH_TOKEN: '${{ github.token }}',
     GH_REPO: '${{ github.repository }}',
@@ -126,8 +128,38 @@ test('release verifies before publishing and defaults manual runs to dry runs', 
   );
   assert.match(
     publishRelease.run,
-    /if \[\[ "\$tagged_commit" != "\$GITHUB_SHA" \]\]; then\s+echo "::error::[^\n]+"\s+exit 1\s+fi\s+if gh release view/,
+    /if \[\[ "\$tagged_commit" != "\$GITHUB_SHA" \]\]; then\s+echo "::error::[^\n]+"\s+exit 1\s+fi\s+shopt -s nullglob/,
   );
-  assert.match(publishRelease.run, /gh release create "\$RELEASE_TAG" --verify-tag --generate-notes/);
+  assert.match(publishRelease.run, /gh release create "\$RELEASE_TAG" "\$\{assets\[@\]\}" --verify-tag --generate-notes/);
+  assert.match(publishRelease.run, /gh release upload "\$RELEASE_TAG" "\$\{assets\[@\]\}" --clobber/);
   assert.match(publishRelease.run, /gh release edit "\$RELEASE_TAG" --draft=false --verify-tag/);
+});
+
+test('release builds and smoke-tests desktop assets from the verified revision before upload', () => {
+  const desktop = readWorkflow('release').jobs['build-desktop'];
+  assert.equal(desktop.needs, 'verify');
+  assert.equal(desktop.if, undefined);
+  assert.deepEqual(desktop.permissions, { contents: 'read' });
+  assert.deepEqual(desktop.strategy.matrix.include, [
+    { os: 'windows-latest', platform: 'win', assets: 'desktop/dist/*.exe' },
+    { os: 'ubuntu-latest', platform: 'linux', assets: 'desktop/dist/*.AppImage' },
+  ]);
+  const [checkout, , installRoot, installDesktop, build, windowsSmoke, linuxSmoke, upload] = desktop.steps;
+  assert.deepEqual(checkout.with, { 'persist-credentials': false, ref: '${{ github.sha }}' });
+  assert.equal(installRoot.run, 'npm ci');
+  assert.equal(installDesktop.run, 'npm --prefix desktop ci');
+  assert.equal(build.run, 'npm --prefix desktop run dist -- --${{ matrix.platform }} --x64');
+  assert.equal(windowsSmoke.if, "matrix.platform == 'win'");
+  assert.match(windowsSmoke.run, /Test-Dashboard \$portable.FullName 'desktop-portable.db'/);
+  assert.match(windowsSmoke.run, /Invoke-Checked \$setup.FullName "\/S \/D=\$installDir"/);
+  assert.match(windowsSmoke.run, /Test-Dashboard \(Join-Path \$installDir 'Multi-Sub Memory.exe'\) 'desktop-installed.db'/);
+  assert.equal(linuxSmoke.if, "matrix.platform == 'linux'");
+  assert.match(linuxSmoke.run, /"\$image" --appimage-extract/);
+  assert.match(linuxSmoke.run, /xvfb-run -a \.\/squashfs-root\/multi-sub-memory-desktop --smoke-test/);
+  assert.match(linuxSmoke.run, /test -s "\$MULTI_SUB_MEMORY_DB"/);
+  assert.equal(upload.uses, 'actions/upload-artifact@v4');
+  assert.equal(upload.if, "github.event_name != 'workflow_dispatch' || inputs.dry_run == false");
+  assert.deepEqual(upload.with, {
+    name: 'desktop-${{ matrix.platform }}', path: '${{ matrix.assets }}', 'if-no-files-found': 'error',
+  });
 });

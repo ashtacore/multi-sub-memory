@@ -219,7 +219,7 @@ export function dreamResult(result) {
   const tagActivity = tagOperations.length
     ? `${tagOperations.length} tag ${tagOperations.length === 1 ? 'change' : 'changes'} ${result.dryRun ? 'proposed' : 'applied'}.` : '';
   const message = [title, result.memoriesReviewed + ' reviewed, ' + result.memoriesMerged + ' merged, '
-    + result.memoriesArchived + ' archived.', commentActivity, tagActivity, result.summary].filter(Boolean).join(' ');
+    + result.memoriesArchived + ' archived.', commentActivity, tagActivity, result.summary, result.warning].filter(Boolean).join(' ');
   if (!result.dryRun) return message;
   const comments = compactions.map(({ note_id, source_comment_ids, summary }) =>
     `Note ${note_id} · Source comments ${source_comment_ids.join(', ')}\n${summary}`);

@@ -45,8 +45,9 @@ open the app from source. Build on Windows with
   or update time in either direction. Search results use relevance and
   clearing the query restores the previous list sort. Use **Project / Scope**
   in the editor to move a memory to another project, promote it to Global,
-  or move it from Global into a project. Registered projects remain
-  available even when empty. Edit, archive, restore, and permanently
+  or move it from Global into a project. Registered and YAML-configured
+  projects remain available as destinations even when empty or offline.
+  Edit, archive, restore, and permanently
   delete memories, with confirmation before deletion. The editor shows
   Superseded as the current status of superseded memories, which can be
   edited, archived, or restored.
@@ -85,7 +86,7 @@ open the app from source. Build on Windows with
 
 ## Dreamer checkouts
 
-The dashboard finds checkout roots from the project registry, indexed
+The dashboard finds checkout roots from current and past project writes, indexed
 transcripts, the browser dashboard’s launch workspace, and any paths listed
 under the repository key in the user YAML file. Use absolute or home-relative
 paths. The server uses Git to verify the identity of each checkout and loads
@@ -100,14 +101,14 @@ projects:
       - ~/worktrees/repo-review
 ```
 
-Successful manual runs, including dry runs, remember the selected checkout
-and other discovered checkouts in a `<database>.dreamer-checkouts.json` file
-beside the active SQLite database. The dashboard prefers the last selected
-checkout across restarts while it exists and still belongs to the repository.
-It then tries the registry path, configured paths in YAML order, remembered
-paths, recently indexed paths, and the launch workspace. The dashboard
-verifies each candidate against the filesystem and Git before offering it.
-Configured projects remain selectable when none of their checkouts exist.
+Successful manual runs, including dry runs, record checkout usage in
+`<database>.dreamer-checkouts.json` beside the active SQLite database. The
+dashboard prefers the most recently used checkout that still exists and belongs
+to the repository. With no usable run history, it tries the current registry
+root, configured paths in YAML order, previously discovered roots, recently
+indexed paths, and the launch workspace. If checkout history cannot be saved,
+the dashboard returns the completed result with a warning. Live runs use
+the selected repository's embedding settings.
 
 ## HTTP API
 

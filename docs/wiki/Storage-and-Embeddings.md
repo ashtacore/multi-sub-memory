@@ -49,6 +49,12 @@ empty tag lists. Deleting a memory cascades to its assignments. Dictionary
 entries can remain available with a usage count of zero.
 [Memory tags](MCP-Core.md#memory-tags)
 
+Migration 10 creates and seeds `project_checkouts` with the current registry roots. As
+project writes register roots, database triggers retain each distinct
+repository key and checkout path in the same transaction. The dashboard
+uses per-repository write order to rank checkouts by recency, even for
+writes in the same millisecond. It verifies the recorded paths with Git before offering them for Dreamer runs.
+
 ## Design rules and why
 
 - Embedding rows require an explicit parent ID. The `transcript_embeddings` table uses `WITHOUT ROWID` so SQLite rejects a missing message ID instead of generating one.

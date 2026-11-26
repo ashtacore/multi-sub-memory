@@ -42,8 +42,101 @@ jobs:
             exit 1
           fi
 
-  publish-npm:
+  build-desktop:
     needs: verify
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+            assets: desktop/dist/*.exe
+          - os: ubuntu-latest
+            platform: linux
+            assets: desktop/dist/*.AppImage
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - run: npm ci
+      - run: npm --prefix desktop ci
+      - run: npm --prefix desktop run dist -- --${{ matrix.platform }} --x64
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Smoke-test Windows portable and installed apps
+        if: matrix.platform == 'win'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $env:MULTI_SUB_MEMORY_CONFIG = Join-Path $env:RUNNER_TEMP 'desktop-smoke.yaml'
+          $env:MULTI_SUB_MEMORY_NO_EMBEDDINGS = '1'
+          $portable = Get-Item desktop/dist/*-portable.exe
+          $setup = Get-Item desktop/dist/*-setup.exe
+          $installDir = Join-Path $env:RUNNER_TEMP 'desktop-smoke-install'
+          function Invoke-Checked($exe, $arguments) {
+            $process = Start-Process -FilePath $exe -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "$exe exited with code $($process.ExitCode)" }
+          }
+          function Test-Dashboard($exe, $database) {
+            $env:MULTI_SUB_MEMORY_DB = Join-Path $env:RUNNER_TEMP $database
+            Invoke-Checked $exe '--smoke-test'
+            if (!(Test-Path -LiteralPath $env:MULTI_SUB_MEMORY_DB -PathType Leaf)) {
+              throw "$exe did not create the smoke-test database"
+            }
+          }
+          Test-Dashboard $portable.FullName 'desktop-portable.db'
+          Invoke-Checked $setup.FullName "/S /D=$installDir"
+          Test-Dashboard (Join-Path $installDir 'Multi-Sub Memory.exe') 'desktop-installed.db'
+      - name: Smoke-test Linux AppImage
+        if: matrix.platform == 'linux'
+        timeout-minutes: 5
+        env:
+          MULTI_SUB_MEMORY_NO_EMBEDDINGS: '1'
+        run: |
+          images=(desktop/dist/*.AppImage)
+          test "${#images[@]}" -eq 1
+          test -x "${images[0]}"
+          image=$(realpath "${images[0]}")
+          smoke_dir=$(mktemp -d "$RUNNER_TEMP/desktop-smoke.XXXXXX")
+          cd "$smoke_dir"
+          export MULTI_SUB_MEMORY_CONFIG="$smoke_dir/config.yaml"
+          export MULTI_SUB_MEMORY_DB="$smoke_dir/memory.db"
+          "$image" --appimage-extract > extract.log
+          # Permit the bundled Chromium to use its sandbox on Ubuntu runners
+          # that restrict unprivileged user namespaces.
+          if [[ $(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null) == 1 ]]; then
+            cat > electron.apparmor <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile msm-electron-smoke "$smoke_dir/squashfs-root/multi-sub-memory-desktop" flags=(unconfined) {
+            userns,
+          }
+          EOF
+            sudo apparmor_parser -a electron.apparmor
+            trap 'sudo apparmor_parser -R electron.apparmor' EXIT
+          fi
+          xvfb-run -a ./squashfs-root/multi-sub-memory-desktop --smoke-test
+          test -s "$MULTI_SUB_MEMORY_DB"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: ${{ matrix.assets }}
+          if-no-files-found: error
+
+  publish-npm:
+    needs: [verify, build-desktop]
     if: >-
       (github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted) ||
       (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
@@ -95,11 +188,16 @@ jobs:
           fi
 
   github-release:
-    needs: publish-npm
+    needs: [publish-npm, build-desktop]
     permissions:
       contents: write
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: desktop-release
+          merge-multiple: true
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -126,9 +224,18 @@ jobs:
             exit 1
           fi
 
+          shopt -s nullglob
+          installers=(desktop-release/*-setup.exe)
+          portable=(desktop-release/*-portable.exe)
+          appimages=(desktop-release/*.AppImage)
+          if [[ ${#installers[@]} != 1 || ${#portable[@]} != 1 || ${#appimages[@]} != 1 ]]; then
+            echo "::error::Expected one installer, portable executable, and AppImage"
+            exit 1
+          fi
+          assets=("${installers[@]}" "${portable[@]}" "${appimages[@]}")
           if gh release view "$RELEASE_TAG" --json id >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
             gh release edit "$RELEASE_TAG" --draft=false --verify-tag
           else
-            gh release create "$RELEASE_TAG" --verify-tag --generate-notes
+            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --generate-notes
           fi
-      # Issue #30 will add Electron .exe and .AppImage uploads to this release.

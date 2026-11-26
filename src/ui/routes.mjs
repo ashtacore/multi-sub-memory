@@ -1,9 +1,11 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { statSync } from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { expandHome, loadWorkspaceConfig, readConfigLayer, resolveUserConfigPath } from '../config.mjs';
 import { runDream } from '../dreamer/engine.mjs';
 import { createDreamRedactor, sanitizeDreamError } from '../dreamer/runners.mjs';
+import { createEmbeddingEngine } from '../embeddings.mjs';
 import {
   GLOBAL_PROJECT_KEY, MAX_LIST_LIMIT, MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
   MissingProjectDestinationError,
@@ -127,7 +129,8 @@ function knownProjectRoots(db, defaultProjectKey, defaultProjectRoot) {
   return roots;
 }
 
-function knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, extraKeys = []) {
+function knownProjectCatalog(context, configuredProjects = readConfiguredProjects(context)) {
+  const { db, defaultProjectKey, defaultProjectRoot } = context;
   const roots = knownProjectRoots(db, defaultProjectKey, defaultProjectRoot);
   const keys = new Set(roots.keys());
   if (defaultProjectKey && defaultProjectKey !== globalKey) keys.add(defaultProjectKey);
@@ -136,12 +139,12 @@ function knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, extraKey
       if (project_key && project_key !== globalKey) keys.add(project_key);
     }
   }
-  for (const key of extraKeys) {
-    if (key && key !== globalKey) keys.add(key);
+  for (const key of Object.keys(configuredProjects)) {
+    if (key !== globalKey && key !== all) keys.add(key);
   }
   const labels = formatProjectLabels([...keys].map((projectKey) => ({
     projectKey,
-    projectRoot: roots.get(projectKey),
+    projectRoot: roots.get(projectKey) ?? configuredProjects[projectKey]?.checkouts?.[0],
   })));
   return { roots, labels };
 }
@@ -161,19 +164,31 @@ function userSettings(context) {
   return readConfigLayer(resolveUserConfigPath(context.configOptions));
 }
 
+function readConfiguredProjects(context) {
+  try {
+    return userSettings(context).projects ?? {};
+  } catch {
+    // Database-backed projects remain usable while the settings file is being repaired.
+    return {};
+  }
+}
+
 function projectCheckouts(context, settings, projectKey) {
   const { db, defaultProjectKey, defaultProjectRoot, configOptions, checkoutState } = context;
   const remembered = checkoutState.get(projectKey);
   const registered = db.prepare('SELECT project_root FROM projects WHERE project_key = ?').get(projectKey);
+  const observed = db.prepare('SELECT project_root FROM project_checkouts WHERE project_key = ? ORDER BY project_root')
+    .all(projectKey);
   const transcripts = db.prepare(`
     SELECT project_root FROM transcript_files WHERE project_key = ? AND project_root IS NOT NULL
     GROUP BY project_root ORDER BY MAX(last_indexed_at) DESC
   `).all(projectKey);
   const candidates = new Set([
-    remembered.lastCheckout,
+    ...remembered.recent,
     registered?.project_root,
     ...(settings.projects?.[projectKey]?.checkouts ?? []),
     ...remembered.checkouts,
+    ...observed.map(({ project_root }) => project_root),
     ...transcripts.map(({ project_root }) => project_root),
     projectKey === defaultProjectKey ? defaultProjectRoot : null,
   ]);
@@ -196,8 +211,7 @@ function projectCheckouts(context, settings, projectKey) {
 }
 
 function overview(context) {
-  const { db, defaultProjectKey, defaultProjectRoot, config, embeddingEngine } = context;
-  const configuredProjects = userSettings(context).projects ?? {};
+  const { db, defaultProjectKey, config, embeddingEngine } = context;
   const projects = new Map();
   const global = emptyCounts();
   const totals = emptyCounts();
@@ -231,15 +245,8 @@ function overview(context) {
   for (const { project_key } of db.prepare('SELECT DISTINCT project_key FROM dream_runs').all()) {
     projectCounts(project_key);
   }
-  const roots = knownProjectRoots(db, defaultProjectKey, defaultProjectRoot);
-  for (const key of roots.keys()) {
-    if (key !== globalKey) projectCounts(key);
-  }
-  for (const key of Object.keys(configuredProjects)) projectCounts(key);
-  const labels = formatProjectLabels([...projects.keys()].map((projectKey) => ({
-    projectKey,
-    projectRoot: roots.get(projectKey) ?? configuredProjects[projectKey]?.checkouts?.[0],
-  })));
+  const { labels } = knownProjectCatalog(context);
+  for (const key of labels.keys()) projectCounts(key);
   const projectList = [...projects.values()].map((project) => ({
     ...project,
     display_name: labels.get(project.project_key) ?? project.project_key,
@@ -277,7 +284,8 @@ function rowFilter(fields) {
   };
 }
 
-async function memories({ db, defaultProjectKey, defaultProjectRoot, embeddingEngine, cwd }, params) {
+async function memories(context, params) {
+  const { db, embeddingEngine, cwd } = context;
   const scope = choice(params, 'scope', [...MEMORY_SCOPES, all], all);
   const status = choice(params, 'status', [...MEMORY_STATUSES, all], 'active');
   const category = choice(params, 'category', [...MEMORY_CATEGORIES, all], all);
@@ -302,7 +310,7 @@ async function memories({ db, defaultProjectKey, defaultProjectRoot, embeddingEn
   const { where, values } = rowFilter(fields);
   const limit = listLimit(params);
   const query = params.get('q')?.trim();
-  const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot);
+  const catalog = knownProjectCatalog(context);
   const format = (row) => attachMemoryProject({ ...row, tags: memoryTags(db, row.id) }, catalog);
   if (!query) {
     const orderBy = sort === 'importance'
@@ -429,16 +437,16 @@ async function changeRecord(context, req, table, id, params) {
   const { expected_updated_at: expectedUpdatedAt, ...body } = validate(
     await readBody(req), table === 'memories' ? memoryRules : noteRules,
   );
+  const configuredProjects = table === 'memories' ? readConfiguredProjects(context) : undefined;
   if (table === 'memories') {
     if (body.status === 'superseded') {
       throw new RequestError(400, 'Memories cannot be marked superseded manually.');
     }
     if (body.project_key !== undefined && body.project_key !== globalKey) {
       // The catalog includes keys from existing memories, including legacy rows.
-      const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot);
+      const catalog = knownProjectCatalog(context, configuredProjects);
       const destination = body.project_key;
-      if (destination === all || (!catalog.labels.has(destination)
-        && !projectCheckouts(context, userSettings(context), destination).length)) {
+      if (destination === all || !catalog.labels.has(destination)) {
         throw new RequestError(400, 'Unknown project destination.');
       }
     }
@@ -455,7 +463,7 @@ async function changeRecord(context, req, table, id, params) {
       const memory = await updateMemory(db, { ...body, id }, {
         config: tagConfig, defaultProject, embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt,
       });
-      const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, [memory.project_key]);
+      const catalog = knownProjectCatalog(context, configuredProjects);
       return { memory: attachMemoryProject(memory, catalog) };
     }
     return { note: updateNote(db, { ...body, id }, { expectedUpdatedAt }) };
@@ -568,7 +576,7 @@ function dreamer(context, params) {
 }
 
 async function startDream(context, req) {
-  const { db, defaultProjectKey, embeddingEngine, configOptions } = context;
+  const { db, defaultProjectKey, configOptions, env } = context;
   const body = validate(await readBody(req), {
     project_key: (key) => nonblank(key) && key.trim() === key,
     checkout: (value) => nonblank(value) && path.isAbsolute(value) && !value.includes('\0'),
@@ -592,18 +600,20 @@ async function startDream(context, req) {
   if (body.expected_config_fingerprint !== undefined && body.expected_config_fingerprint !== fingerprint) {
     throw new RequestError(409, 'Dreamer configuration changed; refresh before running.');
   }
-  const result = await runDream({
+  const embeddingEngine = isDeepStrictEqual(config.embedding, context.config.embedding)
+    ? context.embeddingEngine : createEmbeddingEngine({ embedding: config.embedding, env });
+  const result = redactDream(await runDream({
     db, config, projectKey, cwd: checkout, embeddingEngine, dryRun: Boolean(body.dry_run),
     ...configOptions, userDreamer: config.dreamer,
-  });
+  }));
   if (!result.skipped) {
     try {
       context.checkoutState.record(projectKey, checkout, checkouts);
     } catch {
-      throw new RequestError(500, 'Dreamer finished, but the dashboard could not save checkout history.');
+      result.warning = 'Dreamer finished, but the dashboard could not save checkout history.';
     }
   }
-  return redactDream(result);
+  return result;
 }
 
 export function createApi(context) {

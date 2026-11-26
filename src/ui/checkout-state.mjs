@@ -16,11 +16,11 @@ function readState(file) {
 
 function projectState(state, projectKey) {
   const project = state.get(projectKey);
+  const paths = (value) => Array.isArray(value)
+    ? value.filter((root) => typeof root === 'string' && root) : [];
   return {
-    lastCheckout: typeof project?.lastCheckout === 'string' ? project.lastCheckout : undefined,
-    checkouts: Array.isArray(project?.checkouts)
-      ? project.checkouts.filter((root) => typeof root === 'string' && root)
-      : [],
+    recent: [...new Set([...paths([project?.lastCheckout]), ...paths(project?.recent)])],
+    checkouts: paths(project?.checkouts),
   };
 }
 
@@ -37,7 +37,7 @@ export function createCheckoutState(db) {
         return projectState(load(), projectKey);
       } catch {
         // The registry and configured paths remain available if the sidecar is unreadable.
-        return { checkouts: [] };
+        return { recent: [], checkouts: [] };
       }
     },
     record(projectKey, checkout, verifiedCheckouts) {
@@ -45,10 +45,9 @@ export function createCheckoutState(db) {
       inWriteTransaction(db, () => {
         const state = load();
         const previous = projectState(state, projectKey);
-        const registered = db.prepare('SELECT project_root FROM projects WHERE project_key = ?').get(projectKey);
         const checkouts = new Set([...verifiedCheckouts, ...previous.checkouts]);
-        if (registered?.project_root) checkouts.add(registered.project_root);
-        state.set(projectKey, { lastCheckout: checkout, checkouts: [...checkouts] });
+        const recent = [...new Set([checkout, ...previous.recent])];
+        state.set(projectKey, { recent, checkouts: [...checkouts] });
         if (sidecar) writeTextAtomically(sidecar, JSON.stringify(Object.fromEntries(state)) + '\n');
       });
     },
