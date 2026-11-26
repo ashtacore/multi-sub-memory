@@ -8,8 +8,8 @@ Node 22 so the SQLite warning stays out of CLI stderr assertions.
 
 ## Design rules and why
 
-- `npm run check` checks JavaScript syntax under `bin/`, `src/`, `test/`, and
-  `scripts/` and verifies that the package's executable targets exist.
+- `npm run check` checks JavaScript syntax under `bin/`, `hooks/`, `src/`, `test/`,
+  and `scripts/` and verifies that the package's executable targets exist.
 - The release workflow runs only on a `v*` tag push or manual dispatch. Manual
   dispatch defaults to a dry run that ends after verification. A tag must match
   `v` followed by the package version, including for dry runs on a tag.
@@ -20,7 +20,9 @@ Node 22 so the SQLite warning stays out of CLI stderr assertions.
   [npm provenance](https://docs.npmjs.com/generating-provenance-statements/) when
   the source repository is public.
 - After npm publishes the package, a separate job creates or updates the
-  corresponding GitHub Release. Use **Re-run failed jobs** to retry a failed
-  GitHub Release while keeping the successful npm publish.
+  corresponding GitHub Release. It checks that the remote version tag resolves
+  to the commit published to npm before creating or updating the release.
+  Use **Re-run failed jobs** to retry a failed GitHub Release while keeping the
+  successful npm publish.
 - [Issue #30](https://github.com/ashtacore/multi-sub-memory/issues/30) tracks the
   Electron `.exe` and `.AppImage` build and upload job.

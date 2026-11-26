@@ -23,7 +23,7 @@ function checkDirectory(directory) {
   }
 }
 
-for (const directory of ['bin', 'src', 'test', 'scripts']) {
+for (const directory of ['bin', 'hooks', 'src', 'test', 'scripts']) {
   checkDirectory(directory);
 }
 

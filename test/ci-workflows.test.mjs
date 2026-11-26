@@ -117,6 +117,17 @@ test('release verifies before publishing and defaults manual runs to dry runs', 
     GH_REPO: '${{ github.repository }}',
     RELEASE_TAG: '${{ needs.publish-npm.outputs.tag }}',
   });
-  assert.match(publishRelease.run, /gh release create/);
-  assert.match(publishRelease.run, /gh release edit/);
+  assert.match(publishRelease.run, /tag_ref="refs\/tags\/\$RELEASE_TAG"/);
+  assert.match(publishRelease.run, /ls-remote "\$GITHUB_SERVER_URL\/\$GH_REPO\.git" "\$tag_ref" "\$tag_ref\^\{\}"/);
+  assert.match(publishRelease.run, /print \(peeled \? peeled : tag\)/);
+  assert.match(
+    publishRelease.run,
+    /tagged_commit=\$\(tag_commit\)\s+if \[\[ -z "\$tagged_commit" && "\$GITHUB_REF_TYPE" == branch \]\]; then\s+gh api --method POST "repos\/\$GH_REPO\/git\/refs" -f ref="\$tag_ref" -f sha="\$GITHUB_SHA" >\/dev\/null\s+tagged_commit=\$\(tag_commit\)\s+fi/,
+  );
+  assert.match(
+    publishRelease.run,
+    /if \[\[ "\$tagged_commit" != "\$GITHUB_SHA" \]\]; then\s+echo "::error::[^\n]+"\s+exit 1\s+fi\s+if gh release view/,
+  );
+  assert.match(publishRelease.run, /gh release create "\$RELEASE_TAG" --verify-tag --generate-notes/);
+  assert.match(publishRelease.run, /gh release edit "\$RELEASE_TAG" --draft=false --verify-tag/);
 });
