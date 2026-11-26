@@ -906,6 +906,30 @@ test('MCP normalizes tags and filters lists and searches without mixing dictiona
   assert.deepEqual(contents, [{ uri, mimeType: 'text/markdown', text: canonical }]);
 });
 
+test('MCP enforces strictTags from YAML on project and global memory writes', async (t) => {
+  const cwd = initGit(tempDirectory(t));
+  const { projectKey } = resolveProjectKey(cwd);
+  const userConfigPath = path.join(cwd, 'user-config.yaml');
+  fs.writeFileSync(userConfigPath, [
+    'strictTags: true',
+    'tags: { definitions: { global-tag: Global definition } }',
+    'projects:',
+    `  "${projectKey}":`,
+    '    strictTags: true',
+    '    tags: { strict: false, definitions: { project-tag: Project definition } }',
+  ].join('\n'));
+  const config = loadConfig({ cwd, env: {}, userConfigPath });
+  const { memory, expectError } = await fixture(t, { defaultCwd: cwd, config });
+
+  for (const [scope, tag] of [['project', 'project-tag'], ['global', 'global-tag']]) {
+    await expectError('mem_memory', {
+      action: 'write', scope, content: 'Unknown tagged memory', tags: ['unknown'],
+    }, /Unknown tags: unknown/);
+    const saved = await memory('write', { scope, content: 'Allowed tagged memory', tags: [tag] });
+    assert.deepEqual(saved.memory.tags, [tag]);
+  }
+});
+
 test('MCP strict tag settings use the destination dictionary, including for moves across workspaces', async (t) => {
   const cwd = initGit(tempDirectory(t));
   const other = initGit(tempDirectory(t));

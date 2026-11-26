@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { ConfigSchema, expandHome, loadConfig, parseYaml, writeConfig } from '../src/config.mjs';
+import { ConfigSchema, expandHome, loadConfig, parseYaml, tagSettings, writeConfig } from '../src/config.mjs';
+import { resolveProjectKey } from '../src/project-id.mjs';
 import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
 const defaultDreamer = {
@@ -111,6 +112,29 @@ test('merges global and repository YAML settings before applying environment ove
   assert.equal(loadConfig({ ...options, env, userConfigPath }).bootstrap.tokenBudget, 1200);
 });
 
+test('loads strictTags from YAML with project overrides and precedence over the alias in each scope', (t) => {
+  const options = configFixture(t);
+  initGit(options.cwd);
+  const { projectKey } = resolveProjectKey(options.cwd);
+  const userConfigPath = path.join(options.homeDir, 'tags.yaml');
+  fs.writeFileSync(userConfigPath, [
+    'strictTags: true',
+    'tags: { strict: false, definitions: { global-tag: Global definition } }',
+    'projects:',
+    `  "${projectKey}":`,
+    '    strictTags: false',
+    '    tags: { strict: true, definitions: { project-tag: Project definition } }',
+    '  github.com/example/alias:',
+    '    tags: { strict: false }',
+  ].join('\n'));
+
+  const config = loadConfig({ ...options, userConfigPath });
+  assert.deepEqual(config.tags, { strict: false, definitions: { 'project-tag': 'Project definition' } });
+  assert.deepEqual(tagSettings(config, 'global'), { strict: true, definitions: { 'global-tag': 'Global definition' } });
+  assert.equal(tagSettings(config, 'github.com/example/alias').strict, false);
+  assert.equal(tagSettings(config, 'github.com/example/unconfigured').strict, true);
+});
+
 test('rejects empty kebab-case segments and overlong tag definitions in either scope', (t) => {
   const options = configFixture(t);
   const userConfigPath = path.join(options.homeDir, 'tag-validation.yaml');
@@ -132,11 +156,13 @@ test('rejects invalid values and unknown keys in individual config layers', (t) 
     { bootstrap: { tokenBudget: 1.5 } },
     { embedding: { unknown: true } },
     { unexpected: true },
+    { strictTags: 'true' },
     { tags: { strict: 'yes' } },
     { tags: { definitions: { 'Bad Tag': 'invalid' } } },
     { tags: { definitions: { good: false } } },
     { projects: { 'dir:legacy': {} } },
     { projects: { 'github.com/example/repo': { forkMode: 'fork' } } },
+    { projects: { 'github.com/example/repo': { strictTags: 1 } } },
     { projects: { 'github.com/example/repo': { bootstrap: { unknown: true } } } },
     { dbPath: '' },
     { dreamer: { http: { baseUrl: 'ftp://example.test' } } },

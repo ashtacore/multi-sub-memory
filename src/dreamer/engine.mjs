@@ -93,25 +93,34 @@ function buildPrompt(db, rows, topics, transcripts, dictionary, promptBudget, ru
   let remaining = limit - measure(SYSTEM_PROMPT) - 2 - measure(emptyPrompt);
   if (remaining < 0) throw new Error(runnerName + ' spawn-error');
 
-  function selectEntries(entries, encode, maxEntries = Infinity, minLength = 1) {
+  function selectEntries(entries, encode, { maxEntries = Infinity, minLength = 1, budget = Infinity } = {}) {
     const selected = [];
     const json = [];
-    if (remaining < minLength) return { selected, json };
+    let available = Math.min(remaining, budget);
+    if (available < minLength) return { selected, json };
     for (const entry of entries) {
       const encoded = JSON.stringify(encode(entry));
       const length = measure(encoded) + (json.length ? 1 : 0);
-      if (length > remaining) continue;
+      if (length > available) continue;
+      available -= length;
       remaining -= length;
       selected.push(entry);
       json.push(encoded);
-      if (selected.length === maxEntries || remaining < minLength + 1) break;
+      if (selected.length === maxEntries || available < minLength + 1) break;
     }
     return { selected, json };
   }
   const encodeMemory = ({ id, content, category, importance }) => ({ id, content, category, importance });
   const minMemoryLength = measure('{"id":"","content":"","category":"","importance":1}');
-  const memories = selectEntries(rows, encodeMemory, MAX_REVIEWED_MEMORIES, minMemoryLength);
+  const memories = selectEntries(rows, encodeMemory, { maxEntries: MAX_REVIEWED_MEMORIES, minLength: minMemoryLength });
   const excerpts = selectEntries(transcripts, ({ role, timestamp, text }) => ({ role, timestamp, text }));
+
+  const noteOverhead = measure(NOTE_COMPACTION_PROMPT) + measure(',"notes":[]');
+  remaining -= noteOverhead;
+  const notes = selectEntries(topics, ({ id, content, comments }) => ({
+    id, content, comments: comments.map(({ id, body }) => ({ id, body })),
+  }), { budget: noteLimit - noteOverhead });
+  if (!notes.json.length) remaining += noteOverhead;
 
   // Optional tag context uses the space left after selecting review items.
   let tags = { selected: [], json: [] };
@@ -131,10 +140,6 @@ function buildPrompt(db, rows, topics, transcripts, dictionary, promptBudget, ru
       memories.json[index] = encoded;
     }
   }
-  remaining = Math.min(remaining, noteLimit) - measure(NOTE_COMPACTION_PROMPT) - measure(',"notes":[]');
-  const notes = selectEntries(topics, ({ id, content, comments }) => ({
-    id, content, comments: comments.map(({ id, body }) => ({ id, body })),
-  }));
   const tagJson = tags.json.length ? ',"tag_dictionary":[' + tags.json.join(',') + ']' : '';
   const noteJson = notes.json.length ? ',"notes":[' + notes.json.join(',') + ']' : '';
   return {

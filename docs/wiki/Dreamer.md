@@ -63,9 +63,9 @@ budgets 24,000 UTF-16 code units for the executable, arguments, and worst-case
 quoting. On POSIX, the prompt
 argument is limited to 96 KiB in UTF-8. Dreamer fits whole memories in priority
 order, skipping oversized entries and continuing through later candidates up
-to the review cap. It then fits recent transcript excerpts. Dreamer uses
-the remaining budget for the tag dictionary, memory tag assignments, and
-eligible project note topics with their progress comments. HTTP mode limits
+to the review cap. It then fits recent transcript excerpts and eligible
+project note topics with their progress comments. Dreamer uses the remaining
+budget for the tag dictionary and memory tag assignments. HTTP mode limits
 the note section and its compaction instructions to 8 KiB in UTF-8. Dreamer
 skips whole chains that exceed the available space and considers smaller
 chains. Each eligible topic has at least five standalone progress comments.

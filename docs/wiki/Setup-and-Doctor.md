@@ -32,24 +32,26 @@ repository without a usable remote. See [project identity](MCP-Core.md#project-i
 
 ## Tag settings
 
-`tags.strict` defaults to `false`. Set it at the top level to establish the
+`strictTags` defaults to `false`. Set it at the top level to establish the
 default strictness for all scopes, and override it under a repository key
-as needed. Top-level definitions seed the global dictionary. Repository
-definitions seed only that repository. A successful tag write for a scope
-adds its missing definitions, keeping descriptions already stored there.
+as needed. Both scopes also accept `tags.strict`. When a scope sets both keys,
+`strictTags` takes precedence within that scope. Top-level definitions seed the
+global dictionary. Repository definitions seed only that repository. A
+successful tag write for a scope adds its missing definitions, keeping
+descriptions already stored there.
 A definition still present in the YAML remains configured even if Dreamer
 merges the stored tag. Remove retired names from YAML to keep them retired
 in strict mode.
 
 ```yaml
+strictTags: true
 tags:
-  strict: true
   definitions:
     tooling: Tools shared across repositories
 projects:
   github.com/example/repo:
+    strictTags: false
     tags:
-      strict: false
       definitions:
         release: Release workflow and decisions
 ```

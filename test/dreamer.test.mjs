@@ -1269,6 +1269,41 @@ test('CLI Dreamer reviews an unreviewed memory within the prompt budget despite 
   assert.equal(memory('pending').last_dreamed_at, 100);
 });
 
+test('Dreamer repeatedly includes eligible note history before fitting a large tag dictionary', async (t) => {
+  const { db, dream } = fixture(t);
+  const chain = noteChain(db, 'eligible', 5);
+  const sourceIds = chain.progress.map(({ id }) => id);
+  for (let index = 0; index < 100; index++) {
+    upsertTagDefinition(db, projectKey, 'tag-' + index, 'd'.repeat(256));
+  }
+
+  const summary = 'Consolidated fixture progress';
+  const limit = 24_000;
+  const runner = Object.assign(({ systemPrompt, userPrompt }) => {
+    const { notes, tag_dictionary } = JSON.parse(userPrompt);
+    assert.match(systemPrompt, /compact_note_comments/);
+    assert.deepEqual(notes.map(({ id }) => id), ['eligible']);
+    assert.deepEqual(notes[0].comments.map(({ id }) => id).sort(), sourceIds.toSorted());
+    assert.ok(tag_dictionary.length > 0 && tag_dictionary.length < 100);
+    assert.ok(systemPrompt.length + 2 + userPrompt.length <= limit);
+    return resultFor([{
+      type: 'compact_note_comments', note_id: 'eligible', source_comment_ids: sourceIds, summary,
+    }]);
+  }, { promptBudget: { limit } });
+
+  const original = chain.comments();
+  assert.equal((await dream(runner, { dryRun: true })).operations[0].summary, summary);
+  assert.deepEqual(chain.comments(), original);
+  const applied = await dream(runner);
+  assert.equal(applied.status, 'completed');
+  const progress = chain.comments().filter(({ from_status }) => from_status === null);
+  assert.equal(progress.length, 1);
+  assert.equal(progress[0].body, summary);
+  assert.deepEqual(JSON.parse(progress[0].compacted_from_json), {
+    run_id: applied.runId, source_comment_ids: sourceIds,
+  });
+});
+
 test('Dreamer rejects tag operations with empty kebab-case segments or overlong names', async (t) => {
   const { db, dream } = fixture(t);
   upsertTagDefinition(db, projectKey, 'release-plan');

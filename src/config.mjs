@@ -110,6 +110,7 @@ const configLayerSchema = configFields.extend({
     cadence: cadenceFields.partial(),
   }).partial(),
   indexers: indexersSchema.partial(),
+  strictTags: z.boolean(),
   tags: tagFields.partial(),
 }).partial();
 
@@ -245,16 +246,16 @@ export function bootstrapTokenBudget(config, projectKey) {
 }
 
 function mergeTags(user, projectKey) {
-  const project = user.projects?.[projectKey]?.tags;
+  const project = user.projects?.[projectKey];
   return {
-    strict: project?.strict ?? user.tags?.strict ?? false,
-    definitions: (projectKey === 'global' ? user.tags?.definitions : project?.definitions) ?? {},
+    strict: project?.strictTags ?? project?.tags?.strict ?? user.strictTags ?? user.tags?.strict ?? false,
+    definitions: (projectKey === 'global' ? user.tags?.definitions : project?.tags?.definitions) ?? {},
   };
 }
 
 export function tagSettings(config, projectKey) {
   const user = configSources.get(config) ?? (config?.projects ? config : undefined);
-  return user ? mergeTags(user, projectKey) : config?.tags ?? mergeTags({}, projectKey);
+  return user ? mergeTags(user, projectKey) : mergeTags(config ?? {}, 'global');
 }
 
 export function loadConfig(options = {}) {
