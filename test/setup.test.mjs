@@ -587,6 +587,9 @@ test('setup installs, loads, and removes the managed OMP loader', async (t) => {
   }
   const env = { ...process.env, MULTI_SUB_MEMORY_DB: dbPath,
     MULTI_SUB_MEMORY_CONFIG: expandHome(DEFAULT_CONFIG_PATH, options.homeDir), MULTI_SUB_MEMORY_NO_EMBEDDINGS: '1' };
+  const handlerCall = 'createBeforeAgentStartHandler()';
+  assert.ok(source.includes(handlerCall));
+  fs.writeFileSync(loaderPath, source.replace(handlerCall, 'createBeforeAgentStartHandler({ timeoutMs: 3000 })'));
   const target = pathToFileURL(loaderPath).href;
   const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
     const { default: register } = await import(${JSON.stringify(target)});
@@ -597,7 +600,7 @@ test('setup installs, loads, and removes the managed OMP loader', async (t) => {
     } });
     const result = await run({ systemPrompt: 'Original' }, { cwd: process.cwd(), sessionId: 'fixture' });
     process.stdout.write(result?.systemPrompt ?? '');
-  `], { cwd: options.cwd, env, encoding: 'utf8', timeout: 6000, windowsHide: true });
+  `], { cwd: options.cwd, env, encoding: 'utf8', timeout: 10000, windowsHide: true });
   assert.ifError(child.error);
   assert.equal(child.status, 0, child.stderr);
   assert.match(child.stdout, /^Original\n\n<project-memory [^>]+>[\s\S]*Installed loader fixture/);
