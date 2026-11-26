@@ -6,8 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { createBeforeAgentStartHandler } from '../hooks/omp/index.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
 
@@ -44,7 +44,7 @@ async function withMcpClient(env, cwd, host, run) {
   try {
     await client.connect(transport, requestOptions);
     async function tool(name, args) {
-      const result = await client.callTool({ name, arguments: args }, undefined, requestOptions);
+      const result = await client.callTool({ name, arguments: args }, requestOptions);
       const { type, text } = result.content[0];
       assert.equal(result.isError, undefined, text);
       assert.equal(type, 'text');

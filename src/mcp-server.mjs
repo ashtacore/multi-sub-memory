@@ -1,5 +1,7 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { fileURLToPath } from 'node:url';
+import { McpServer } from '@modelcontextprotocol/server';
+import { loadSkills } from '@modelcontextprotocol/server/ext/skills/node';
+import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 import { formatBootstrap } from './bootstrap.mjs';
 import { loadConfig } from './config.mjs';
@@ -17,6 +19,7 @@ import { hybridSearch, SEARCH_ORCHESTRATORS, SEARCH_SCOPES, SEARCH_SOURCES } fro
 
 export { expandSession, hybridSearch };
 
+const skillsDirectory = fileURLToPath(new URL('../skills/', import.meta.url));
 const cwdField = z.string().min(1).describe('Workspace directory. Defaults to the server workspace.').optional();
 const recordFields = {
   id: z.string().trim().min(1).optional(),
@@ -134,18 +137,18 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
 
   server.registerTool('mem_bootstrap', {
     description: 'Return a token-budgeted summary of active project and global memories and project handoff notes.',
-    inputSchema: {
+    inputSchema: z.object({
       cwd: cwdField,
       token_budget: z.number().int().positive().optional(),
       include_notes: z.boolean().optional(),
-    },
+    }),
   }, toolHandler(({ cwd, token_budget, include_notes }) => formatBootstrap(db, {
     cwd, defaultCwd, config, tokenBudget: token_budget, includeNotes: include_notes, recordAccess: true,
   }), ({ text }) => text));
 
   server.registerTool('mem_search', {
     description: 'Search memories, handoff notes, and indexed transcript messages. Use a transcript hit’s session_id, file_id, and seq to expand it.',
-    inputSchema: {
+    inputSchema: z.object({
       query: z.string(),
       tag: z.string().describe('Search only memories with this tag.').optional(),
       cwd: cwdField,
@@ -154,7 +157,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       orchestrators: z.array(z.enum(SEARCH_ORCHESTRATORS)).optional(),
       since: z.string().describe('Include records at or after this ISO 8601 date or timestamp.').optional(),
       limit: z.number().describe('Defaults to 10 and is clamped to 1–50.').optional(),
-    },
+    }),
   }, toolHandler(async (input) => {
     const search = await hybridSearch(db, { ...input, ...context });
     const memories = [];
@@ -169,7 +172,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
 
   server.registerTool('mem_expand', {
     description: 'Read an indexed session by ID, optionally selecting a file ID and an inclusive message or line range.',
-    inputSchema: {
+    inputSchema: z.object({
       session_id: z.string().trim().min(1),
       file_id: z.number().int().positive().optional(),
       start_seq: z.number().int().nonnegative().optional(),
@@ -177,7 +180,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       line_start: z.number().int().positive().optional(),
       line_end: z.number().int().positive().optional(),
       max_chars: z.number().int().positive().describe('Combined JSON length of returned message records. Defaults to 16,000 characters.').optional(),
-    },
+    }),
   }, toolHandler((input) => expandSession(db, input)));
 
   return server;
@@ -198,10 +201,7 @@ export async function startStdioServer({ cwd, config, db, embeddingEngine } = {}
     refreshAbort.abort();
     clearTimeout(initialRefresh);
     clearInterval(periodicRefresh);
-    // Let requests already read from stdin finish synchronous work before closing.
-    shutdown ??= new Promise((resolve) => setImmediate(resolve)).then(async () => {
-      input.off('end', requestClose);
-      input.off('close', requestClose);
+    shutdown ??= Promise.resolve().then(async () => {
       process.off('SIGINT', requestClose);
       process.off('SIGTERM', requestClose);
       try {
@@ -227,19 +227,31 @@ export async function startStdioServer({ cwd, config, db, embeddingEngine } = {}
 
   try {
     const engine = embeddingEngine ?? createEmbeddingEngine({ embedding: settings.embedding });
-    server = createMcpServer({
-      db: database,
-      config: settings,
-      embeddingEngine: engine,
-      defaultCwd: cwd,
-    });
     const transport = new StdioServerTransport(input, process.stdout);
-    transport.onclose = requestClose;
-    input.once('end', requestClose);
-    input.once('close', requestClose);
+    server = serveStdio(async ({ era }) => {
+      const mcp = createMcpServer({
+        db: database,
+        config: settings,
+        embeddingEngine: engine,
+        defaultCwd: cwd,
+      });
+      if (era === 'modern') {
+        const skills = await loadSkills(skillsDirectory, { strict: true });
+        skills.attach(mcp);
+      }
+      return mcp;
+    }, {
+      transport,
+      onerror: (error) => process.stderr.write(`MCP transport error: ${error.message}\n`),
+    });
+    // The SDK closes its connection on transport close. Also release our database and refresh work.
+    const closeConnection = transport.onclose;
+    transport.onclose = () => {
+      closeConnection();
+      requestClose();
+    };
     process.once('SIGINT', requestClose);
     process.once('SIGTERM', requestClose);
-    await server.connect(transport);
     if (input.readableEnded || input.destroyed) requestClose();
     if (!shutdown && settings.indexers?.enabled && settings.indexers.backgroundRefresh) {
       const refresh = () => {

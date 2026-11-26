@@ -77,12 +77,17 @@ existing assignments into that destination.
 
 ## Memory guide
 
-The server publishes the bundled authoring guide at
-`skill://multi-sub-memory/memory-guide` via `resources/list` and
-`resources/read`. The pinned TypeScript SDK provides resources through
-protocol revision `2025-11-25`. Native Skills extension negotiation requires
-a newer protocol and SDK. Setup can install the same guide for local hosts.
-[Local skills](Setup-and-Doctor.md#local-skills)
+On MCP protocol revision `2026-07-28` and later supported revisions, the stdio
+server advertises the [MCP Skills extension](https://skills.extensions.modelcontextprotocol.io/specification/beta/skills)
+(`io.modelcontextprotocol/skills`). Use `skills/list` to discover
+`multi-sub-memory` and `skills/get` to retrieve its manifest. Read the guide
+itself with `resources/read` at `skill://multi-sub-memory/SKILL.md`.
+
+Clients on `2025-11-25` or other supported legacy revisions can call all five
+core tools and discover the same guide in `resources/list` at
+`skill://multi-sub-memory/memory-guide`. This URI remains readable with
+`resources/read` on both protocol generations. Use [setup](Setup-and-Doctor.md#local-skills)
+to install a local copy for supported hosts.
 
 ## Note topics and comments
 
