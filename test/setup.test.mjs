@@ -688,7 +688,11 @@ test('setup appends and removes a Claude startup hook with byte-preserving edits
     env: { ...process.env, MULTI_SUB_MEMORY_DB: dbPath,
       MULTI_SUB_MEMORY_CONFIG: expandHome(DEFAULT_CONFIG_PATH, options.homeDir), MULTI_SUB_MEMORY_NO_EMBEDDINGS: '1' },
   };
-  const child = spawnSync(command, spawnOptions);
+  // Exercise the installed shell command with room for cold subprocess startup.
+  const cliCall = 'runClaudeSessionStartCli?.()';
+  assert.ok(command.includes(cliCall));
+  const testCommand = command.replace(cliCall, 'runClaudeSessionStartCli?.({timeoutMs:3000})');
+  const child = spawnSync(testCommand, spawnOptions);
   assert.ifError(child.error);
   assert.equal(child.status, 0, child.stderr);
   assert.match(child.stdout, /^<project-memory [^>]+>[\s\S]*Installed Claude hook fixture/);

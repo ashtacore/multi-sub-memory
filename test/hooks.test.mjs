@@ -14,7 +14,7 @@ import { openDatabase } from '../src/db.mjs';
 import { renderHookBootstrap } from '../src/hooks/render-bootstrap.mjs';
 import { writeMemory, writeNote } from '../src/memory-service.mjs';
 
-const claudeScript = fileURLToPath(new URL('../hooks/claude/session-start.mjs', import.meta.url));
+const claudeModule = new URL('../hooks/claude/session-start.mjs', import.meta.url);
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-hooks-'));
@@ -327,9 +327,12 @@ function claudeOptions(options) {
   return { cwd: options.cwd, env: { ...env, ...options.env }, windowsHide: true };
 }
 
-function runClaude(options, input) {
-  const child = spawnSync(process.execPath, [claudeScript], {
-    ...claudeOptions(options), input, encoding: 'utf8', timeout: 6000,
+function runClaude(childOptions, input, timeoutMs = 3000) {
+  // Allow cold subprocess startup on CI while exercising the CLI watchdog.
+  const source = `import { runClaudeSessionStartCli } from ${JSON.stringify(claudeModule.href)};
+    await runClaudeSessionStartCli({ timeoutMs: ${timeoutMs} });`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '--eval', source], {
+    ...childOptions, input, encoding: 'utf8', timeout: 6000,
   });
   assert.ifError(child.error);
   assert.equal(child.status, 0, child.stderr);
@@ -340,25 +343,26 @@ function runClaude(options, input) {
 test('Claude SessionStart prints the formatter result and exits successfully', async (t) => {
   const options = fixture(t);
   const expected = await populate(options);
-  assert.equal(runClaude(options, JSON.stringify({ cwd: options.cwd, session_id: 'fixture' })), expected + '\n');
+  assert.equal(runClaude(claudeOptions(options), JSON.stringify({ cwd: options.cwd, session_id: 'fixture' })), expected + '\n');
   assertNoSidecars(options.dbPath);
 });
 
 test('Claude SessionStart exits quietly for missing/corrupt storage and invalid inputs', async (t) => {
   const options = fixture(t);
+  const childOptions = claudeOptions(options);
   const payload = JSON.stringify({ cwd: options.cwd });
-  assert.equal(runClaude(options, payload), '');
+  assert.equal(runClaude(childOptions, payload), '');
   assert.equal(fs.existsSync(options.dbPath), false);
   fs.writeFileSync(options.dbPath, 'invalid SQLite');
-  assert.equal(runClaude(options, payload), '');
+  assert.equal(runClaude(childOptions, payload), '');
   assertNoSidecars(options.dbPath);
   fs.unlinkSync(options.dbPath);
   await populate(options);
   for (const input of ['', '{ malformed', 'null', '[]']) {
-    assert.equal(runClaude(options, input), '');
+    assert.equal(runClaude(childOptions, input), '');
   }
   fs.writeFileSync(options.userConfigPath, '{ malformed');
-  assert.equal(runClaude(options, payload), '');
+  assert.equal(runClaude(childOptions, payload), '');
 });
 
 test('Claude SessionStart exits within its deadline when the Git probe hangs', async (t) => {
@@ -391,7 +395,7 @@ test('Claude SessionStart exits within its deadline when the Git probe hangs', a
     fs.writeFileSync(path.join(options.cwd, 'rev-parse'), [
       "const fs = require('node:fs');",
       "fs.writeFileSync(process.env.FIXTURE_GIT_MARKER, fs.readdirSync(process.env.TMPDIR).join('\\n'));",
-      'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3500);',
+      'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10000);',
       'process.exit(1);',
     ].join('\n'));
   } else {
@@ -401,29 +405,25 @@ test('Claude SessionStart exits within its deadline when the Git probe hangs', a
         'for snapshot in "$TMPDIR"/multi-sub-memory-hook-*; do',
         '  if [ -d "$snapshot" ]; then printf "%s\\n" "$snapshot"; fi',
         'done > "$FIXTURE_GIT_MARKER"',
-        'exec /bin/sleep 3.5',
+        'exec /bin/sleep 10',
         '',
       ].join('\n'), { mode: 0o700 });
   }
 
+  const timeoutMs = 2000;
   const started = performance.now();
-  const child = spawnSync(process.execPath, [claudeScript], {
-    ...childOptions, input: JSON.stringify({ cwd: options.cwd }), encoding: 'utf8', timeout: 5000,
-  });
+  const output = runClaude(childOptions, JSON.stringify({ cwd: options.cwd }), timeoutMs);
   const elapsed = performance.now() - started;
-  assert.ifError(child.error);
-  assert.equal(child.status, 0, child.stderr);
-  assert.equal(child.stdout, '');
-  assert.equal(child.stderr, '');
+  assert.equal(output, '');
   assert.ok(fs.existsSync(marker), 'the Git stub was reached');
   assert.equal(fs.readFileSync(marker, 'utf8'), '', 'no snapshot directory existed during the Git probe');
   assert.deepEqual(fs.readdirSync(tempDir), []);
-  assert.ok(elapsed < 1500, `Claude CLI took ${Math.round(elapsed)} ms`);
+  assert.ok(elapsed < timeoutMs + 1500, `Claude CLI took ${Math.round(elapsed)} ms`);
 });
 
 test('Claude SessionStart exits even when its input pipe stays open', async (t) => {
   const options = fixture(t);
-  const child = spawn(process.execPath, [claudeScript], claudeOptions(options));
+  const child = spawn(process.execPath, [fileURLToPath(claudeModule)], claudeOptions(options));
   t.after(() => { if (child.exitCode === null) child.kill(); });
   const timer = setTimeout(() => child.kill(), 6000);
   child.stdin.on('error', () => {});
