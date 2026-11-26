@@ -12,6 +12,7 @@ import { openReadOnlySnapshot } from '../src/importers/common.mjs';
 import { runImport } from '../src/importers/runner.mjs';
 import { listMemories } from '../src/memory-service.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
+import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
 const digest = (filename) => createHash('sha256').update(fs.readFileSync(filename)).digest('hex');
@@ -28,7 +29,7 @@ function tempRoot(t) {
 function cliEnv(root, dbPath) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:MULTI_SUB_MEMORY_|HOME$|USERPROFILE$)/i.test(key)));
   return {
-    ...env, HOME: root, USERPROFILE: root, MULTI_SUB_MEMORY_CONFIG: path.join(root, 'missing-config.jsonc'),
+    ...env, HOME: root, USERPROFILE: root, MULTI_SUB_MEMORY_CONFIG: path.join(root, 'missing-config.yaml'),
     ...(dbPath ? { MULTI_SUB_MEMORY_DB: dbPath } : {}),
   };
 }
@@ -55,6 +56,7 @@ function fixture(t) {
   const notesDir = path.join(root, 'notes');
   const projectMapPath = path.join(root, 'project-map.json');
   for (const directory of [cwd, magicDir, path.join(notesDir, 'nested')]) fs.mkdirSync(directory, { recursive: true });
+  initGit(cwd);
   const { projectKey } = resolveProjectKey(cwd);
   fs.writeFileSync(projectMapPath, JSON.stringify({ 'dir:explicit-legacy': cwd, 'by-filename.md': projectKey, alpha: projectKey }));
   for (const [host, header] of Object.entries({
@@ -219,6 +221,7 @@ test('Magic Context resolves blank projects from session headers and honors expl
       ('Session ID alias fixture', '  ', NULL, 'fixture-session');
   `);
 
+  initGit(cwd);
   runImport({ from: 'magic-context', dbPath, magicContextDb, homeDir: root });
   const { projectKey } = resolveProjectKey(cwd);
   const db = openDatabase(dbPath, { readOnly: true });
@@ -252,7 +255,9 @@ test('unresolved Magic Context records stay out of recall until the session is m
     assert.ifError(git.error);
     assert.equal(git.status, 0, git.stderr);
   }
+  initGit(cwd);
   const { projectKey } = resolveProjectKey(cwd);
+  initGit(unrelatedCwd);
   assert.notEqual(resolveProjectKey(unrelatedCwd).projectKey, projectKey);
   makeDb(magicContextDb, `
     CREATE TABLE session_projects (session_id TEXT, jsonl_path TEXT);
@@ -397,13 +402,13 @@ for (const [globalId, aliases] of [['A', ['B']], ['G', ['G', 'B']]]) {
     makeDb(seedSource, `
       CREATE TABLE memories (id TEXT, content TEXT, scope TEXT, project_key TEXT);
       INSERT INTO memories VALUES ('${globalId}', 'Global fixture', 'global', NULL);
-      ${mixedOwners ? "INSERT INTO memories VALUES ('A', 'Existing project fixture', 'project', 'dir:shared-fixture');" : ''}
+      ${mixedOwners ? "INSERT INTO memories VALUES ('A', 'Existing project fixture', 'project', 'example.test/fixtures/shared');" : ''}
     `);
     makeDb(magicContextDb, `
       CREATE TABLE memories (id TEXT, content TEXT, project_key TEXT, metadata_json TEXT, source_session_id TEXT);
       INSERT INTO memories VALUES
-        ('A', 'Cross-scope duplicate fixture', 'dir:shared-fixture', '${JSON.stringify({ magic_context_ids: aliases })}', 'project-session'),
-        ('B', 'Distinct project fixture', 'dir:shared-fixture', NULL, NULL);
+        ('A', 'Cross-scope duplicate fixture', 'example.test/fixtures/shared', '${JSON.stringify({ magic_context_ids: aliases })}', 'project-session'),
+        ('B', 'Distinct project fixture', 'example.test/fixtures/shared', NULL, NULL);
     `);
     const options = { from: 'magic-context', dbPath, magicContextDb, homeDir: root };
     assert.equal(runImport({ ...options, magicContextDb: seedSource }).totals.memoriesImported, mixedOwners ? 2 : 1);
@@ -427,7 +432,7 @@ for (const [globalId, aliases] of [['A', ['B']], ['G', ['G', 'B']]]) {
     const [project, ...unchangedRows] = readRows();
     assert.deepEqual(unchangedRows, originalRows);
     assert.equal(project.scope, 'project');
-    assert.equal(project.project_key, 'dir:shared-fixture');
+    assert.equal(project.project_key, 'example.test/fixtures/shared');
     assert.equal(project.content, 'Distinct project fixture');
     assert.equal(JSON.parse(project.metadata_json).magic_context_id, 'B');
   });
@@ -440,10 +445,10 @@ test('same-project Magic Context matches on distinct rows leave new aliases avai
   makeDb(magicContextDb, `
     CREATE TABLE memories (id TEXT, content TEXT, project_key TEXT, metadata_json TEXT);
     INSERT INTO memories VALUES
-      ('A', 'Fixture A', 'dir:shared-fixture', NULL),
-      ('D', 'Fixture D', 'dir:shared-fixture', NULL),
-      ('C', 'Fixture C', 'dir:shared-fixture', '{"magic_context_ids":["A","D","B"]}'),
-      ('B', 'Fixture B', 'dir:shared-fixture', NULL);
+      ('A', 'Fixture A', 'example.test/fixtures/shared', NULL),
+      ('D', 'Fixture D', 'example.test/fixtures/shared', NULL),
+      ('C', 'Fixture C', 'example.test/fixtures/shared', '{"magic_context_ids":["A","D","B"]}'),
+      ('B', 'Fixture B', 'example.test/fixtures/shared', NULL);
   `);
   const options = { from: 'magic-context', dbPath, magicContextDb, homeDir: root };
   const dryRun = runImport({ ...options, dryRun: true });
@@ -479,14 +484,14 @@ test('Magic Context merges provenance onto same-scope mnemopi rows matched by ID
       metadata_json TEXT, project_key TEXT);
     INSERT INTO memories VALUES
       (1, 'Reworded fixture', 'rules', 2, NULL,
-        '{"magicContextId":"legacy-id","verification_status":null,"verified_at":null}', 'dir:shared-fixture'),
+        '{"magicContextId":"legacy-id","verification_status":null,"verified_at":null}', 'example.test/fixtures/shared'),
       (2, '  SHARED content fixture', 'rules', 1, 'existing-session', '{"label":"retain","verification_status":"reviewed"}', NULL);
   `);
   makeDb(magicContextDb, `
     CREATE TABLE memories (id TEXT, content TEXT, category TEXT, importance REAL, scope TEXT,
       source_session_id TEXT, verification_status TEXT, verified_at TEXT, project_key TEXT);
     INSERT INTO memories VALUES
-      ('legacy-id', 'Original fixture', 'design', 4.8, 'project', 'legacy-session', 'verified', '2025-01-02', 'dir:shared-fixture'),
+      ('legacy-id', 'Original fixture', 'design', 4.8, 'project', 'legacy-session', 'verified', '2025-01-02', 'example.test/fixtures/shared'),
       ('content-id', 'Shared content fixture', 'design', 4.8, 'global', 'other-session', 'verified', '2025-01-02', NULL);
   `);
   const options = { dbPath, magicContextDb, mnemopiDir, homeDir: root };
@@ -511,7 +516,7 @@ test('Magic Context merges provenance onto same-scope mnemopi rows matched by ID
     }
     assert.equal(byId.importance, 2);
     assert.equal(byId.scope, 'project');
-    assert.equal(byId.project_key, 'dir:shared-fixture');
+    assert.equal(byId.project_key, 'example.test/fixtures/shared');
     assert.equal(byId.source_session_id, 'legacy-session');
     assert.equal(JSON.parse(byId.metadata_json).verification_status, 'verified');
     assert.equal(byContent.importance, 1);
@@ -524,6 +529,29 @@ test('Magic Context merges provenance onto same-scope mnemopi rows matched by ID
   }
 });
 
+test('Markdown notes with an unresolved project key are counted, and an explicit repository mapping imports them', (t) => {
+  const root = tempRoot(t);
+  const dbPath = path.join(root, 'memory.db');
+  const notesDir = path.join(root, 'notes');
+  fs.mkdirSync(notesDir);
+  const legacyKey = 'dir:fixture-legacy';
+  const filename = path.join(notesDir, 'fixture.md');
+  fs.writeFileSync(filename, '---\nproject_key: ' + legacyKey + '\n---\n- [ ] First note\n- [ ] Second note\n');
+  const options = { dbPath, notesDir, from: 'notes', homeDir: root };
+  const unresolved = runImport({ ...options, dryRun: true });
+  assert.equal(unresolved.totals.notesSkippedUnresolved, 2);
+  assert.equal(unresolved.errors.length, 1);
+  const key = 'example.test/fixtures/repo';
+  const imported = runImport({ ...options, projectMap: { [legacyKey]: key } });
+  assert.equal(imported.totals.notesImported, 2);
+  const db = openDatabase(dbPath, { readOnly: true });
+  try {
+    assert.deepEqual(db.prepare('SELECT DISTINCT project_key FROM notes').all().map((row) => row.project_key), [key]);
+  } finally {
+    db.close();
+  }
+});
+
 test('CLI dry-run reports planned inserts and keeps absent and existing targets read-only', (t) => {
   const options = fixture(t);
   const { root, cwd, dbPath, projectMapPath, magicContextDb, mnemopiDir, notesDir } = options;
@@ -531,7 +559,7 @@ test('CLI dry-run reports planned inserts and keeps absent and existing targets 
   const reportPath = path.join(root, 'reports', 'nested', 'import.json');
   const args = ['import', '--from', 'all', '--json', '--cwd', cwd, '--project-map', projectMapPath,
     '--magic-context-db', magicContextDb, '--mnemopi-dir', mnemopiDir, '--notes-dir', notesDir];
-  fs.writeFileSync(path.join(cwd, '.multi-sub-memory.jsonc'), JSON.stringify({ dbPath }));
+  writeProjectConfig(path.join(root, 'missing-config.yaml'), cwd, { dbPath });
   function invoke(extra) {
     const result = spawnSync(process.execPath, [cliPath, ...args, ...extra], {
       cwd: root, env: cliEnv(root), encoding: 'utf8', timeout: 15000, windowsHide: true,

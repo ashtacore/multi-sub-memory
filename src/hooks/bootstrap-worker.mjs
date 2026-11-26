@@ -2,9 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parentPort, workerData } from 'node:worker_threads';
 import { formatBootstrap } from '../bootstrap.mjs';
-import { effectiveDatabaseFilePath, loadConfig } from '../config.mjs';
+import { effectiveDatabaseFilePath, loadWorkspaceConfig } from '../config.mjs';
 import { openDatabase } from '../db.mjs';
-import { resolveProjectKey } from '../project-id.mjs';
 
 const sqliteSignature = Buffer.from('SQLite format 3\0');
 
@@ -45,13 +44,13 @@ function canSnapshot(source, deadline) {
   }
 }
 
-function render({ cwd = process.cwd(), env, homeDir, userConfigPath, projectConfigPath, temporaryDirectory, deadline }) {
+function render({ cwd = process.cwd(), env, homeDir, userConfigPath, temporaryDirectory, deadline }) {
   if (performance.now() >= deadline) return '';
-  const project = resolveProjectKey(cwd, {
+  const { config, project } = loadWorkspaceConfig({
+    cwd, env, homeDir, userConfigPath,
     timeoutMs: Math.max(1, Math.min(2000, Math.floor(deadline - performance.now()))),
   });
-  if (performance.now() >= deadline) return '';
-  const config = loadConfig({ cwd, env, homeDir, userConfigPath, projectConfigPath, projectRoot: project.projectRoot });
+  if (!project || performance.now() >= deadline) return '';
   const dbPath = effectiveDatabaseFilePath(config.dbPath, { homeDir, strictHookUri: true });
   if (performance.now() >= deadline || !dbPath || !stat(dbPath)?.isFile()) return '';
 

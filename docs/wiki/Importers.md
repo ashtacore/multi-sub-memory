@@ -26,14 +26,14 @@ also skips symlinks.
 
 Pass `--project-map <path>` with a JSON object whose keys are legacy project
 IDs, workspace paths, Magic Context session IDs, bank names, or Markdown
-filenames. Values can be a local workspace path, an existing `git:` or `dir:`
-project key, or `global`.
+filenames. Values can be a Git workspace path, a normalized repository key
+such as `github.com/example/example-app`, a `local:<hash>` key, or `global`.
 
 ```json
 {
   "git:legacy-key": "/workspace/example-app",
   "legacy-session-id": "/workspace/example-app",
-  "example-bank": "dir:current-key",
+  "example-bank": "github.com/example/example-app",
   "shared-notes.md": "global"
 }
 ```
@@ -43,9 +43,9 @@ lookup. That lookup can recover the working directory from stored paths or
 from local OMP, Claude Code, and Codex JSONL session headers. Magic Context
 records with a blank project first check the project map for the trimmed session
 ID, then fall back to the session lookup. If a project-scoped memory or note
-still lacks a project, the importer skips it and reports its available record
-and session IDs. Map the legacy project or session ID with `--project-map` and
-rerun the import to bring in the skipped records.
+still lacks a repository identity, the importer skips it and reports the
+available identifiers. Map the legacy project or session ID with
+`--project-map` and rerun the import to bring in skipped records.
 Records explicitly scoped to `global` stay global. Workspace paths are
 resolved through the shared project identity code, so linked Git worktrees use
 the same key.

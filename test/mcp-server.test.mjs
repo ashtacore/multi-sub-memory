@@ -11,10 +11,12 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
+import { loadConfig } from '../src/config.mjs';
 import { estimateTokens, formatBootstrap } from '../src/bootstrap.mjs';
 import { openDatabase } from '../src/db.mjs';
 import { decodeFloat32Vector } from '../src/embeddings.mjs';
 import { createMcpServer } from '../src/mcp-server.mjs';
+import { initGit } from './git-fixtures.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
 const toolNames = ['mem_bootstrap', 'mem_expand', 'mem_memory', 'mem_note', 'mem_search'];
@@ -26,7 +28,7 @@ function tempDirectory(t) {
   return directory;
 }
 
-async function fixture(t, { defaultCwd = tempDirectory(t), embeddingEngine, config } = {}) {
+async function fixture(t, { defaultCwd = initGit(tempDirectory(t)), embeddingEngine, config } = {}) {
   const db = openDatabase(':memory:');
   const server = createMcpServer({ db, config, defaultCwd, embeddingEngine });
   const client = new Client({ name: 'fixture', version: '1.0.0' });
@@ -239,7 +241,7 @@ test('marking a memory as superseded requires an existing successor with a diffe
 
 test('memory update and list preserve project boundaries, filters, and uniqueness', async (t) => {
   const { memory, expectError } = await fixture(t);
-  const other = tempDirectory(t);
+  const other = initGit(tempDirectory(t));
   const local = (await memory('write', { content: 'Local rule', category: 'CONSTRAINTS' })).memory;
   const global = (await memory('write', { content: 'Local rule', scope: 'global', importance: 5 })).memory;
   assert.notEqual(local.id, global.id);
@@ -378,7 +380,7 @@ test('notes read by status and project, update their condition, and dismiss by i
     source_orchestrator: 'fixture-host', source_session_id: 'fixture-session',
   });
   const active = await note('write', { content: 'Review the draft' });
-  await note('write', { content: 'Other workspace', cwd: tempDirectory(t) });
+  await note('write', { content: 'Other workspace', cwd: initGit(tempDirectory(t)) });
   assert.match(pending.id, uuidV7Pattern);
   assert.match(active.id, uuidV7Pattern);
   assert.equal(active.status, 'active');
@@ -428,7 +430,7 @@ test('bootstrap renders deterministic sections and enforces a whole-item token b
   await note('dismiss', { id: dismissed.id });
 
   const full = await bootstrap();
-  assert.match(full, /^<project-memory project="[^"]+" key="dir:[a-f0-9]+">/);
+  assert.match(full, /^<project-memory project="[^"]+" key="local:[a-f0-9]+">/);
   assert.match(full, /### DECISIONS\n- Shared decision\n### WORKFLOW\n- Priority &lt;fixture&gt; second line\n/);
   assert.match(full, /<active-notes>\n- \[active\] Review the draft \(surface when: After a review\)\n- \[pending\]/);
   assert.match(full, /<\/active-notes>$/);
@@ -503,7 +505,7 @@ test('memory update moves a global memory to a previously unused Git workspace',
   const moved = await memory('update', { id: global.id, scope: 'project', cwd: workspace });
   assert.equal(moved.id, global.id);
   assert.equal(moved.scope, 'project');
-  assert.match(moved.project_key, /^git:/);
+  assert.match(moved.project_key, /^local:/);
   assert.deepEqual(await memory('list', { scope: 'project', cwd: workspace }), [moved]);
   assert.deepEqual(await memory('list'), []);
 });
@@ -520,23 +522,71 @@ test('linked Git worktrees share memories through MCP', async (t) => {
 
   const { memory, bootstrap } = await fixture(t, { defaultCwd: main });
   const written = (await memory('write', { content: 'Preserve the worktree fixture' })).memory;
-  assert.match(written.project_key, /^git:/);
+  assert.match(written.project_key, /^local:/);
   const summary = await bootstrap({ cwd: linked });
   assert.ok(summary.includes(`<project-memory project="linked tree" key="${written.project_key}">`));
   assert.ok(summary.includes(`- ${written.content}\n`));
   assert.deepEqual(await memory('list', { cwd: linked }), [written]);
 });
 
+test('MCP selects YAML identity and bootstrap settings for the requested Git checkout', async (t) => {
+  const main = initGit(tempDirectory(t));
+  const fork = initGit(tempDirectory(t));
+  const clone = initGit(tempDirectory(t));
+  const upstream = 'example.test/Team/Fixture';
+  const forkKey = 'example.test/Fork/Fixture';
+  git(main, 'remote', 'add', 'origin', 'https://example.test/Team/Fixture.git');
+  git(clone, 'remote', 'add', 'origin', 'git@example.test:Team/Fixture.git');
+  git(fork, 'remote', 'add', 'upstream', 'ssh://git@example.test/Team/Fixture');
+  git(fork, 'remote', 'add', 'origin', 'https://example.test/Fork/Fixture.git');
+  const config = loadConfig({ cwd: main, env: {}, userConfigData: {
+    projects: {
+      [upstream]: { bootstrap: { tokenBudget: 1800 } },
+      [forkKey]: { forkMode: 'origin', bootstrap: { tokenBudget: 900 } },
+    },
+  } });
+
+  const { db, memory, bootstrap } = await fixture(t, { defaultCwd: main, config });
+  const written = (await memory('write', { content: 'Shared remote memory' })).memory;
+  assert.equal(written.project_key, upstream);
+  assert.deepEqual(await memory('list', { cwd: clone }), [written]);
+  assert.deepEqual(await memory('list', { cwd: fork }), []);
+  const separate = (await memory('write', { content: 'Separate fork memory', cwd: fork })).memory;
+  assert.equal(separate.project_key, forkKey);
+  assert.match(await bootstrap({ cwd: fork }), /Separate fork memory/);
+  assert.equal(formatBootstrap(db, { cwd: clone, config }).tokenBudget, 1800);
+  assert.equal(formatBootstrap(db, { cwd: fork, config }).tokenBudget, 900);
+});
+
+test('MCP supports global memories outside Git and rejects project memory and note writes', async (t) => {
+  const defaultCwd = tempDirectory(t);
+  const { memory, search, expectError } = await fixture(t, { defaultCwd });
+  const required = /Project-scoped memories require a Git repository/;
+  await expectError('mem_memory', { action: 'write', content: 'Project fixture' }, required);
+  await expectError('mem_note', { action: 'write', content: 'Project fixture' }, required);
+  await expectError('mem_bootstrap', {}, required);
+
+  const global = (await memory('write', { scope: 'global', content: 'Global fixture' })).memory;
+  assert.equal(global.project_key, 'global');
+  assert.deepEqual(await memory('list'), [global]);
+  assert.equal((await search({ query: 'fixture' })).results.length, 1);
+
+  initGit(defaultCwd);
+  const project = (await memory('write', { content: 'Git fixture' })).memory;
+  assert.match(project.project_key, /^local:/);
+});
+
 test('real stdio speaks JSON-RPC only and shuts down on EOF', { timeout: 20000 }, async (t) => {
   const directory = tempDirectory(t);
   const workspace = path.join(directory, 'fixture workspace');
   fs.mkdirSync(workspace);
+  initGit(workspace);
   const dbPath = path.join(directory, 'state.db');
   const child = spawn(process.execPath, [cliPath, 'serve', '--cwd', workspace], {
     cwd: directory,
     env: {
       ...process.env,
-      MULTI_SUB_MEMORY_CONFIG: path.join(directory, 'absent-config.jsonc'),
+      MULTI_SUB_MEMORY_CONFIG: path.join(directory, 'absent-config.yaml'),
       MULTI_SUB_MEMORY_DB: dbPath,
       MULTI_SUB_MEMORY_NO_EMBEDDINGS: '1',
     },

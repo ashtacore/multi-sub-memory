@@ -90,20 +90,18 @@ async function dream(args) {
   const cwd = values.project ?? values.cwd;
   if (cwd === '') throw new Error('--project and --cwd require a path');
 
-  const { loadConfig, readConfigLayer, resolveUserConfigPath } = await import('../src/config.mjs');
+  const { loadWorkspaceConfig } = await import('../src/config.mjs');
   const { openDatabase } = await import('../src/db.mjs');
   const { createEmbeddingEngine } = await import('../src/embeddings.mjs');
   const { runDream } = await import('../src/dreamer/engine.mjs');
   const { AUTO_DREAM_CONTEXT_ENV } = await import('../src/dreamer/trigger.mjs');
-  const { resolveProjectKey } = await import('../src/project-id.mjs');
   const backgroundContext = process.env[AUTO_DREAM_CONTEXT_ENV];
   delete process.env[AUTO_DREAM_CONTEXT_ENV];
-  const userConfigPath = resolveUserConfigPath();
-  const user = readConfigLayer(userConfigPath);
   const targetCwd = backgroundContext ? process.cwd() : path.resolve(cwd ?? process.cwd());
-  const config = backgroundContext ? JSON.parse(backgroundContext) : loadConfig({ cwd: targetCwd, userConfigData: user });
-  const projectKey = backgroundContext ? config.projectKey : resolveProjectKey(targetCwd).projectKey;
-  if (typeof projectKey !== 'string' || !projectKey) throw new Error('Dreamer requires a project key');
+  const { config: current, project: { projectKey } } = loadWorkspaceConfig({ cwd: targetCwd, requireProject: true });
+  const background = backgroundContext ? JSON.parse(backgroundContext) : null;
+  if (background && background.projectKey !== projectKey) throw new Error('Dreamer project configuration changed');
+  const config = background ? { ...current, dbPath: path.resolve(background.dbPath) } : current;
   let result;
   if (!config.dreamer.enabled || config.dreamer.mode === 'disabled') {
     result = await runDream({ config, projectKey });
@@ -114,7 +112,7 @@ async function dream(args) {
       result = await runDream({
         db, config, projectKey, cwd: targetCwd, embeddingEngine,
         dryRun: Boolean(values['dry-run']), automatic: Boolean(backgroundContext),
-        userDreamer: user.dreamer ?? null,
+        userDreamer: current.dreamer,
       });
     } finally {
       db.close();
@@ -168,9 +166,9 @@ async function importLegacy(args) {
   const { from, cwd, json } = values;
   if (!IMPORT_SOURCES.includes(from)) throw new Error(`--from must be ${IMPORT_SOURCES.join(', ')}`);
   const { loadConfig } = await import('../src/config.mjs');
-  const { dbPath } = loadConfig({ cwd });
+  const config = loadConfig({ cwd });
   const result = runImport({
-    dbPath, from, dryRun: values['dry-run'], includeArchived: values['include-archived'],
+    dbPath: config.dbPath, config, from, dryRun: values['dry-run'], includeArchived: values['include-archived'],
     projectMapPath: values['project-map'], magicContextDb: values['magic-context-db'],
     mnemopiDir: values['mnemopi-dir'], notesDir: values['notes-dir'], reportPath: values.report,
   });

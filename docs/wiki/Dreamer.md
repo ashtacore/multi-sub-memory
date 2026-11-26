@@ -19,10 +19,10 @@ deduplicated inserts in either mode.
 ## Runners and plan
 
 HTTP mode posts the prompt to `/chat/completions` under the configured base URL.
-The effective base URL must match the URL in user settings before Dreamer
-makes a request, including for endpoints that require no API key. When a
-bearer token is configured, its environment variable name must also match
-user settings.
+The user-owned YAML file authorizes the effective endpoint and optional
+bearer-token environment variable. Repository settings can supply either.
+Changing a repository's endpoint drops the inherited key binding unless its
+entry explicitly sets one.
 The runner rejects redirects and retries transient network failures and HTTP
 429 or 5xx responses up to twice. Each request has a 60-second timeout.
 
@@ -37,8 +37,8 @@ execution rules, and clear configured MCP servers. Codex still uses
 Dreamer applies the preset restrictions to saved arguments, including legacy
 presets. It replaces conflicting Codex arguments, including profile, remote
 server, and workspace overrides, so the local isolation settings apply.
-User settings must authorize CLI mode and match the effective
-orchestrator, command, and argument list. A model override adds `--model`
+The effective YAML settings authorize CLI mode, orchestrator, command, and
+argument list. A model override adds `--model`
 before the prompt argument. Specify an absolute executable path or a bare
 command available in an absolute directory on `PATH`. Windows requires a
 native `.exe` or `.com`. Dreamer bounds stdout, discards stderr, and terminates
@@ -100,8 +100,6 @@ array. Optional Markdown fences around the JSON are accepted.
   Automatic checks use explicit workspace roots recovered from transcript
   records, including roots saved during earlier indexing passes. An OMP append
   can restore a missing root from a verified session header that matches the
-  indexed project key. Indexing skips checks when recorded directories identify
-  different worktrees for the same project key. A quiet detached child starts
-  in the target workspace, opens the SQLite file used by the triggering
-  operation, verifies user authorization, and checks cadence again with the
-  Dreamer lease held. Manual runs can be requested at any time.
+  indexed project key. A quiet detached child starts in the target workspace,
+  reloads the repository's YAML settings, opens the SQLite file used by the
+  triggering operation, and checks cadence again with the Dreamer lease held. Manual runs can be requested at any time.

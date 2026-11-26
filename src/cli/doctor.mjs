@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadConfig, readConfigLayer } from '../config.mjs';
+import { loadConfig } from '../config.mjs';
 import { createEmbeddingEngine, DEFAULT_EMBEDDING_DIMS, DEFAULT_EMBEDDING_MODEL } from '../embeddings.mjs';
 import { CLI_PRESETS, DREAMER_EXECUTABLE_GUIDANCE, HOSTS, detectHost, findExecutable } from './hosts.mjs';
 import { cliContext, configErrorMessage, parseOptions, transformersAvailable } from './options.mjs';
@@ -182,7 +182,7 @@ function hostChecks(context, add) {
   }
 }
 
-async function dreamerChecks(dreamer, userHttp, testBackend, context, fetchImpl, add) {
+async function dreamerChecks(dreamer, testBackend, context, fetchImpl, add) {
   const { mode, enabled } = dreamer;
   if (!enabled || mode === 'disabled') {
     const legacy = enabled && mode === 'disabled';
@@ -216,11 +216,8 @@ async function dreamerChecks(dreamer, userHttp, testBackend, context, fetchImpl,
   }
 
   const { baseUrl, apiKeyEnv } = dreamer.http;
-  const authorized = baseUrl === userHttp?.baseUrl && apiKeyEnv === userHttp?.apiKeyEnv;
-  const key = authorized && apiKeyEnv && Object.hasOwn(context.env, apiKeyEnv) ? context.env[apiKeyEnv] : undefined;
-  if (!authorized) {
-    add('Dreamer credentials', 'warn', 'Credentials withheld because the endpoint and key pair is not authorized by user settings.');
-  } else if (apiKeyEnv && !key) {
+  const key = apiKeyEnv && Object.hasOwn(context.env, apiKeyEnv) ? context.env[apiKeyEnv] : undefined;
+  if (apiKeyEnv && !key) {
     add('Dreamer probe', 'fail', 'The configured API key environment variable is unset or empty.', {
       remediation: 'Set the environment variable named by dreamer.http.apiKeyEnv before running doctor.',
     });
@@ -270,30 +267,27 @@ export async function runDoctor(argv = [], options = {}) {
   const sqliteAvailable = await sqliteCheck(add);
   let context;
   let config;
-  let user;
   try {
     context = cliContext(values, options);
-    const { userConfigPath, projectConfigPath, env } = context;
+    const { userConfigPath, env } = context;
     const userExists = fs.existsSync(userConfigPath);
-    const projectExists = fs.existsSync(projectConfigPath);
-    user = readConfigLayer(userConfigPath);
-    config = loadConfig({ ...context, userConfigData: user });
+    config = loadConfig(context);
     if (!userExists && (values.config !== undefined || env.MULTI_SUB_MEMORY_CONFIG)) {
       add('Config', 'fail', 'Requested config file missing at ' + userConfigPath, {
         remediation: 'Check --config or MULTI_SUB_MEMORY_CONFIG, or run setup with this config path.',
       });
-    } else if (!userExists && !projectExists) {
+    } else if (!userExists) {
       add('Config', 'warn', 'No settings file found. Using defaults and environment settings.', {
         remediation: 'Run setup to save settings at ' + userConfigPath,
       });
     } else {
       add('Config', 'pass', 'Effective configuration is valid.', {
-        paths: [userExists && userConfigPath, projectExists && projectConfigPath].filter(Boolean),
+        paths: [userConfigPath],
       });
     }
   } catch (error) {
     add('Config', 'fail', configErrorMessage(error), {
-      remediation: context ? 'Check JSONC and settings in ' + context.userConfigPath + ' and ' + context.projectConfigPath
+      remediation: context ? 'Check YAML settings in ' + context.userConfigPath
         : 'Check the config, home, and workspace paths.',
     });
   }
@@ -306,7 +300,7 @@ export async function runDoctor(argv = [], options = {}) {
     }
     if (config) await embeddingCheck(config.embedding, context.env, options.createEmbeddingEngine, add);
     hostChecks(context, add);
-    if (config) await dreamerChecks(config.dreamer, user.dreamer?.http, values['test-dreamer'], context, fetchImpl, add);
+    if (config) await dreamerChecks(config.dreamer, values['test-dreamer'], context, fetchImpl, add);
   }
 
   const ok = checks.every(({ status }) => status !== 'fail');

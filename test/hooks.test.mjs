@@ -13,6 +13,7 @@ import { effectiveDatabaseFilePath, loadConfig } from '../src/config.mjs';
 import { openDatabase } from '../src/db.mjs';
 import { renderHookBootstrap } from '../src/hooks/render-bootstrap.mjs';
 import { writeMemory, writeNote } from '../src/memory-service.mjs';
+import { initGit } from './git-fixtures.mjs';
 
 const claudeModule = new URL('../hooks/claude/session-start.mjs', import.meta.url);
 
@@ -22,9 +23,10 @@ function fixture(t) {
   const cwd = path.join(root, 'workspace');
   const homeDir = path.join(root, 'home');
   fs.mkdirSync(cwd);
+  initGit(cwd);
   fs.mkdirSync(homeDir);
   const dbPath = path.join(root, 'memory.db');
-  const userConfigPath = path.join(root, 'fixture.jsonc');
+  const userConfigPath = path.join(root, 'fixture.yaml');
   const env = { MULTI_SUB_MEMORY_DB: dbPath, MULTI_SUB_MEMORY_CONFIG: userConfigPath };
   return { cwd, homeDir, dbPath, userConfigPath, env, timeoutMs: 3000 };
 }
@@ -307,16 +309,23 @@ test('OMP keeps the first populated and empty results after more than 32 session
   assert.deepEqual(renderedSessions, ['initially-empty', 'initially-populated']);
 });
 
-test('OMP fails open on corrupt DB or malformed project config', async (t) => {
+test('OMP fails open on corrupt DB or malformed global YAML', async (t) => {
   const options = fixture(t);
-  const handler = createBeforeAgentStartHandler({ ...options, projectConfigPath: path.join(options.cwd, '.fixture.jsonc') });
+  const handler = createBeforeAgentStartHandler(options);
   fs.writeFileSync(options.dbPath, 'invalid SQLite');
   assert.equal(await handler({ cwd: options.cwd, sessionId: 'corrupt' }), undefined);
   assertNoSidecars(options.dbPath);
   fs.unlinkSync(options.dbPath);
   await populate(options);
-  fs.writeFileSync(path.join(options.cwd, '.fixture.jsonc'), '{ malformed');
+  fs.writeFileSync(options.userConfigPath, '{ malformed');
   assert.equal(await handler({ cwd: options.cwd, sessionId: 'invalid-config' }), undefined);
+});
+
+test('startup hooks skip a non-Git workspace without creating storage', async (t) => {
+  const options = fixture(t);
+  assert.equal(await renderHookBootstrap({ ...options, cwd: options.homeDir }), '');
+  assert.equal(fs.existsSync(options.dbPath), false);
+  assertNoSidecars(options.dbPath);
 });
 
 function claudeOptions(options) {

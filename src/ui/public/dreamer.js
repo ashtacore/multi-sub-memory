@@ -132,8 +132,9 @@ export function renderDreamControls(data, project, running) {
   let hint = '';
   if (running) hint = 'Dreamer is running…';
   else if (!data) hint = 'Waiting for Dreamer status.';
+  else if (!data.runnable_project_key) hint = 'Launch the dashboard in a Git workspace to run Dreamer. Restart after changing its repository identity.';
   else if (project === 'all' || project === 'global') hint = 'Select a specific project to run Dreamer.';
-  else if (data.runnable_project_key && project !== data.runnable_project_key) {
+  else if (project !== data.runnable_project_key) {
     hint = 'Dreamer can only run for the workspace this dashboard was launched in. Restart with --cwd for another project.';
   }
   else if (!data.config.enabled) hint = 'Dreamer is disabled in configuration.';

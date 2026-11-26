@@ -4,10 +4,9 @@ import { readFile, realpath } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { expandHome, loadConfig } from '../config.mjs';
+import { expandHome, loadWorkspaceConfig, resolveConfigProject } from '../config.mjs';
 import { openDatabase } from '../db.mjs';
 import { createEmbeddingEngine } from '../embeddings.mjs';
-import { resolveProjectKey } from '../project-id.mjs';
 import { createApi, RequestError } from './routes.mjs';
 
 export const DEFAULT_UI_PORT = 3847;
@@ -115,10 +114,12 @@ export async function startDashboardServer(options = {}) {
   const { port = DEFAULT_UI_PORT, cwd: directory, userConfigPath, homeDir, env = process.env } = options;
   const cwd = path.resolve(directory ?? process.cwd());
   const configOptions = { userConfigPath, homeDir, env };
-  const baseConfig = options.config ?? loadConfig({ cwd, ...configOptions });
+  const { config: baseConfig, project } = options.config
+    ? { config: options.config, project: resolveConfigProject(cwd, options.config, { optional: true }) }
+    : loadWorkspaceConfig({ cwd, ...configOptions });
   const config = options.dbPath === undefined
     ? baseConfig : { ...baseConfig, dbPath: expandHome(options.dbPath, homeDir) };
-  const { projectKey: defaultProjectKey, projectRoot: defaultProjectRoot } = resolveProjectKey(cwd);
+  const { projectKey: defaultProjectKey = null, projectRoot: defaultProjectRoot = null } = project ?? {};
   const publicRoot = await realpath(publicDir);
   const csrfToken = randomBytes(32).toString('hex');
   const tokenBytes = Buffer.from(csrfToken);

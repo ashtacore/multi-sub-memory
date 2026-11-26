@@ -1,9 +1,8 @@
 import { randomBytes } from 'node:crypto';
-import path from 'node:path';
 import { hashNormalizedContent } from './db.mjs';
 import { maybeTriggerAutoDream } from './dreamer/trigger.mjs';
 import { encodeFloat32Vector } from './embeddings.mjs';
-import { resolveProjectKey } from './project-id.mjs';
+import { resolveConfigProject } from './config.mjs';
 
 export const GLOBAL_PROJECT_KEY = 'global';
 export const MEMORY_CATEGORIES = Object.freeze([
@@ -22,34 +21,20 @@ export class StaleRecordError extends Error {
   }
 }
 
+export class MissingProjectDestinationError extends Error {
+  constructor() {
+    super('Select a project destination or launch the dashboard in a Git workspace.');
+  }
+}
+
 function checkRevision(row, expectedUpdatedAt) {
   if (expectedUpdatedAt !== undefined && String(row.updated_at) !== expectedUpdatedAt) {
     throw new StaleRecordError();
   }
 }
 
-const PROJECT_KEY_TTL_MS = 5000;
-const PROJECT_KEY_CACHE_LIMIT = 64;
-const projectKeyCache = new Map();
-
-export function resolveCachedProjectKey(cwd) {
-  const directory = path.resolve(cwd ?? process.cwd());
-  const cached = projectKeyCache.get(directory);
-  if (cached && cached.expiresAt > performance.now()) return cached.project;
-
-  const project = Object.freeze(resolveProjectKey(directory));
-  const now = performance.now();
-  for (const [key, entry] of projectKeyCache) {
-    // Entries expire in insertion order.
-    if (entry.expiresAt > now) break;
-    projectKeyCache.delete(key);
-  }
-
-  if (projectKeyCache.size >= PROJECT_KEY_CACHE_LIMIT) {
-    projectKeyCache.delete(projectKeyCache.keys().next().value);
-  }
-  projectKeyCache.set(directory, { project, expiresAt: now + PROJECT_KEY_TTL_MS });
-  return project;
+export function resolveCachedProjectKey(cwd, config, options) {
+  return resolveConfigProject(cwd, config, { ...options, cache: true });
 }
 
 export function generateId() {
@@ -72,7 +57,7 @@ function requireContent(content) {
 
 function projectIdentityFor(scope, input, context) {
   if (scope === 'global') return { projectKey: GLOBAL_PROJECT_KEY, projectRoot: null };
-  return resolveCachedProjectKey(input.cwd ?? context.defaultCwd);
+  return resolveCachedProjectKey(input.cwd ?? context.defaultCwd, context.config);
 }
 
 function projectKeyFor(scope, input, context) {
@@ -227,11 +212,6 @@ export async function updateMemory(db, input, context = {}) {
   if (input.scope === 'project' && input.project_key === GLOBAL_PROJECT_KEY) {
     throw new Error('Project memories cannot use the global project key');
   }
-  const needsDefaultProject = input.scope === 'project' && input.project_key === undefined;
-  const targetProject = needsDefaultProject
-    ? projectIdentityFor('project', input, context)
-    : { projectKey: input.project_key ?? GLOBAL_PROJECT_KEY, projectRoot: null };
-  const targetProjectKey = targetProject.projectKey;
   let result;
   try {
     result = inWriteTransaction(db, () => {
@@ -248,10 +228,10 @@ export async function updateMemory(db, input, context = {}) {
       } else if (existing.scope === 'project') {
         projectKey = existing.project_key;
       } else {
-        projectKey = targetProjectKey;
-      }
-      if (scope === 'project' && needsDefaultProject && projectKey === targetProjectKey) {
-        recordProject(db, targetProjectKey, targetProject.projectRoot, Date.now());
+        if (context.defaultProject === null) throw new MissingProjectDestinationError();
+        const project = context.defaultProject ?? projectIdentityFor('project', input, context);
+        projectKey = project.projectKey;
+        recordProject(db, projectKey, project.projectRoot, Date.now());
       }
       const status = input.status ?? existing.status;
       if (status === 'superseded' && existing.superseded_by === null) {
@@ -332,7 +312,10 @@ export function selectMemories(db, { projectKey, scope, status, category, limit 
 export function listMemories(db, input = {}, context = {}) {
   const { scope = 'all', status = 'active', category, limit = DEFAULT_LIST_LIMIT } = input;
   return selectMemories(db, {
-    projectKey: projectKeyFor(scope, input, context), scope, status, category,
+    projectKey: scope === 'all'
+      ? resolveCachedProjectKey(input.cwd ?? context.defaultCwd, context.config, { optional: true })?.projectKey ?? GLOBAL_PROJECT_KEY
+      : projectKeyFor(scope, input, context),
+    scope, status, category,
     limit: Math.max(1, Math.min(MAX_LIST_LIMIT, Math.trunc(limit))),
   }).map(formatMemory);
 }
@@ -375,7 +358,9 @@ export function selectNotes(db, { projectKey, status, includeGlobal }) {
 
 export function readNotes(db, input = {}, context = {}) {
   return selectNotes(db, {
-    projectKey: projectKeyFor('project', input, context),
+    projectKey: input.include_global
+      ? resolveCachedProjectKey(input.cwd ?? context.defaultCwd, context.config, { optional: true })?.projectKey ?? GLOBAL_PROJECT_KEY
+      : projectKeyFor('project', input, context),
     status: input.status,
     includeGlobal: input.include_global,
   });

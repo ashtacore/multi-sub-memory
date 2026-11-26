@@ -58,7 +58,7 @@ test('indexes both formats incrementally and expands search hits from a linked w
     'commit', '--allow-empty', '--no-gpg-sign', '-m', 'Fixture commit');
   git(main, 'worktree', 'add', '--detach', linked);
   const expectedKey = resolveProjectKey(main).projectKey;
-  assert.match(expectedKey, /^git:/);
+  assert.match(expectedKey, /^local:/);
 
   const ompPath = path.join(omp, 'a.jsonl');
   const claudePath = path.join(claude, 'b.jsonl');

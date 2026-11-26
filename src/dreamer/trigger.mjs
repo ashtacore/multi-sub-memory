@@ -1,8 +1,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertDreamerTrust, loadConfig, readConfigLayer, resolveUserConfigPath } from '../config.mjs';
-import { resolveProjectKey } from '../project-id.mjs';
+import { assertDreamerTrust, loadWorkspaceConfig, resolveUserConfigPath } from '../config.mjs';
 
 const defaultCliPath = fileURLToPath(new URL('../../bin/cli.mjs', import.meta.url));
 export const AUTO_DREAM_CONTEXT_ENV = 'MULTI_SUB_MEMORY_AUTO_DREAM_CONTEXT';
@@ -39,24 +38,20 @@ export function maybeTriggerAutoDream({
     if (reloadProjectConfig && !cwd) return false;
     const env = configOptions?.env ?? process.env;
     const userConfigPath = path.resolve(resolveUserConfigPath(configOptions));
-    const user = reloadProjectConfig ? readConfigLayer(userConfigPath) : undefined;
-    const targetConfig = reloadProjectConfig
-      ? loadConfig({ cwd, env, homeDir: configOptions?.homeDir, userConfigPath, userConfigData: user })
-      : config;
-    if (!projectKey && targetConfig?.dreamer?.cadence?.mode === 'auto') {
-      projectKey = resolveProjectKey(cwd).projectKey;
-    }
+    const { config: trusted, project } = loadWorkspaceConfig({ ...configOptions, cwd, env, userConfigPath });
+    if (!project || (projectKey && projectKey !== project.projectKey)) return false;
+    projectKey = project.projectKey;
+    const targetConfig = reloadProjectConfig ? trusted : config;
     const now = Date.now();
     if (!shouldTriggerAutoDream(db, targetConfig, projectKey, now)) return false;
-    assertDreamerTrust(targetConfig.dreamer, { userConfigPath, userDreamer: user ? user.dreamer ?? null : undefined });
+    assertDreamerTrust(targetConfig.dreamer, { userDreamer: trusted.dreamer });
     const held = db.prepare('SELECT 1 FROM leases WHERE lease_key = ? AND expires_at > ?').get('dream:' + projectKey, now);
     if (held) return false;
     // Use target settings with the same database in which the activity was recorded.
-    const { dreamer, embedding } = targetConfig;
     const databaseFile = db.prepare("SELECT file FROM pragma_database_list WHERE name = 'main'").get().file;
     if (!databaseFile) return false;
     const dbPath = path.resolve(databaseFile);
-    const context = JSON.stringify({ dbPath, dreamer, embedding, projectKey });
+    const context = JSON.stringify({ dbPath, projectKey });
     const child = spawnImpl(process.execPath, [cliPath, 'dream'], {
       cwd: path.resolve(cwd ?? process.cwd()), detached: true, stdio: 'ignore', windowsHide: true,
       env: { ...env, MULTI_SUB_MEMORY_CONFIG: userConfigPath, [AUTO_DREAM_CONTEXT_ENV]: context },

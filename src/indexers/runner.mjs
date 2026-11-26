@@ -4,7 +4,7 @@ import { setImmediate } from 'node:timers/promises';
 import { acquireLease, releaseLease } from '../db.mjs';
 import { maybeTriggerAutoDream } from '../dreamer/trigger.mjs';
 import { DEFAULT_EMBEDDING_MODEL, encodeFloat32Vector } from '../embeddings.mjs';
-import { resolveProjectKey } from '../project-id.mjs';
+import { resolveConfigProject } from '../config.mjs';
 import { agyAdapter } from './agy.mjs';
 import { claudeAdapter } from './claude.mjs';
 import { codexAdapter } from './codex.mjs';
@@ -112,7 +112,7 @@ export async function runIndexers({
     const sql = sqlStatements(db);
     const projects = new Map();
     function projectFor(cwd) {
-      if (!projects.has(cwd)) projects.set(cwd, resolveProjectKey(cwd));
+      if (!projects.has(cwd)) projects.set(cwd, resolveConfigProject(cwd, config, { optional: true }));
       return projects.get(cwd);
     }
 
@@ -194,12 +194,12 @@ export async function runIndexers({
         const { sessionId, cwd, cwdInferred, messages, mtimeMs, newByteOffset, lineCount } = parsed;
         const project = cwd ? projectFor(cwd) : undefined;
         const projectKey = project?.projectKey
-          ?? (existing && !reindex ? existing.project_key : projectFor(path.dirname(filePath)).projectKey);
+          ?? (existing && !reindex ? existing.project_key : 'global');
         let resolvedRoot = project && !cwdInferred ? project.projectRoot
           : (existing && !reindex ? existing.project_root : null);
         if (existing && !reindex && !project && resolvedRoot == null && parsed.headerCwd) {
           const headerProject = projectFor(parsed.headerCwd);
-          if (headerProject.projectKey === existing.project_key) resolvedRoot = headerProject.projectRoot;
+          if (headerProject?.projectKey === existing.project_key) resolvedRoot = headerProject.projectRoot;
         }
         const fileValues = [sessionId, projectKey, resolvedRoot, mtimeMs, newByteOffset, lineCount,
           parsed.fileIdentity ?? fileIdentity, parsed.checkpointHash ?? null, parsed.fileSize ?? fileSize, Date.now()];
@@ -228,12 +228,7 @@ export async function runIndexers({
         summary.filesIndexed++;
         if (reindex) summary.filesReindexed++;
         summary.messagesIndexed += messagesIndexed;
-        if (resolvedRoot && messagesIndexed) {
-          const previousRoot = touchedProjects.get(projectKey);
-          // Linked worktrees can share a project key and have different configuration.
-          touchedProjects.set(projectKey,
-            previousRoot === undefined || previousRoot === resolvedRoot ? resolvedRoot : null);
-        }
+        if (resolvedRoot && messagesIndexed) touchedProjects.set(projectKey, resolvedRoot);
         return true;
       } catch (error) {
         if (signal?.aborted || leaseLost) return;

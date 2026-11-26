@@ -1,10 +1,10 @@
 import { createHmac, randomBytes } from 'node:crypto';
-import { assertDreamerTrust, loadConfig, readConfigLayer, resolveUserConfigPath } from '../config.mjs';
+import { loadWorkspaceConfig } from '../config.mjs';
 import { runDream } from '../dreamer/engine.mjs';
 import { createDreamRedactor, sanitizeDreamError } from '../dreamer/runners.mjs';
 import {
   GLOBAL_PROJECT_KEY, MAX_LIST_LIMIT, MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
-  StaleRecordError, updateMemory, updateNote,
+  MissingProjectDestinationError, StaleRecordError, updateMemory, updateNote,
 } from '../memory-service.mjs';
 import { formatProjectLabels } from '../project-id.mjs';
 import { hybridSearch } from '../search.mjs';
@@ -311,7 +311,7 @@ function notes({ db }, params) {
   };
 }
 
-async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot, embeddingEngine, cwd }, req, table, id) {
+async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot, embeddingEngine }, req, table, id) {
   const noun = table === 'memories' ? 'Memory' : 'Note';
   if (req.method === 'DELETE') {
     if (!db.prepare('DELETE FROM ' + table + ' WHERE id = ?').run(id).changes) {
@@ -340,16 +340,18 @@ async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot,
       throw new RequestError(400, 'Project memories require a non-global project key.');
     }
   }
+  const defaultProject = defaultProjectKey ? { projectKey: defaultProjectKey, projectRoot: defaultProjectRoot } : null;
   try {
     if (table === 'memories') {
       const memory = await updateMemory(db, { ...body, id }, {
-        defaultCwd: cwd, embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt,
+        defaultProject, embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt,
       });
       const catalog = knownProjectCatalog(db, defaultProjectKey, defaultProjectRoot, [memory.project_key]);
       return { memory: attachMemoryProject(memory, catalog) };
     }
     return { note: updateNote(db, { ...body, id }, { expectedUpdatedAt }) };
   } catch (error) {
+    if (error instanceof MissingProjectDestinationError) throw new RequestError(400, error.message);
     if (error instanceof StaleRecordError) throw new RequestError(409, error.message);
     if (error.message.startsWith(noun + ' not found:')) throw new RequestError(404, noun + ' not found');
     if (error.message.startsWith('Memory update conflicts with existing content')) {
@@ -374,21 +376,11 @@ function dreamRedactor(env, apiKeyEnv) {
 
 function effectiveDreamer(context) {
   const { cwd, configOptions, env } = context;
-  const userConfigPath = resolveUserConfigPath(configOptions);
-  const userConfigData = readConfigLayer(userConfigPath);
-  const config = loadConfig({ cwd, ...configOptions, userConfigPath, userConfigData });
+  const { config, project } = loadWorkspaceConfig({ cwd, ...configOptions });
   config.dbPath = context.config.dbPath;
-  const userDreamer = userConfigData.dreamer ?? null;
   const { enabled, mode, http, cli } = config.dreamer;
-  let authorized = false;
-  if (enabled && (mode === 'http' || mode === 'cli')) {
-    try {
-      assertDreamerTrust(config.dreamer, { userDreamer });
-      authorized = true;
-    } catch {
-      // Execution independently enforces trust and records a sanitized failure.
-    }
-  }
+  const runnableProjectKey = project?.projectKey === context.defaultProjectKey ? project.projectKey : null;
+  const authorized = Boolean(runnableProjectKey && enabled && mode !== 'disabled');
   const endpoint = mode === 'http' ? URL.parse(http?.baseUrl) : null;
   const keyConfigured = Boolean(http?.apiKeyEnv && env[http.apiKeyEnv]?.trim());
   let runnerIdentity = null;
@@ -403,14 +395,14 @@ function effectiveDreamer(context) {
   // CLI arguments can contain credentials. Key the digest per launch so the
   // public fingerprint cannot be used to test guesses about their values.
   const fingerprint = createHmac('sha256', context.fingerprintKey).update(JSON.stringify([
-    enabled, mode, authorized, runnerIdentity,
+    runnableProjectKey, enabled, mode, authorized, runnerIdentity,
   ])).digest('hex');
-  return { config, userDreamer, authorized, fingerprint, endpoint, keyConfigured, redactDream };
+  return { config, runnableProjectKey, authorized, fingerprint, endpoint, keyConfigured, redactDream };
 }
 
 function dreamer(context, params) {
-  const { db, defaultProjectKey, env } = context;
-  const { config, authorized, fingerprint, endpoint, keyConfigured, redactDream } = effectiveDreamer(context);
+  const { db, env } = context;
+  const { config, runnableProjectKey, authorized, fingerprint, endpoint, keyConfigured, redactDream } = effectiveDreamer(context);
   const { enabled = false, mode = 'disabled', cadence = {}, http, cli } = config.dreamer ?? {};
   const runner = mode === 'http' || mode === 'cli' ? config.dreamer[mode] : undefined;
   const status = choice(params, 'status', [...DREAM_STATUSES, all], all);
@@ -455,7 +447,7 @@ function dreamer(context, params) {
     runs,
   });
   details.config.config_fingerprint = fingerprint;
-  return { runnable_project_key: defaultProjectKey, ...details };
+  return { runnable_project_key: runnableProjectKey, ...details };
 }
 
 async function startDream(context, req) {
@@ -469,13 +461,14 @@ async function startDream(context, req) {
   if (body.project_key !== defaultProjectKey) {
     throw new RequestError(400, 'Dreamer can only run for the workspace this dashboard was launched in');
   }
-  const { config, userDreamer, fingerprint, redactDream } = effectiveDreamer(context);
+  const { config, runnableProjectKey, fingerprint, redactDream } = effectiveDreamer(context);
   if (body.expected_config_fingerprint !== undefined && body.expected_config_fingerprint !== fingerprint) {
     throw new RequestError(409, 'Dreamer configuration changed; refresh before running.');
   }
+  if (!runnableProjectKey) throw new RequestError(409, 'Workspace identity changed; restart the dashboard.');
   return redactDream(await runDream({
     db, config, projectKey: defaultProjectKey, cwd, embeddingEngine, dryRun: Boolean(body.dry_run),
-    ...configOptions, userDreamer,
+    ...configOptions, userDreamer: config.dreamer,
   }));
 }
 

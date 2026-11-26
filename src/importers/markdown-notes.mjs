@@ -102,14 +102,22 @@ export function importMarkdownNotes(options) {
   for (const filename of files) {
     const lines = fs.readFileSync(filename, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/);
     const { fields, body } = readFrontmatter(lines);
+    const items = [...uncheckedItems(body)];
+    if (items.length === 0) continue;
     const basename = path.basename(filename);
     const filenameKey = [path.parse(basename).name, basename].find((key) => projectMap && Object.hasOwn(projectMap, key));
     const rawProject = fields.project_key || fields.project_path || fields.project || fields.cwd || filenameKey;
-    const { projectKey } = resolveLegacyProjectKey(rawProject, { projectMap, defaultScope: 'global' });
+    const { projectKey, unresolved } = resolveLegacyProjectKey(rawProject, { projectMap, defaultScope: 'global', config: options.config });
+    if (unresolved) {
+      result.notesSkippedUnresolved += items.length;
+      result.errors.push({ source: 'notes', kind: 'note', filePath: filename,
+        message: 'Unresolved project-scoped Markdown note. Map its project with --project-map and rerun.' });
+      continue;
+    }
     const { birthtimeMs, mtimeMs } = fs.statSync(filename);
     const updatedAt = Math.trunc(mtimeMs);
     const createdAt = birthtimeMs > 0 ? Math.trunc(birthtimeMs) : updatedAt;
-    for (const content of uncheckedItems(body)) {
+    for (const content of items) {
       const inserted = importNoteRecord(targetDb, {
         projectKey, status: 'active', content, surfaceCondition: fields.surface_condition,
         sourceOrchestrator: 'markdown-notes', createdAt, updatedAt,

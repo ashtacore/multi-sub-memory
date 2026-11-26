@@ -10,6 +10,7 @@ import { runDoctor } from '../src/cli/doctor.mjs';
 import { writeConfig } from '../src/config.mjs';
 import { openDatabase } from '../src/db.mjs';
 import { createEmbeddingEngine, DEFAULT_EMBEDDING_DIMS, DEFAULT_EMBEDDING_MODEL } from '../src/embeddings.mjs';
+import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-doctor-'));
@@ -19,7 +20,7 @@ function fixture(t) {
   fs.mkdirSync(homeDir);
   fs.mkdirSync(cwd);
   const dbPath = path.join(cwd, 'memory #1.db');
-  const configPath = path.join(cwd, 'settings.jsonc');
+  const configPath = path.join(cwd, 'settings.yaml');
   const data = { dbPath: path.basename(dbPath), embedding: { enabled: false } };
   writeConfig(configPath, data);
   const env = {};
@@ -180,7 +181,7 @@ test('doctor recopies the checkpointed database when the last writer closes duri
     assert.equal(snapshotCopies[0], snapshotCopies[1]);
     assert.notEqual(path.dirname(snapshotCopies[0]), cwd);
     assert.equal(fs.existsSync(path.dirname(snapshotCopies[0])), false);
-    assert.deepEqual(fs.readdirSync(cwd).sort(), [path.basename(dbPath), 'settings.jsonc'].sort());
+    assert.deepEqual(fs.readdirSync(cwd).sort(), [path.basename(dbPath), 'settings.yaml'].sort());
   } finally {
     if (writerOpen) writer.close();
   }
@@ -368,7 +369,7 @@ test('doctor provides remediation for an invalid or missing explicit config', as
   writeConfig(configPath, { ...data, dreamer: { mode: 'http', enabled: true } });
   const invalid = await invoke();
   assert.equal(invalid.code, 1);
-  assert.match(invalid.stdout, /FAIL\s+Config .*dreamer\.http.*Check JSONC/);
+  assert.match(invalid.stdout, /FAIL\s+Config .*dreamer\.http.*Check YAML/);
   fs.rmSync(configPath);
   const missing = await invoke();
   assert.equal(missing.code, 1);
@@ -407,7 +408,7 @@ test('the HTTP Dreamer probe sends only GET /models and uses the named environme
   assert.match(tested.stdout, /GET \/models returned HTTP 200/);
 });
 
-test('the Dreamer probe withholds authorization when project settings change either part of the user pair', async (t) => {
+test('the Dreamer probe uses the effective YAML key and drops inherited credentials when the endpoint changes', async (t) => {
   const { cwd, dbPath, configPath, data, env, invoke } = fixture(t);
   openDatabase(dbPath).close();
   const requests = [];
@@ -422,7 +423,7 @@ test('the Dreamer probe withholds authorization when project settings change eit
     return 'http://127.0.0.1:' + server.address().port + '/v1';
   };
   const [userUrl, projectUrl] = await Promise.all([listen('user'), listen('project')]);
-  const projectConfig = path.join(cwd, '.multi-sub-memory.jsonc');
+  initGit(cwd);
   env.USER_FIXTURE_KEY = 'placeholder-user-key';
   env.PROJECT_FIXTURE_KEY = 'placeholder-project-key';
   writeConfig(configPath, { ...data, dreamer: { enabled: true, mode: 'http', http: {
@@ -434,17 +435,17 @@ test('the Dreamer probe withholds authorization when project settings change eit
     { baseUrl: projectUrl, apiKeyEnv: 'USER_FIXTURE_KEY' },
     { apiKeyEnv: 'PROJECT_FIXTURE_KEY' },
   ]) {
-    writeConfig(projectConfig, { dreamer: { http } });
+    writeProjectConfig(configPath, cwd, { dreamer: { http } });
     const result = await invoke(['--test-dreamer', '--json']);
     assert.equal(result.code, 0, result.stdout);
     const { checks } = JSON.parse(result.stdout);
-    const warning = checks.find(({ check }) => check === 'Dreamer credentials');
-    assert.equal(warning.status, 'warn');
-    assert.match(warning.message, /Credentials withheld/);
+    assert.equal(checks.find(({ check }) => check === 'Dreamer probe').status, 'pass');
     assert.doesNotMatch(result.stdout + result.stderr, /placeholder-(user|project)-key/);
   }
   assert.deepEqual(requests, [
-    ['project', '/v1/models', undefined], ['project', '/v1/models', undefined], ['user', '/v1/models', undefined],
+    ['project', '/v1/models', undefined],
+    ['project', '/v1/models', 'Bearer placeholder-user-key'],
+    ['user', '/v1/models', 'Bearer placeholder-project-key'],
   ]);
 });
 

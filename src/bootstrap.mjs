@@ -1,3 +1,4 @@
+import { bootstrapTokenBudget } from './config.mjs';
 import { MEMORY_CATEGORIES, resolveCachedProjectKey, selectMemories, selectNotes } from './memory-service.mjs';
 
 export function estimateTokens(text) {
@@ -58,11 +59,11 @@ function section(opening, closing, items, label) {
 
 export function formatBootstrap(db, options = {}) {
   const { cwd, defaultCwd, includeNotes = true, config } = options;
-  const tokenBudget = options.tokenBudget ?? config?.bootstrap?.tokenBudget ?? 2500;
+  const { projectKey, displayName } = options.project ?? resolveCachedProjectKey(cwd ?? defaultCwd, config);
+  const tokenBudget = options.tokenBudget ?? bootstrapTokenBudget(config, projectKey);
   if (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1) {
     throw new Error('token budget must be a positive integer');
   }
-  const { projectKey, displayName } = options.project ?? resolveCachedProjectKey(cwd ?? defaultCwd);
   const memories = selectMemories(db, { projectKey, scope: 'all', status: 'active' });
   const notes = includeNotes === false ? [] : selectNotes(db, { projectKey });
   const memorySection = section(

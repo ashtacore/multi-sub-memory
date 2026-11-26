@@ -5,7 +5,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { hashNormalizedContent, normalizeContent } from '../db.mjs';
 import { generateId, MEMORY_CATEGORIES } from '../memory-service.mjs';
-import { normalizePath, resolveProjectKey } from '../project-id.mjs';
+import { resolveConfigProject } from '../config.mjs';
+import { isProjectKey, normalizePath } from '../project-id.mjs';
 
 export function hashFileSha256(filePath) {
   const hash = createHash('sha256');
@@ -122,12 +123,11 @@ export function loadProjectMap(projectMapPath) {
 }
 
 const globalProject = Object.freeze({ projectKey: 'global', scope: 'global' });
-const isProjectKey = (value) => /^(?:git|dir):/.test(value);
 const isGlobal = (value) => /^(?:global|default)$/i.test(value);
 const isAbsolute = (value) => path.posix.isAbsolute(value) || path.win32.isAbsolute(value);
 
 export function resolveLegacyProjectKey(rawProject, {
-  projectMap, sessionProjectLookup, sessionId, defaultScope = 'project', explicitScope,
+  projectMap, sessionProjectLookup, sessionId, defaultScope = 'project', explicitScope, config,
 } = {}) {
   const raw = String(rawProject ?? '').trim();
   if (explicitScope === 'global' || isGlobal(raw)) return globalProject;
@@ -140,16 +140,19 @@ export function resolveLegacyProjectKey(rawProject, {
     if (typeof value !== 'string' || !value.trim()) throw new Error(`Invalid project map destination for ${mapped}`);
     const destination = value.trim();
     if (isGlobal(destination)) return globalProject;
-    return { projectKey: isProjectKey(destination) ? destination : resolveProjectKey(destination).projectKey, scope: 'project' };
+    return { projectKey: isProjectKey(destination) ? destination : resolveConfigProject(destination, config).projectKey, scope: 'project' };
   }
   const sessionProject = sessionProjectLookup?.get(raw);
   if (sessionProject) return sessionProject === 'global' ? globalProject : { projectKey: sessionProject, scope: 'project' };
-  if (raw && (isAbsolute(raw) || fs.existsSync(raw))) return { projectKey: resolveProjectKey(raw).projectKey, scope: 'project' };
+  if (isProjectKey(raw)) return { projectKey: raw, scope: 'project' };
+  if (raw && (isAbsolute(raw) || fs.existsSync(raw))) {
+    const project = resolveConfigProject(raw, config, { optional: true });
+    if (project) return { projectKey: project.projectKey, scope: 'project' };
+  }
   const sessionWorkspace = sessionProjectLookup?.get(session);
   if (sessionWorkspace) return sessionWorkspace === 'global' ? globalProject : { projectKey: sessionWorkspace, scope: 'project' };
-  if (isProjectKey(raw)) return { projectKey: raw, scope: 'project' };
-  if ((explicitScope ?? defaultScope) === 'global') return globalProject;
-  return raw ? { projectKey: raw, scope: 'project' } : { projectKey: null, scope: 'project', unresolved: true };
+  if (!raw && (explicitScope ?? defaultScope) === 'global') return globalProject;
+  return { projectKey: null, scope: 'project', unresolved: true };
 }
 
 export function parseLegacyMetadata(raw) {
