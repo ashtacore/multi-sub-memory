@@ -12,7 +12,7 @@ import { createBeforeAgentStartHandler } from '../hooks/omp/index.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
-const claudeScript = fileURLToPath(new URL('../hooks/claude/session-start.mjs', import.meta.url));
+const claudeModule = new URL('../hooks/claude/session-start.mjs', import.meta.url);
 
 function worktrees(root) {
   const repoA = path.join(root, 'repoA');
@@ -211,9 +211,11 @@ test('Codex, Antigravity, OMP and Claude share worktree memory, transcripts, and
   assert.equal(event.messages, messages);
   assertDatabaseUnchanged();
 
-  const claude = spawnSync(process.execPath, [claudeScript], {
+  const claudeSource = `import { runClaudeSessionStartCli } from ${JSON.stringify(claudeModule.href)};
+    await runClaudeSessionStartCli({ timeoutMs: ${hookOptions.timeoutMs} });`;
+  const claude = spawnSync(process.execPath, ['--input-type=module', '--eval', claudeSource], {
     cwd: repoB, env, input: JSON.stringify({ cwd: repoB, session_id: 'claude-hook-fixture' }),
-    encoding: 'utf8', timeout: 6_000, windowsHide: true,
+    encoding: 'utf8', timeout: 10_000, windowsHide: true,
   });
   assert.ifError(claude.error);
   assert.equal(claude.status, 0, claude.stderr);

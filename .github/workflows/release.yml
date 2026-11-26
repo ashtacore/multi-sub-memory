@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Verify without publishing to npm or GitHub
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run check
+      - run: node --test --test-concurrency=4
+        env:
+          # Node 22's SQLite warning changes the stderr asserted by CLI tests.
+          NODE_OPTIONS: --disable-warning=ExperimentalWarning
+      - run: npm pack --dry-run
+      - name: Validate tag for dry run
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run && github.ref_type == 'tag'
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME must match package version $tag"
+            exit 1
+          fi
+
+  publish-npm:
+    needs: verify
+    if: >-
+      (github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted) ||
+      (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Validate release tag
+        id: version
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME must match package version $tag"
+            exit 1
+          fi
+
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            tagged_commit=$(git rev-parse "refs/tags/$tag^{commit}")
+            if [[ "$tagged_commit" != "$(git rev-parse HEAD)" ]]; then
+              echo "::error::Tag $tag already points to a different commit"
+              exit 1
+            fi
+          elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            echo "::error::Tag $tag no longer exists"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [[ "$REPO_PRIVATE" == false ]]; then
+            npm publish --provenance --access public
+          else
+            npm publish --access public
+          fi
+
+  github-release:
+    needs: publish-npm
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.publish-npm.outputs.tag }}
+        run: |
+          tag_ref="refs/tags/$RELEASE_TAG"
+          tag_commit() {
+            local refs
+            refs=$(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+              ls-remote "$GITHUB_SERVER_URL/$GH_REPO.git" "$tag_ref" "$tag_ref^{}") || return
+            # An annotated tag advertises both the tag object and its peeled commit.
+            awk -v ref="$tag_ref" '$2 == ref { tag = $1 } $2 == ref "^{}" { peeled = $1 }
+              END { print (peeled ? peeled : tag) }' <<< "$refs"
+          }
+
+          tagged_commit=$(tag_commit)
+          if [[ -z "$tagged_commit" && "$GITHUB_REF_TYPE" == branch ]]; then
+            gh api --method POST "repos/$GH_REPO/git/refs" -f ref="$tag_ref" -f sha="$GITHUB_SHA" >/dev/null
+            tagged_commit=$(tag_commit)
+          fi
+          if [[ "$tagged_commit" != "$GITHUB_SHA" ]]; then
+            echo "::error::Tag $RELEASE_TAG must point to $GITHUB_SHA, found ${tagged_commit:-no tag}"
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" --json id >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --draft=false --verify-tag
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes
+          fi
+      # Issue #30 will add Electron .exe and .AppImage uploads to this release.
