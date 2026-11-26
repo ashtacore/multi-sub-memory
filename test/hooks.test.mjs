@@ -106,7 +106,8 @@ test('hook bootstrap includes committed WAL data before and after the last write
 });
 
 test('hook bootstrap leaves no sidecars before and after a rollback database switches to WAL', async (t) => {
-  const options = fixture(t);
+  // Both reads must render successfully even when parallel CI delays startup.
+  const options = { ...fixture(t), timeoutMs: 10_000 };
   const expected = await populate(options);
   const rollbackWriter = new DatabaseSync(options.dbPath);
   try {
@@ -114,8 +115,10 @@ test('hook bootstrap leaves no sidecars before and after a rollback database swi
   } finally {
     rollbackWriter.close();
   }
-  assert.equal(await renderHookBootstrap(options), expected);
   assertNoSidecars(options.dbPath);
+  const rollbackBootstrap = await renderHookBootstrap(options);
+  assertNoSidecars(options.dbPath);
+  assert.equal(rollbackBootstrap, expected, 'expected bootstrap in rollback mode');
 
   const walWriter = new DatabaseSync(options.dbPath);
   try {
@@ -123,8 +126,10 @@ test('hook bootstrap leaves no sidecars before and after a rollback database swi
   } finally {
     walWriter.close();
   }
-  assert.equal(await renderHookBootstrap(options), expected);
   assertNoSidecars(options.dbPath);
+  const walBootstrap = await renderHookBootstrap(options);
+  assertNoSidecars(options.dbPath);
+  assert.equal(walBootstrap, expected, 'expected bootstrap in WAL mode');
 });
 
 test('hook bootstrap respects an exclusive WAL writer without a shared-memory sidecar', async (t) => {

@@ -15,9 +15,10 @@ import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
 const cliPath = fileURLToPath(new URL('../bin/cli.mjs', import.meta.url));
 const plannedCommands = [];
+const tempCleanupOptions = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 };
 
-function invoke(args, options = {}) {
-  const result = spawnSync(process.execPath, [cliPath, ...args], {
+function invoke(args, { execArgv = [], ...options } = {}) {
+  const result = spawnSync(process.execPath, [...execArgv, cliPath, ...args], {
     encoding: 'utf8',
     timeout: 10000,
     windowsHide: true,
@@ -80,7 +81,7 @@ for (const command of ['setup', 'doctor']) {
 
 test('default and explicit serve exit cleanly on closed stdin', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-cli-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, tempCleanupOptions));
   for (const args of [[], ['serve'], ['serve', '--cwd', directory], ['--cwd', directory]]) {
     const result = invoke(args, {
       cwd: directory,
@@ -151,7 +152,7 @@ test('unknown commands report an error and help hint on stderr', () => {
 
 function dreamCliFixture(t) {
   const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'multi-sub-memory-cli-dream-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, tempCleanupOptions));
   initGit(directory);
   const configPath = path.join(directory, 'settings.yaml');
   const dbPath = path.join(directory, 'memory.db');
@@ -337,7 +338,7 @@ test('the detached Dreamer command uses the indexed project key and keeps stdout
   }
 });
 
-test('manual and detached Dreamer select the target project and isolate runners while using the original database', async (t) => {
+test('manual and detached Dreamer select the target project and isolate runners while using the original database', (t) => {
   const { directory, configPath, dbPath, env } = dreamCliFixture(t);
   const target = path.join(directory, 'target');
   const sessionsDir = path.join(directory, 'sessions');
@@ -369,7 +370,25 @@ test('manual and detached Dreamer select the target project and isolate runners 
   assert.ok(path.basename(result.summary).startsWith('msm-dream-'));
   assert.equal(fs.existsSync(result.summary), false);
 
-  const indexed = invoke(['index', '--orchestrator', 'omp', '--json'], options);
+  // Keep the real detached child referenced until it exits and releases its cwd.
+  const waitForDreamer = `
+    import childProcess from 'node:child_process';
+    import { syncBuiltinESMExports } from 'node:module';
+    const spawn = childProcess.spawn;
+    childProcess.spawn = (file, args, options) => {
+      const child = spawn(file, args, options);
+      if (options?.detached && options.env?.MULTI_SUB_MEMORY_AUTO_DREAM_CONTEXT) {
+        child.unref = () => child;
+      }
+      return child;
+    };
+    syncBuiltinESMExports();
+  `;
+  const indexed = invoke(['index', '--orchestrator', 'omp', '--json'], {
+    ...options,
+    execArgv: ['--import', 'data:text/javascript,' + encodeURIComponent(waitForDreamer)],
+    timeout: 20_000,
+  });
   assert.equal(indexed.status, 0, indexed.stderr);
   const summary = JSON.parse(indexed.stdout);
   assert.deepEqual(summary.errors, []);
@@ -378,14 +397,9 @@ test('manual and detached Dreamer select the target project and isolate runners 
   const db = openDatabase(dbPath, { readOnly: true });
   try {
     assert.equal(db.prepare('SELECT status FROM dream_runs WHERE id = ?').get(result.runId).status, 'dry-run');
-    const findDetached = db.prepare(`
-      SELECT status, project_key, summary, error FROM dream_runs WHERE id <> ?
-        AND NOT EXISTS (SELECT 1 FROM leases WHERE lease_key = ?)
-    `);
-    const deadline = Date.now() + 10_000;
-    let detached;
-    while (!(detached = findDetached.get(result.runId, 'dream:' + projectKey)) && Date.now() < deadline) await delay(50);
+    const detached = db.prepare('SELECT status, project_key, summary, error FROM dream_runs WHERE id <> ?').get(result.runId);
     assert.ok(detached, 'Expected a detached Dreamer run in the original database');
+    assert.equal(db.prepare('SELECT 1 FROM leases WHERE lease_key = ?').get('dream:' + projectKey), undefined);
     assert.equal(detached.status, 'completed', detached.error);
     assert.equal(detached.project_key, projectKey);
     assert.notEqual(normalizePath(detached.summary), normalizePath(target));
@@ -412,7 +426,7 @@ test('dream rejects unknown, duplicate, conflicting, missing, and positional arg
 
 test('index writes JSON summaries and respects adapter selection and --cwd', (t) => {
   const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'multi-sub-memory-cli-index-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, tempCleanupOptions));
   const cwd = path.join(directory, 'project');
   const omp = path.join(directory, 'omp');
   const claude = path.join(directory, 'claude');
@@ -483,7 +497,7 @@ test('index rejects unknown, duplicate, missing, and invalid arguments', () => {
 
 test('index honors the global indexer switch', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'multi-sub-memory-cli-disabled-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(directory, tempCleanupOptions));
   const configPath = path.join(directory, 'config.yaml');
   fs.writeFileSync(configPath, JSON.stringify({ indexers: { enabled: false } }));
   const result = invoke(['index', '--json'], {
@@ -534,7 +548,7 @@ test('serve refreshes on startup and after an append while keeping stdout quiet'
     try {
       await closed;
     } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
+      fs.rmSync(directory, tempCleanupOptions);
     }
   });
 
