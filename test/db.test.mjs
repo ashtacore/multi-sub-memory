@@ -632,7 +632,7 @@ test('migration 9 preserves v8 data, is idempotent, and cascades tag assignments
   assert.throws(() => db.exec("INSERT INTO tag_dictionary VALUES ('project', 'Invalid', '', 1, 1)"), /CHECK/);
   db.exec("INSERT INTO memory_tags VALUES ('memory', 'release')");
   assert.throws(() => db.exec("INSERT INTO memory_tags VALUES ('missing', 'release')"), /FOREIGN KEY/);
-  MIGRATIONS.at(-1).up(db);
+  MIGRATIONS.find(({ version }) => version === 9).up(db);
   runMigrations(db);
   assert.deepEqual(getMemory(db, 'memory').tags, ['release']);
   db.exec("DELETE FROM memories WHERE id = 'memory'");
