@@ -7,7 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { loadConfig, writeConfig } from '../src/config.mjs';
 import { acquireLease, hashNormalizedContent, MIGRATIONS, openDatabase, releaseLease } from '../src/db.mjs';
-import { archiveMemory, recordAccess, writeMemory, writeNote } from '../src/memory-service.mjs';
+import { addNoteComment, archiveMemory, recordAccess, writeMemory, writeNote } from '../src/memory-service.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
 import { allowedLoopbackGuards, startDashboardServer } from '../src/ui/server.mjs';
 import { fixtureGit, initGit, writeProjectConfig } from './git-fixtures.mjs';
@@ -327,7 +327,7 @@ test('record PATCHes reject stale revisions and preserve fields omitted by parti
     const invalid = await mutate('PATCH', endpoint, { ...change, expected_updated_at: record.updated_at });
     assert.equal(invalid.status, 400, invalid.text);
     assert.equal((await mutate('PATCH', endpoint, { ...change, expected_updated_at: ' ' })).status, 400);
-    const quickAction = await mutate('PATCH', endpoint, { expected_updated_at, status });
+    const quickAction = await mutate('PATCH', endpoint, { expected_updated_at, status, ...(table === 'notes' ? { comment: 'Fixture transition' } : {}) });
     assert.equal(quickAction.status, 200, quickAction.text);
     const afterStatus = read();
     assert.equal(afterStatus.status, status);
@@ -385,11 +385,11 @@ test('notes filter, edit, dismiss, restore and delete', async (t) => {
   for (const patch of [{ surface_condition: 1 }, { content: '' }, { status: 'archived' }]) {
     assert.equal((await mutate('PATCH', endpoint, patch)).status, 400);
   }
-  const edited = await mutate('PATCH', endpoint, { content: 'Edited note', surface_condition: null, status: 'dismissed' });
+  const edited = await mutate('PATCH', endpoint, { content: 'Edited note', surface_condition: null, status: 'dismissed', comment: 'Fixture dismissed' });
   assert.equal(edited.json.note.content, 'Edited note');
   assert.equal(edited.json.note.surface_condition, null);
   assert.equal((await request(listing + '&status=dismissed')).json.notes[0].id, note.id);
-  assert.equal((await mutate('PATCH', endpoint, { status: 'active' })).json.note.status, 'active');
+  assert.equal((await mutate('PATCH', endpoint, { status: 'active', comment: 'Fixture restored' })).json.note.status, 'active');
   assert.deepEqual((await mutate('DELETE', endpoint)).json, { deleted: true, id: note.id });
   assert.equal((await request(listing + '&status=all')).json.notes.length, 0);
   assert.equal((await mutate('PATCH', endpoint, { status: 'active' })).status, 404);
@@ -924,4 +924,109 @@ test('a registered project stays in the overview after its last memory moves to 
   assert.equal(movedToTranscriptOnly.status, 200, movedToTranscriptOnly.text);
   assert.equal(movedToTranscriptOnly.json.memory.project_key, transcriptOnlyKey);
   assert.equal(movedToTranscriptOnly.json.memory.project_root, null);
+});
+
+test('dashboard pages comment chains and protects transition comments', async (t) => {
+  const { db, cwd, request, mutate } = await fixture(t);
+  const topic = writeNote(db, { cwd, content: 'Fixture topic', status: 'pending' });
+  const other = writeNote(db, { cwd, content: 'Other topic' });
+  const path = '/api/notes/' + topic.id;
+  const comments = path + '/comments';
+  assert.deepEqual((await request(comments)).json, { comments: [], next_cursor: null });
+  for (const body of [{ status: 'active' }, { status: 'active', comment: ' \t ' }]) {
+    assert.equal((await mutate('PATCH', path, body)).status, 400);
+  }
+  assert.equal((await request(comments)).json.comments.length, 0);
+  const changed = await mutate('PATCH', path, { status: 'active', comment: 'Approved' });
+  assert.equal(changed.status, 200, changed.text);
+  const [transition] = (await request(comments)).json.comments;
+  assert.deepEqual([transition.from_status, transition.to_status, transition.body], ['pending', 'active', 'Approved']);
+  const immutable = await mutate('PATCH', comments + '/' + transition.id, { body: 'Rewrite' });
+  assert.equal(immutable.status, 400);
+  assert.match(immutable.json.error, /immutable/);
+  const immutableDelete = await mutate('DELETE', comments + '/' + transition.id);
+  assert.equal(immutableDelete.status, 400);
+  assert.match(immutableDelete.json.error, /immutable/);
+  assert.equal((await mutate('POST', comments, { body: ' \t ' })).status, 400);
+  const body = 'Progress '.repeat(25);
+  const appended = await mutate('POST', comments, { body });
+  assert.equal(appended.status, 200, appended.text);
+  const { note, comment } = appended.json;
+  assert.ok(note.updated_at > changed.json.note.updated_at);
+  assert.deepEqual([comment.from_status, comment.to_status], [null, null]);
+  db.prepare('UPDATE note_comments SET created_at = ? WHERE id = ?')
+    .run(transition.created_at + 1, comment.id);
+  const { notes } = (await request('/api/notes')).json;
+  assert.equal(notes[0].id, topic.id);
+  assert.equal(notes[0].comment_count, 2);
+  assert.equal(notes[0].latest_comment_preview, body.slice(0, 120) + '…');
+
+  const page = (await request(comments + '?limit=1')).json;
+  assert.equal(page.comments[0].id, comment.id);
+  assert.ok(page.next_cursor);
+  const last = (await request(comments + '?limit=1&cursor=' + page.next_cursor)).json;
+  assert.equal(last.comments[0].id, transition.id);
+  assert.equal(last.next_cursor, null);
+  assert.equal((await request(comments + '?cursor=invalid')).status, 400);
+  assert.equal((await mutate('PATCH', '/api/notes/' + other.id + '/comments/' + comment.id, { body: 'Wrong topic' })).status, 404);
+  const editPath = comments + '/' + comment.id;
+  const expected_updated_at = String(comment.updated_at);
+  const edited = await mutate('PATCH', editPath, { body: 'Updated progress', expected_updated_at });
+  assert.equal(edited.status, 200, edited.text);
+  assert.ok(edited.json.comment.updated_at > comment.updated_at);
+  assert.equal((await mutate('PATCH', editPath, { body: 'Stale edit', expected_updated_at })).status, 409);
+  const updatedList = (await request('/api/notes')).json.notes;
+  assert.equal(updatedList[0].updated_at, note.updated_at);
+  assert.equal(updatedList[0].latest_comment_preview, 'Updated progress');
+
+  assert.equal((await mutate('DELETE', '/api/notes/' + other.id + '/comments/' + comment.id)).status, 404);
+  const staleDelete = await mutate('DELETE', editPath + '?expected_updated_at=' + expected_updated_at);
+  assert.equal(staleDelete.status, 409);
+  assert.equal((await request(comments)).json.comments.length, 2);
+  const deleted = await mutate('DELETE', editPath + '?expected_updated_at=' + edited.json.comment.updated_at);
+  assert.equal(deleted.status, 200, deleted.text);
+  assert.deepEqual(deleted.json, { deleted: true, id: comment.id });
+  assert.deepEqual((await request(comments)).json.comments, [transition]);
+  const afterDelete = (await request('/api/notes')).json.notes.find(({ id }) => id === topic.id);
+  assert.equal(afterDelete.comment_count, 1);
+  assert.equal(afterDelete.latest_comment_preview, 'Approved');
+  assert.ok(afterDelete.updated_at > note.updated_at);
+  assert.equal((await mutate('DELETE', editPath)).status, 404);
+
+  assert.equal((await mutate('DELETE', path)).status, 200);
+  assert.equal((await request(comments)).status, 404);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM note_comments').get().count, 0);
+});
+
+test('a note delete with a stale confirmation preserves the note and its new comment', async (t) => {
+  const { db, dbPath, cwd, request, mutate } = await fixture(t);
+  const { id } = writeNote(db, { cwd, content: 'Topic awaiting delete confirmation' });
+  const path = '/api/notes/' + id;
+  const [before] = (await request('/api/notes')).json.notes;
+  assert.equal(before.comment_count, 0);
+  const writer = openDatabase(dbPath);
+  let appended;
+  try {
+    appended = addNoteComment(writer, { id, body: 'New progress since confirmation opened' });
+  } finally {
+    writer.close();
+  }
+
+  for (const query of ['?expected_updated_at=', '?expected_updated_at=1&expected_updated_at=2']) {
+    assert.equal((await mutate('DELETE', path + query)).status, 400);
+  }
+  const stale = await mutate('DELETE', path + '?expected_updated_at=' + before.updated_at);
+  assert.equal(stale.status, 409, stale.text);
+  assert.match(stale.json.error, /modified by another writer/);
+  const [fresh] = (await request('/api/notes')).json.notes;
+  assert.equal(fresh.id, id);
+  assert.equal(fresh.comment_count, 1);
+  assert.equal(fresh.updated_at, appended.note.updated_at);
+  assert.deepEqual((await request(path + '/comments')).json.comments, [{ ...appended.comment }]);
+
+  const confirmed = await mutate('DELETE', path + '?expected_updated_at=' + fresh.updated_at);
+  assert.equal(confirmed.status, 200, confirmed.text);
+  assert.deepEqual(confirmed.json, { deleted: true, id });
+  assert.equal((await request(path + '/comments')).status, 404);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM note_comments WHERE note_id = ?').get(id).count, 0);
 });

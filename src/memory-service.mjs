@@ -27,6 +27,15 @@ export class MissingProjectDestinationError extends Error {
   }
 }
 
+export class NoteValidationError extends Error {}
+
+export class SameNoteStatusError extends NoteValidationError {
+  constructor(status, fieldsMatch) {
+    super(`Note is already in status ${status}; supplied fields ${fieldsMatch ? 'match' : 'differ from'} the current note state`);
+    this.fieldsMatch = fieldsMatch;
+  }
+}
+
 function checkRevision(row, expectedUpdatedAt) {
   if (expectedUpdatedAt !== undefined && String(row.updated_at) !== expectedUpdatedAt) {
     throw new StaleRecordError();
@@ -414,27 +423,158 @@ export function readNotes(db, input = {}, context = {}) {
   });
 }
 
+export function getNote(db, id) {
+  return requireRow(db.prepare('SELECT * FROM notes WHERE id = ?').get(id), 'Note', id);
+}
+
+export function encodeNoteCursor(timestamp, id) {
+  return Buffer.from(JSON.stringify([timestamp, id])).toString('base64url');
+}
+
+export function decodeNoteCursor(cursor) {
+  if (cursor == null) return null;
+  try {
+    const [timestamp, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (Number.isSafeInteger(timestamp) && typeof id === 'string' && id.trim() && !id.includes('\0')
+      && encodeNoteCursor(timestamp, id) === cursor) return [timestamp, id];
+  } catch {
+    // Malformed cursors share one validation error.
+  }
+  throw new NoteValidationError('Invalid cursor');
+}
+
+export function listNoteComments(db, id, { limit = DEFAULT_LIST_LIMIT, cursor } = {}) {
+  const boundary = decodeNoteCursor(cursor);
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new NoteValidationError('Invalid limit');
+  limit = Math.min(limit, MAX_LIST_LIMIT);
+  getNote(db, id);
+  const comments = db.prepare(`
+    SELECT * FROM note_comments WHERE note_id = ? ${boundary ? 'AND (created_at, id) < (?, ?)' : ''}
+    ORDER BY created_at DESC, id DESC LIMIT ?
+  `).all(id, ...(boundary ?? []), limit + 1);
+  const hasMore = comments.length > limit;
+  if (hasMore) comments.pop();
+  const last = comments.at(-1);
+  return { comments, next_cursor: hasMore ? encodeNoteCursor(last.created_at, last.id) : null };
+}
+
+export function lastNoteComments(db, id) {
+  return listNoteComments(db, id, { limit: 3 }).comments;
+}
+
+export const NOTE_COMMENT_PREVIEW_LENGTH = 120;
+
+function requireComment(body) {
+  if (typeof body !== 'string' || !body.trim()) {
+    throw new NoteValidationError('comment is required and must not be blank');
+  }
+  return body;
+}
+
+function insertNoteComment(db, input, { body, from = null, to = null, now }) {
+  return db.prepare(`
+    INSERT INTO note_comments (
+      id, note_id, body, from_status, to_status, source_orchestrator, source_session_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
+  `).get(
+    generateId(), input.id, body, from, to, input.source_orchestrator ?? null,
+    input.source_session_id ?? null, now, now,
+  );
+}
+
 export function updateNote(db, input, { expectedUpdatedAt, trackAccess } = {}) {
   rejectAccessFields(input);
-  const content = input.content === undefined ? null : requireContent(input.content);
-  function update() {
-    if (expectedUpdatedAt !== undefined) {
-      const existing = db.prepare('SELECT updated_at FROM notes WHERE id = ?').get(input.id);
-      checkRevision(requireRow(existing, 'Note', input.id), expectedUpdatedAt);
+  return inWriteTransaction(db, () => {
+    const existing = getNote(db, input.id);
+    const changingStatus = input.status !== undefined;
+    const latestTransition = changingStatus && db.prepare(`
+      SELECT body, created_at FROM note_comments WHERE note_id = ? AND from_status IS NOT NULL
+      ORDER BY created_at DESC, id DESC LIMIT 1
+    `).get(input.id);
+    if (changingStatus && input.status === existing.status) {
+      const matches = (input.content === undefined || input.content === existing.content)
+        && (input.surface_condition === undefined || input.surface_condition === existing.surface_condition)
+        && (input.comment === undefined || input.comment === latestTransition?.body);
+      throw new SameNoteStatusError(existing.status, matches);
     }
-    const row = db.prepare(`
-      UPDATE notes SET content = COALESCE(?, content), status = COALESCE(?, status),
+    checkRevision(existing, expectedUpdatedAt);
+    const now = Date.now();
+    const content = input.content === undefined ? existing.content : requireContent(input.content);
+    if (changingStatus) {
+      if (!NOTE_STATUSES.includes(input.status)) throw new NoteValidationError('Invalid note status');
+      insertNoteComment(db, input, {
+        body: requireComment(input.comment), from: existing.status, to: input.status,
+        now: latestTransition ? Math.max(now, latestTransition.created_at + 1) : now,
+      });
+    } else if (input.comment !== undefined) {
+      throw new NoteValidationError('Use the comment action to append a standalone comment');
+    }
+
+    const note = db.prepare(`
+      UPDATE notes SET content = ?, status = ?,
         surface_condition = CASE WHEN ? THEN ? ELSE surface_condition END, updated_at = MAX(?, updated_at + 1)
       WHERE id = ? RETURNING *
     `).get(
-      content, input.status ?? null, Number(input.surface_condition !== undefined),
-      input.surface_condition ?? null, Date.now(), input.id,
+      content, input.status ?? existing.status, Number(input.surface_condition !== undefined),
+      input.surface_condition ?? null, now, input.id,
     );
-    return trackMutationAccess(db, 'notes', requireRow(row, 'Note', input.id), trackAccess);
-  }
-  return trackAccess || expectedUpdatedAt !== undefined ? inWriteTransaction(db, update) : update();
+    return trackMutationAccess(db, 'notes', note, trackAccess);
+  });
 }
 
-export function dismissNote(db, id, options) {
-  return updateNote(db, { id, status: 'dismissed' }, options);
+export function dismissNote(db, input, options) {
+  return updateNote(db, { ...input, status: 'dismissed' }, options);
+}
+
+export function deleteNote(db, { id, expectedUpdatedAt }) {
+  return inWriteTransaction(db, () => {
+    checkRevision(getNote(db, id), expectedUpdatedAt);
+    db.prepare('DELETE FROM notes WHERE id = ?').run(id);
+    return { deleted: true, id };
+  });
+}
+
+function advanceNoteRevision(db, id, now) {
+  return db.prepare(`
+    UPDATE notes SET updated_at = MAX(?, updated_at + 1) WHERE id = ? RETURNING *
+  `).get(now, id);
+}
+
+export function addNoteComment(db, input, { expectedUpdatedAt, trackAccess } = {}) {
+  return inWriteTransaction(db, () => {
+    checkRevision(getNote(db, input.id), expectedUpdatedAt);
+    const now = Date.now();
+    const comment = insertNoteComment(db, input, { body: requireComment(input.body), now });
+    const note = advanceNoteRevision(db, input.id, now);
+    return { note: trackMutationAccess(db, 'notes', note, trackAccess), comment };
+  });
+}
+
+function checkEditableNoteComment(db, noteId, id, expectedUpdatedAt) {
+  const existing = requireRow(db.prepare(`
+    SELECT from_status, to_status, updated_at FROM note_comments WHERE note_id = ? AND id = ?
+  `).get(noteId, id), 'Note comment', id);
+  if (existing.from_status !== null || existing.to_status !== null) {
+    throw new NoteValidationError('Status-transition comments are immutable');
+  }
+  checkRevision(existing, expectedUpdatedAt);
+}
+
+export function updateNoteComment(db, { note_id, id, body }, { expectedUpdatedAt } = {}) {
+  return inWriteTransaction(db, () => {
+    checkEditableNoteComment(db, note_id, id, expectedUpdatedAt);
+    return db.prepare(`
+      UPDATE note_comments SET body = ?, updated_at = MAX(?, updated_at + 1)
+      WHERE note_id = ? AND id = ? RETURNING *
+    `).get(requireComment(body), Date.now(), note_id, id);
+  });
+}
+
+export function deleteNoteComment(db, { noteId, id, expectedUpdatedAt }) {
+  return inWriteTransaction(db, () => {
+    checkEditableNoteComment(db, noteId, id, expectedUpdatedAt);
+    db.prepare('DELETE FROM note_comments WHERE note_id = ? AND id = ?').run(noteId, id);
+    advanceNoteRevision(db, noteId, Date.now());
+    return { deleted: true, id };
+  });
 }

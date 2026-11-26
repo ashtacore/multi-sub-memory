@@ -1,6 +1,7 @@
 import { bootstrapTokenBudget } from './config.mjs';
 import {
-  MEMORY_CATEGORIES, recordAccess, resolveCachedProjectKey, selectMemories, selectNotes,
+  MEMORY_CATEGORIES, NOTE_COMMENT_PREVIEW_LENGTH,
+  recordAccess, resolveCachedProjectKey, selectMemories, selectNotes,
 } from './memory-service.mjs';
 
 export function estimateTokens(text) {
@@ -35,27 +36,56 @@ function section(opening, closing, items, label) {
       let used = wrapperLength;
       const included = [];
       const groups = new Map();
-      for (const { id, heading, line } of items) {
+      for (const item of items) {
+        const { id, heading, line } = item;
         const headingLength = heading && !groups.has(heading) ? heading.length + 1 : 0;
         const nextLength = used + headingLength + line.length;
         if (fullLength > budget && nextLength + omittedLine(items.length - included.length - 1).length > budget) {
           continue;
         }
         if (!groups.has(heading)) groups.set(heading, []);
-        groups.get(heading).push(line);
+        groups.get(heading).push(item);
         used = nextLength;
         included.push(id);
       }
       const lines = [];
+      const omitted = omittedLine(items.length - included.length);
+      let previewBudget = budget - used - omitted.length;
       for (const heading of [...MEMORY_CATEGORIES.map((category) => `### ${category}`), '']) {
         const group = groups.get(heading);
         if (!group) continue;
         if (heading) lines.push(`${heading}\n`);
-        lines.push(group.join(''));
+        for (const { line, preview } of group) {
+          const suffix = previewBudget > 0 ? preview?.() : undefined;
+          if (suffix && suffix.length <= previewBudget) {
+            lines.push(line.slice(0, -1) + suffix + '\n');
+            previewBudget -= suffix.length;
+          } else {
+            lines.push(line);
+          }
+        }
       }
-      lines.push(omittedLine(items.length - included.length));
+      lines.push(omitted);
       return { text: opening + lines.join('') + closing, included };
     },
+  };
+}
+
+function notePreviewReader(db) {
+  // Read-only startup hooks may open a snapshot before migration 8 has run.
+  if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'note_comments'").get()) {
+    return () => '';
+  }
+  const latest = db.prepare(`
+    SELECT substr(body, 1, ?) AS body FROM note_comments WHERE note_id = ?
+    ORDER BY created_at DESC, id DESC LIMIT 1
+  `);
+  return (id) => {
+    const body = latest.get(NOTE_COMMENT_PREVIEW_LENGTH + 1, id)?.body;
+    if (!body?.trim()) return '';
+    const chars = Array.from(body);
+    const excerpt = onOneLine(chars.slice(0, NOTE_COMMENT_PREVIEW_LENGTH).join(''));
+    return ` — Latest comment: ${excerpt}${chars.length > NOTE_COMMENT_PREVIEW_LENGTH ? '…' : ''}`;
   };
 }
 
@@ -74,12 +104,19 @@ export function formatBootstrap(db, options = {}) {
     memories.map(({ id, category, content }) => ({ id, heading: `### ${category}`, line: `- ${onOneLine(content)}\n` })),
     'memories',
   );
+  let readPreview;
   const noteSection = notes.length ? section(
     '<active-notes>\n',
     '</active-notes>',
     notes.map(({ id, content, status, surface_condition }) => {
       const condition = surface_condition ? ` (surface when: ${onOneLine(surface_condition)})` : '';
-      return { id, heading: '', line: `- [${status}] ${onOneLine(content)}${condition}\n` };
+      return {
+        id, heading: '', line: `- [${status}] ${onOneLine(content)}${condition}\n`,
+        preview() {
+          readPreview ??= notePreviewReader(db);
+          return readPreview(id);
+        },
+      };
     }),
     'notes',
   ) : null;

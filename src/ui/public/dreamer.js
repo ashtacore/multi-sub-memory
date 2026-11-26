@@ -206,6 +206,12 @@ export function dreamResult(result) {
     return 'Run skipped. ' + reason;
   }
   const title = result.status === 'dry-run' ? 'Dry run complete.' : 'Dream run complete.';
-  return [title, result.memoriesReviewed + ' reviewed, ' + result.memoriesMerged + ' merged, '
-    + result.memoriesArchived + ' archived.', result.summary].filter(Boolean).join(' ');
+  const compactions = result.operations?.filter(({ type }) => type === 'compact_note_comments') ?? [];
+  const commentActivity = compactions.length
+    ? `${compactions.length} note ${compactions.length === 1 ? 'chain' : 'chains'} ${result.dryRun ? 'proposed for compaction' : 'compacted'}.` : '';
+  const message = [title, result.memoriesReviewed + ' reviewed, ' + result.memoriesMerged + ' merged, '
+    + result.memoriesArchived + ' archived.', commentActivity, result.summary].filter(Boolean).join(' ');
+  if (!result.dryRun) return message;
+  return [message, ...compactions.map(({ note_id, source_comment_ids, summary }) =>
+    `Note ${note_id} · Source comments ${source_comment_ids.join(', ')}\n${summary}`)].join('\n');
 }

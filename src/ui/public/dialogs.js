@@ -31,10 +31,11 @@ function bindDialog(id) {
       dialog.close();
       return;
     }
-    if ('content' in values && !values.content.trim()) {
-      error.textContent = 'Enter some content before saving.';
+    const blankField = ['content', 'comment', 'body'].find((name) => name in values && !values[name].trim());
+    if (blankField) {
+      error.textContent = blankField === 'content' ? 'Enter some content before saving.' : 'Enter a comment before saving.';
       error.hidden = false;
-      form.elements.content.focus();
+      form.elements[blankField].focus();
       return;
     }
     saving = true;
@@ -90,11 +91,42 @@ export function editMemory(trigger, values, save, onSaved, onConflict, projectLa
   openMemory(trigger, values, save, onSaved, onConflict);
 }
 
-export const editNote = bindDialog('edit-note-dialog');
+const openNote = bindDialog('edit-note-dialog');
+const noteForm = byId('edit-note-dialog').querySelector('form');
+const transitionComment = noteForm.elements.comment;
+let initialNoteStatus;
+
+function showTransitionComment() {
+  const changing = noteForm.elements.status.value !== initialNoteStatus;
+  transitionComment.closest('label').hidden = !changing;
+  transitionComment.disabled = !changing;
+  transitionComment.required = changing;
+}
+
+noteForm.elements.status.addEventListener('change', showTransitionComment);
+export function editNote(trigger, values, save, onSaved, onConflict) {
+  initialNoteStatus = values.status;
+  noteForm.elements.status.value = values.status;
+  transitionComment.value = '';
+  showTransitionComment();
+  openNote(trigger, values, save, onSaved, onConflict);
+}
+
+const openTransition = bindDialog('note-transition-dialog');
+const quickComment = byId('note-transition-dialog').querySelector('textarea');
+export function transitionNote(trigger, label, save, onSaved, onConflict) {
+  byId('note-transition-title').textContent = label + ' note';
+  quickComment.value = '';
+  openTransition(trigger, null, save, onSaved, onConflict);
+}
+
+export const editComment = bindDialog('edit-comment-dialog');
 const confirm = bindDialog('confirm-dialog');
 
-export function confirmDelete(trigger, kind, remove, onDeleted) {
+export function confirmDelete(trigger, kind, remove, onDeleted, { commentCount, onConflict } = {}) {
   byId('confirm-title').textContent = 'Delete ' + kind + '?';
-  byId('confirm-description').textContent = 'This permanently deletes the ' + kind + ' from the database.';
-  confirm(trigger, null, remove, onDeleted);
+  const target = commentCount === undefined ? kind
+    : `note and its ${commentCount} ${commentCount === 1 ? 'comment' : 'comments'}`;
+  byId('confirm-description').textContent = 'This permanently deletes the ' + target + ' from the database.';
+  confirm(trigger, null, remove, onDeleted, onConflict);
 }

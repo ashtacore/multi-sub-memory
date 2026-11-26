@@ -4,7 +4,10 @@ import { runDream } from '../dreamer/engine.mjs';
 import { createDreamRedactor, sanitizeDreamError } from '../dreamer/runners.mjs';
 import {
   GLOBAL_PROJECT_KEY, MAX_LIST_LIMIT, MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
-  MissingProjectDestinationError, StaleRecordError, updateMemory, updateNote,
+  MissingProjectDestinationError,
+  NOTE_COMMENT_PREVIEW_LENGTH, NoteValidationError, SameNoteStatusError, StaleRecordError, addNoteComment,
+  decodeNoteCursor, deleteNote, deleteNoteComment, encodeNoteCursor, listNoteComments,
+  updateMemory, updateNote, updateNoteComment,
 } from '../memory-service.mjs';
 import { formatProjectLabels } from '../project-id.mjs';
 import { hybridSearch } from '../search.mjs';
@@ -71,7 +74,9 @@ const memoryRules = {
 const noteRules = {
   content: nonblank, status: oneOf(NOTE_STATUSES), expected_updated_at: nonblank,
   surface_condition: (value) => value === null || typeof value === 'string',
+  comment: (value) => typeof value === 'string',
 };
+const commentRules = { body: nonblank, expected_updated_at: nonblank };
 
 function choice(params, name, values, fallback) {
   const value = params.get(name);
@@ -265,21 +270,18 @@ async function memories({ db, defaultProjectKey, defaultProjectRoot, embeddingEn
   };
 }
 
-function noteCursor(value) {
-  if (value === null) return null;
-  try {
-    const bytes = Buffer.from(value, 'base64url');
-    if (bytes.toString('base64url') === value) {
-      const decoded = bytes.toString('utf8');
-      const parsed = JSON.parse(decoded);
-      if (Array.isArray(parsed) && parsed.length === 2 && Number.isSafeInteger(parsed[0])
-        && nonblank(parsed[1]) && !parsed[1].includes('\0') && JSON.stringify(parsed) === decoded
-        && Buffer.from(decoded).equals(bytes)) return parsed;
-    }
-  } catch {
-    // Invalid encoding or JSON.
-  }
-  throw new RequestError(400, 'Invalid cursor');
+function cursorParam(params) {
+  const cursors = params.getAll('cursor');
+  if (cursors.length > 1) throw new RequestError(400, 'Invalid cursor');
+  return cursors[0];
+}
+
+function noteRequestError(error) {
+  if (error instanceof SameNoteStatusError && !error.fieldsMatch) return new RequestError(409, error.message);
+  if (error instanceof NoteValidationError) return new RequestError(400, error.message);
+  if (error instanceof StaleRecordError) return new RequestError(409, error.message);
+  if (/^Note(?: comment)? not found:/.test(error.message)) return new RequestError(404, error.message);
+  return error;
 }
 
 function notes({ db }, params) {
@@ -291,31 +293,76 @@ function notes({ db }, params) {
   const { where, values } = rowFilter({
     project_key: projectFilter(params), status: status === all ? undefined : status,
   });
-  const cursors = params.getAll('cursor');
-  if (cursors.length > 1) throw new RequestError(400, 'Invalid cursor');
-  const cursor = noteCursor(cursors[0] ?? null);
+  let cursor;
+  try {
+    cursor = decodeNoteCursor(cursorParam(params));
+  } catch (error) {
+    throw noteRequestError(error);
+  }
   const limit = listLimit(params);
   const boundary = cursor ? (where ? ' AND ' : ' WHERE ') + `(${sort} ${cmp} ? OR (${sort} = ? AND id ${cmp} ?))` : '';
   if (cursor) {
     const [timestamp, id] = cursor;
     values.push(timestamp, timestamp, id);
   }
-  const rows = db.prepare(`SELECT * FROM notes${where}${boundary} ORDER BY ${sort} ${direction}, id ${direction} LIMIT ?`)
-    .all(...values, limit + 1);
+  const rows = db.prepare(`
+    SELECT notes.*,
+      (SELECT COUNT(*) FROM note_comments WHERE note_id = notes.id) AS comment_count,
+      (SELECT substr(body, 1, ?) FROM note_comments WHERE note_id = notes.id
+        ORDER BY created_at DESC, id DESC LIMIT 1) AS latest_comment_preview
+    FROM notes${where}${boundary} ORDER BY ${sort} ${direction}, id ${direction} LIMIT ?
+  `).all(NOTE_COMMENT_PREVIEW_LENGTH + 1, ...values, limit + 1);
   const hasMore = rows.length > limit;
   if (hasMore) rows.pop();
   const last = rows.at(-1);
   return {
-    notes: rows,
-    next_cursor: hasMore ? Buffer.from(JSON.stringify([last[sort], last.id])).toString('base64url') : null,
+    notes: rows.map((row) => {
+      const chars = Array.from(row.latest_comment_preview ?? '');
+      if (chars.length > NOTE_COMMENT_PREVIEW_LENGTH) {
+        row.latest_comment_preview = chars.slice(0, NOTE_COMMENT_PREVIEW_LENGTH).join('') + '…';
+      }
+      return row;
+    }),
+    next_cursor: hasMore ? encodeNoteCursor(last[sort], last.id) : null,
   };
 }
 
-async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot, embeddingEngine }, req, table, id) {
-  const noun = table === 'memories' ? 'Memory' : 'Note';
+function deleteRevision(params) {
+  const revisions = params.getAll('expected_updated_at');
+  if (revisions.length > 1 || (revisions.length === 1 && !nonblank(revisions[0]))) {
+    throw new RequestError(400, 'Invalid field: expected_updated_at');
+  }
+  return revisions[0];
+}
+
+async function noteComments({ db }, req, params, noteId, commentId) {
+  try {
+    if (req.method === 'GET') {
+      return listNoteComments(db, noteId, { limit: listLimit(params), cursor: cursorParam(params) });
+    }
+    if (req.method === 'DELETE') {
+      return deleteNoteComment(db, { noteId, id: commentId, expectedUpdatedAt: deleteRevision(params) });
+    }
+    const { body, expected_updated_at: expectedUpdatedAt } = validate(await readBody(req), commentRules);
+    if (req.method === 'POST') return addNoteComment(db, { id: noteId, body }, { expectedUpdatedAt });
+    const comment = updateNoteComment(db, { note_id: noteId, id: commentId, body }, { expectedUpdatedAt });
+    return { comment };
+  } catch (error) {
+    throw noteRequestError(error);
+  }
+}
+
+async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot, embeddingEngine }, req, table, id, params) {
   if (req.method === 'DELETE') {
-    if (!db.prepare('DELETE FROM ' + table + ' WHERE id = ?').run(id).changes) {
-      throw new RequestError(404, noun + ' not found');
+    if (table === 'notes') {
+      try {
+        return deleteNote(db, { id, expectedUpdatedAt: deleteRevision(params) });
+      } catch (error) {
+        throw noteRequestError(error);
+      }
+    }
+    if (!db.prepare('DELETE FROM memories WHERE id = ?').run(id).changes) {
+      throw new RequestError(404, 'Memory not found');
     }
     return { deleted: true, id };
   }
@@ -352,8 +399,9 @@ async function changeRecord({ db, config, defaultProjectKey, defaultProjectRoot,
     return { note: updateNote(db, { ...body, id }, { expectedUpdatedAt }) };
   } catch (error) {
     if (error instanceof MissingProjectDestinationError) throw new RequestError(400, error.message);
+    if (table === 'notes') throw noteRequestError(error);
     if (error instanceof StaleRecordError) throw new RequestError(409, error.message);
-    if (error.message.startsWith(noun + ' not found:')) throw new RequestError(404, noun + ' not found');
+    if (error.message.startsWith('Memory not found:')) throw new RequestError(404, 'Memory not found');
     if (error.message.startsWith('Memory update conflicts with existing content')) {
       throw new RequestError(409, 'A memory with this content already exists in the project and scope');
     }
@@ -481,9 +529,13 @@ export function createApi(context) {
       if (pathname === '/api/notes') return notes(context, params);
       if (pathname === '/api/dreamer') return dreamer(context, params);
     }
+    const comments = /^\/api\/notes\/([^/]+)\/comments(?:\/([^/]+))?$/.exec(pathname);
+    if (comments && (comments[2] ? ['PATCH', 'DELETE'].includes(req.method) : ['GET', 'POST'].includes(req.method))) {
+      return noteComments(context, req, params, comments[1], comments[2]);
+    }
     const record = /^\/api\/(memories|notes)\/([^/]+)$/.exec(pathname);
     if (record && ['PATCH', 'DELETE'].includes(req.method)) {
-      return changeRecord(context, req, record[1], record[2]);
+      return changeRecord(context, req, record[1], record[2], params);
     }
     if (pathname === '/api/dreamer/run' && req.method === 'POST') return startDream(context, req);
     throw new RequestError(404, 'Not found');

@@ -27,6 +27,12 @@ const DreamOperationSchema = z.discriminatedUnion('type', [
     .refine(({ content, category, importance }) => [content, category, importance].some((value) => value !== undefined),
       'Update requires content, category, or importance'),
   z.strictObject({ type: z.literal('add'), content: nonBlank, ...memoryFields }),
+  z.strictObject({
+    type: z.literal('compact_note_comments'),
+    note_id: nonBlank,
+    source_comment_ids: z.array(nonBlank).min(3).refine((ids) => new Set(ids).size === ids.length, 'Duplicate source comment IDs'),
+    summary: nonBlank,
+  }),
 ]);
 export const DreamPlanSchema = z.strictObject({ summary: z.string(), operations: z.array(DreamOperationSchema) });
 
@@ -52,6 +58,8 @@ export function extractJsonPlan(rawText) {
   return validateDreamPlan(value);
 }
 
+const HTTP_NOTE_PROMPT_BYTE_BUDGET = 8 * 1024;
+
 export function createHttpLlmRunner({
   baseUrl, model, apiKeyEnv, timeoutMs = 60_000, maxRetries = 2, retryDelayMs = 250,
   fetchImpl = globalThis.fetch, env = process.env,
@@ -66,7 +74,7 @@ export function createHttpLlmRunner({
   endpoint.search = '';
   endpoint.hash = '';
 
-  return async ({ systemPrompt, userPrompt }) => {
+  const run = async ({ systemPrompt, userPrompt }) => {
     const headers = new Headers({ 'Content-Type': 'application/json' });
     if (apiKeyEnv !== undefined) {
       const key = Object.hasOwn(env, apiKeyEnv) ? env[apiKeyEnv] : undefined;
@@ -114,6 +122,7 @@ export function createHttpLlmRunner({
       return { plan, runner: 'http', model };
     }
   };
+  return Object.assign(run, { promptBudget: { noteLimit: HTTP_NOTE_PROMPT_BYTE_BUDGET, measure: Buffer.byteLength } });
 }
 
 const MAX_STDOUT_BYTES = 1024 * 1024;

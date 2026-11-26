@@ -130,7 +130,14 @@ async function dream(args) {
     if (summary) console.log(summary);
     if (result.dryRun && result.operations?.length) {
       console.log('Proposed operations');
-      for (const { type, source_ids, id, content, category, importance, reason } of result.operations) {
+      for (const operation of result.operations) {
+        const { type, source_ids, id, content, category, importance, reason } = operation;
+        if (type === 'compact_note_comments') {
+          console.log(`- ${type} ${operation.note_id}`);
+          console.log('  Source comments: ' + operation.source_comment_ids.join(', '));
+          console.log('  Summary: ' + JSON.stringify(operation.summary));
+          continue;
+        }
         console.log(`- ${type}${source_ids ? ' ' + source_ids.join(', ') : id ? ' ' + id : ''}`);
         if (content !== undefined) console.log('  Content: ' + JSON.stringify(content));
         if (category !== undefined) console.log('  Category: ' + category);

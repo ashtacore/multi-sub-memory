@@ -12,7 +12,7 @@ import { acquireLease, hashNormalizedContent, openDatabase, releaseLease } from 
 import { maybeTriggerAutoDream, runDream, shouldTriggerAutoDream } from '../src/dreamer/engine.mjs';
 import { createCliLlmRunner, createDreamRunner, createHttpLlmRunner, extractJsonPlan } from '../src/dreamer/runners.mjs';
 import { runIndexers } from '../src/indexers/runner.mjs';
-import { recordAccess, writeMemory } from '../src/memory-service.mjs';
+import { addNoteComment, getNote, listNoteComments, recordAccess, updateNote, updateNoteComment, writeMemory } from '../src/memory-service.mjs';
 import { resolveProjectKey } from '../src/project-id.mjs';
 import { initGit, writeProjectConfig } from './git-fixtures.mjs';
 
@@ -1111,4 +1111,139 @@ test('opportunistic trigger skips held leases and spawns a quiet detached child 
   assert.doesNotThrow(() => child.emit('error', new Error('fixture async spawn failure')));
   assert.equal(maybeTriggerAutoDream({ ...options, spawnImpl: () => { throw new Error('fixture spawn failure'); } }), false);
   assert.equal(maybeTriggerAutoDream({ ...options, db: null }), false);
+});
+
+function noteChain(db, id, progressCount, project = projectKey) {
+  db.prepare(`
+    INSERT INTO notes (id, project_key, status, content, created_at, updated_at)
+    VALUES (?, ?, 'pending', 'Note topic', 1, 1)
+  `).run(id, project);
+  updateNote(db, { id, status: 'active', comment: 'Transition reason' });
+  const progress = Array.from({ length: progressCount }, (_, index) =>
+    addNoteComment(db, { id, body: 'Progress ' + (index + 1) }).comment);
+  const comments = () => listNoteComments(db, id).comments;
+  return { progress, comments, transition: comments().find(({ from_status }) => from_status) };
+}
+
+test('HTTP Dreamer bounds aggregate note history and skips chains that do not fit', async (t) => {
+  const { db, dream, memory } = fixture(t);
+  addMemory(db, 'memory');
+  for (const [id, revision, wideCommentLength] of [
+    ['oversized', 4, 3_000],
+    ['fits', 3, 1_500],
+    ['exceeds-remaining', 2, 1_500],
+    ['small', 1, 0],
+  ]) {
+    const { progress } = noteChain(db, id, 5);
+    if (wideCommentLength) {
+      updateNoteComment(db, { note_id: id, id: progress[0].id, body: '界'.repeat(wideCommentLength) });
+    }
+    db.prepare('UPDATE notes SET updated_at = ? WHERE id = ?').run(revision, id);
+  }
+
+  let request;
+  const runner = createHttpLlmRunner({
+    baseUrl: 'https://example.test', model: 'fixture',
+    fetchImpl: async (_url, { body }) => {
+      request = JSON.parse(body);
+      return Response.json(completion(JSON.stringify({
+        summary: 'Fixture plan',
+        operations: [{ type: 'archive', id: 'memory', reason: 'Ordinary consolidation' }],
+      })));
+    },
+  });
+  assert.equal((await dream(runner)).status, 'completed');
+  const { memories, notes } = JSON.parse(request.messages[1].content);
+  assert.deepEqual(memories.map(({ id }) => id), ['memory']);
+  assert.deepEqual(notes.map(({ id, comments }) => [id, comments.length]), [['fits', 5], ['small', 5]]);
+  assert.ok(Buffer.byteLength(JSON.stringify(notes)) <= 8 * 1024);
+  assert.equal(memory('memory').status, 'archived');
+});
+
+test('Dreamer compacts eligible standalone chains to three or one and keeps transitions intact', async (t) => {
+  const { db, dream, runs } = fixture(t);
+  const full = noteChain(db, 'full', 5);
+  const partial = noteChain(db, 'partial', 6);
+  const small = noteChain(db, 'small', 4);
+  const unrelated = noteChain(db, 'unrelated', 5, 'other-project');
+  const summary = 'Consolidated fixture progress';
+  const operations = [
+    { type: 'compact_note_comments', note_id: 'full', source_comment_ids: full.progress.map(({ id }) => id), summary },
+    { type: 'compact_note_comments', note_id: 'partial', source_comment_ids: partial.progress.slice(0, 4).map(({ id }) => id), summary },
+  ];
+  const runner = ({ systemPrompt, userPrompt }) => {
+    assert.match(systemPrompt, /compact_note_comments/);
+    const { notes } = JSON.parse(userPrompt);
+    assert.deepEqual(notes.map(({ id }) => id).sort(), ['full', 'partial']);
+    assert.ok(notes.every(({ comments }) => comments.every(({ body }) => /^Progress /.test(body))));
+    return resultFor(operations);
+  };
+  const originalComments = [full, partial, small, unrelated].map(({ comments }) => comments());
+  const before = getNote(db, 'full');
+  const proposal = await dream(runner, { dryRun: true });
+  assert.deepEqual(proposal.operations, operations);
+  assert.equal(runs().at(-1).status, 'dry-run');
+  assert.deepEqual([full, partial, small, unrelated].map(({ comments }) => comments()), originalComments);
+  assert.deepEqual(getNote(db, 'full'), before);
+
+  const applied = await dream(runner);
+  assert.equal(applied.status, 'completed');
+  assert.ok(getNote(db, 'full').updated_at > before.updated_at);
+  for (const [index, chain, expected] of [[0, full, 1], [1, partial, 3]]) {
+    const comments = chain.comments();
+    assert.equal(comments.filter(({ from_status }) => from_status === null).length, expected);
+    assert.deepEqual(comments.find(({ from_status }) => from_status), chain.transition);
+    const compacted = comments.find(({ compacted_from_json }) => compacted_from_json);
+    assert.equal(compacted.body, summary);
+    assert.equal(compacted.source_orchestrator, 'dreamer');
+    assert.deepEqual(JSON.parse(compacted.compacted_from_json), {
+      run_id: applied.runId, source_comment_ids: operations[index].source_comment_ids,
+    });
+  }
+  assert.deepEqual(small.comments(), originalComments[2]);
+  assert.deepEqual(unrelated.comments(), originalComments[3]);
+});
+
+test('Dreamer rejects transition sources and rolls back compaction when comment revisions change', async (t) => {
+  const { db, dream, runs } = fixture(t);
+  const first = noteChain(db, 'first', 5);
+  const other = noteChain(db, 'other', 5);
+  const [source] = other.progress;
+  const plan = (note_id, source_comment_ids) =>
+    ({ type: 'compact_note_comments', note_id, source_comment_ids, summary: 'Fixture summary' });
+  const otherIds = other.progress.map(({ id }) => id);
+  const firstBefore = first.comments();
+  await assert.rejects(dream(() => resultFor([plan('other', [...otherIds, other.transition.id])])),
+    /unreviewed progress comment/);
+  await assert.rejects(dream(() => {
+    updateNoteComment(db, { note_id: 'other', id: source.id, body: 'Human edit' });
+    return resultFor([plan('first', first.progress.map(({ id }) => id)), plan('other', otherIds)]);
+  }), /comment chain changed/);
+  assert.deepEqual(first.comments(), firstBefore);
+  const comments = other.comments();
+  assert.equal(comments.length, 6);
+  assert.equal(comments.find(({ id }) => id === source.id).body, 'Human edit');
+  assert.ok(comments.every(({ compacted_from_json }) => compacted_from_json === null));
+  assert.equal(runs().at(-1).status, 'failed');
+});
+
+test('Dreamer rejects a comment summary planned before a human topic edit', async (t) => {
+  const { db, dream, runs } = fixture(t);
+  const id = 'edited-topic';
+  const chain = noteChain(db, id, 5);
+  const original = chain.comments();
+  const revisedContent = 'Human rewrite during planning';
+  await assert.rejects(dream(({ userPrompt }) => {
+    const [topic] = JSON.parse(userPrompt).notes;
+    assert.equal(topic.id, id);
+    assert.equal(topic.content, 'Note topic');
+    updateNote(db, { id, content: revisedContent });
+    return resultFor([{
+      type: 'compact_note_comments', note_id: id,
+      source_comment_ids: chain.progress.map(({ id }) => id), summary: 'Summary of the prior topic',
+    }]);
+  }), /reviewed note topic changed/);
+  assert.equal(getNote(db, id).content, revisedContent);
+  assert.deepEqual(chain.comments(), original);
+  assert.equal(runs().at(-1).status, 'failed');
 });

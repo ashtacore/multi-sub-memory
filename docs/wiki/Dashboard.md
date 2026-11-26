@@ -32,10 +32,16 @@ default browser. Stop the server with Ctrl+C.
   delete memories, with confirmation before deletion. The editor shows
   Superseded as the current status of superseded memories, which can be
   edited, archived, or restored.
-- **Notes** shows active, pending, and dismissed notes. Edit the text or
-  surface condition, dismiss or restore a note, and confirm permanent deletions.
-  Sort by creation or update time in either direction. Use **Load more**
-  to append the next page for the selected project, status, and sort.
+- **Notes** shows active, pending, and dismissed topics. Edit the text or
+  surface condition independently, or provide a transition comment when
+  activating, dismissing, restoring, or changing the status in the editor.
+  Expand **Comments** to read the latest entries, load older comments, or add,
+  edit, and delete progress comments. Status-change comments show a read-only
+  transition badge. The note delete confirmation shows how many comments the
+  deletion removes. If the note revision changes before deletion, the dashboard
+  refreshes the list so you can check the current count and confirm again.
+  Sort by creation or update time and use **Load more** to
+  continue through the topic list.
 - Memory and note edits save only the changed fields. Saving an unchanged
   edit closes the dialog. Edits and quick status actions check the displayed
   record's revision and refresh the view when the server reports a conflict.
@@ -55,7 +61,8 @@ default browser. Stop the server with Ctrl+C.
   change to the launch workspace's repository identity.
   Both run modes use the restricted CLI presets and an empty temporary working
   directory for CLI runners. A dry run can send data to the authorized runner
-  and records the proposal without changing memories.
+  and records the proposal without changing memories or comments. The result
+  for a proposed comment compaction shows the source IDs and summary.
   [Dreamer configuration and trust](Dreamer.md)
 
 ## HTTP API
@@ -71,8 +78,12 @@ Use `global` for global rows alone.
 | `PATCH /api/memories/:id` | Any of `content`, `category`, `importance` (1–5), `status` (active or archived), `scope` (project or global), or `project_key` (a known project key or `global`), plus optional `expected_updated_at`. Omit `status` to keep the existing status. An explicit superseded status or unknown destination returns 400. A duplicate in the destination project and scope returns 409. |
 | `DELETE /api/memories/:id` | Permanently removes the memory and its search data |
 | `GET /api/notes` | `project_key`, `status` (active, pending, dismissed, or all by default), `limit`, `sort` (`updated_at` or `created_at`), `order` (`asc` or `desc`), and optional `cursor` |
-| `PATCH /api/notes/:id` | Any of `content`, `status`, or `surface_condition` (string or null), plus optional `expected_updated_at` |
-| `DELETE /api/notes/:id` | Permanently removes the note and its search data |
+| `PATCH /api/notes/:id` | Updates `content`, `status`, or `surface_condition` (string or null). A status change requires a nonblank `comment`. Accepts optional `expected_updated_at`. |
+| `DELETE /api/notes/:id` | Permanently removes the topic, its comments, and its search data. Accepts an optional topic `expected_updated_at` query parameter. |
+| `GET /api/notes/:id/comments` | Returns `comments` and `next_cursor`. Accepts `limit` and `cursor`. Orders by descending creation time and ID. |
+| `POST /api/notes/:id/comments` | Appends a progress comment with nonblank `body` and optional topic `expected_updated_at`. Returns `note` and `comment`. |
+| `PATCH /api/notes/:id/comments/:commentId` | Updates a progress comment's `body` with optional comment `expected_updated_at`. Editing a transition comment returns 400. |
+| `DELETE /api/notes/:id/comments/:commentId` | Removes a progress comment and advances the topic revision. Accepts an optional comment `expected_updated_at` query parameter. Deleting a transition comment returns 400. |
 | `GET /api/dreamer` | Active leases, fresh sanitized configuration with `config_fingerprint` and runner authorization, `runnable_project_key` for the launch workspace, and up to 50 runs. History supports `project_key`, `status`, `sort` (`started_at`, `finished_at`, or `duration`), and `order` (`asc` or `desc`). |
 | `POST /api/dreamer/run` | Requires the launch workspace's `project_key`. Accepts optional boolean `dry_run` and string `expected_config_fingerprint`. A fingerprint mismatch returns 409 before contacting the runner. Returns the run result or a skip reason. |
 
@@ -86,7 +97,8 @@ An invalid revision field returns 400. A stale revision returns 409 and leaves
 the row untouched.
 
 Notes default to `updated_at` descending. Ties sort by `id` in the selected
-direction. The response contains `notes` and `next_cursor`. Pass the cursor
+direction. The response contains `notes` and `next_cursor`. Each topic
+includes `comment_count` and a nullable `latest_comment_preview`. Pass the cursor
 back with the same filters and sort to continue from the last note on the
 current page. A null cursor marks the last page. Malformed cursors return 400.
 
