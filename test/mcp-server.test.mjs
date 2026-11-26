@@ -174,7 +174,8 @@ test('MCP mutations count existing records and initialize new records at zero', 
   ]);
   await assertMutationAccess('notes', handoff, [
     () => note('update', { id: handoff.id, content: 'Updated note' }),
-    () => note('dismiss', { id: handoff.id }),
+    async () => (await note('comment', { id: handoff.id, comment: 'Progress update' })).note,
+    () => note('dismiss', { id: handoff.id, comment: 'Fixture closed' }),
   ]);
 });
 
@@ -829,21 +830,23 @@ test('MCP note transitions require comments and report same-status replay before
   await expectError('mem_note', { ...request, action: 'update', comment: ' \t ' }, /comment.*blank/);
   await expectError('mem_note', { action: 'dismiss', id: topic.id }, /comment.*blank/);
   const active = await note('update', request);
+  assert.equal(active.access_count, 1);
   await expectError('mem_note', { ...request, action: 'update' }, /already in status active; supplied fields match/);
   for (const change of [{ content: 'Different' }, { surface_condition: 'Different' }, { comment: 'Different' }]) {
     await expectError('mem_note', { ...request, action: 'update', ...change }, /already in status active; supplied fields differ/);
   }
   await expectError('mem_note', { action: 'dismiss', id: topic.id, expected_updated_at }, /modified by another writer/);
   const appended = await note('comment', { id: topic.id, comment: 'progressterm' });
+  assert.equal(appended.note.access_count, 2);
   assert.ok(appended.note.updated_at > active.updated_at);
   assert.deepEqual([appended.comment.from_status, appended.comment.to_status], [null, null]);
   const detail = await note('get', { id: topic.id, limit: 1 });
-  assert.equal(detail.note.access_count, 1);
+  assert.equal(detail.note.access_count, 3);
   assert.equal(detail.note.updated_at, appended.note.updated_at);
   assert.ok(detail.next_cursor);
   await expectError('mem_note', { action: 'get', id: topic.id, cursor: 'invalid' }, /Invalid cursor/);
   const older = await note('get', { id: topic.id, limit: 1, cursor: detail.next_cursor });
-  assert.equal(older.note.access_count, 2);
+  assert.equal(older.note.access_count, 4);
   assert.equal(older.next_cursor, null);
   const transition = [...detail.comments, ...older.comments].find(({ from_status }) => from_status);
   assert.deepEqual([transition.from_status, transition.to_status, transition.body], ['pending', 'active', request.comment]);

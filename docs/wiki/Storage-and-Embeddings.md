@@ -34,8 +34,9 @@ or indexed fields change. [MCP core](MCP-Core.md#access-tracking)
 
 Migration 8 adds `note_comments` and leaves existing topics with empty
 histories. Comments belong to one topic and are indexed by topic ID,
-creation time, and comment ID. The database requires a body and either two
-distinct statuses for a transition or two null statuses for progress.
+creation time, and comment ID. The database requires a non-null comment ID,
+a body, and either two distinct statuses for a transition or two null statuses
+for progress.
 Transition comments are immutable until their topic is deleted. Deleting
 a topic cascades to all its comments. The notes full-text index covers
 the topic content, surface condition, and project key.

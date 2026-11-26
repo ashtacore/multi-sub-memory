@@ -523,6 +523,14 @@ test('migration 8 preserves existing topics and defines the comment constraints 
   const db = fixture.open();
   assert.deepEqual(getNote(db, 'legacy'), previous);
   assert.deepEqual(listNoteComments(db, 'legacy'), { comments: [], next_cursor: null });
+  assert.throws(() => db.exec(`
+    INSERT INTO note_comments (note_id, body, created_at, updated_at)
+    VALUES ('legacy', 'Missing ID', 1, 1)
+  `), /NOT NULL constraint failed: note_comments\.id/);
+  assert.throws(() => db.exec(`
+    INSERT INTO note_comments (id, note_id, body, created_at, updated_at)
+    VALUES (NULL, 'legacy', 'Null ID', 1, 1)
+  `), /NOT NULL constraint failed: note_comments\.id/);
   const insert = db.prepare(`
     INSERT INTO note_comments (id, note_id, body, from_status, to_status, created_at, updated_at)
     VALUES ('first', ?, ?, ?, ?, 1, 1)

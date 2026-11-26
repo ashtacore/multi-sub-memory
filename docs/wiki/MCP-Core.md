@@ -79,11 +79,12 @@ marks the final page. Search matches topic fields.
 New MCP memories and notes start with their creation time as
 `last_accessed_at` and an `access_count` of zero. A successful MCP call
 increments the count once per distinct existing memory or note it returns.
-This includes deduplicated writes, reactivations, updates, archives, and
-dismissals, and comment appends that return their topic. Search counts the final ranked hits. Bootstrap counts the items
-that fit the budget and appear in the summary. Each access advances the
-timestamp to the later of its current value and the access time. Startup
-hooks and dashboard views leave access metadata untouched.
+This includes deduplicated writes, reactivations, updates, archives,
+dismissals, and comment appends that return their topic. Search counts the final
+ranked hits. Bootstrap counts the items that fit the budget and appear in the
+summary. Each access advances the timestamp to the later of its current
+value and the access time. Startup hooks and dashboard views leave access
+metadata untouched.
 
 Access metadata is read-only in write and update inputs. Recording an access
 preserves `updated_at`, so it leaves edit revisions and update-time sorting

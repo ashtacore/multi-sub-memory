@@ -245,7 +245,7 @@ export const MIGRATIONS = [{
   up(db) {
     db.exec(`
       CREATE TABLE note_comments (
-        id TEXT PRIMARY KEY,
+        id TEXT PRIMARY KEY NOT NULL,
         note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
         body TEXT NOT NULL CHECK (length(trim(body)) > 0),
         from_status TEXT CHECK (from_status IN ('active', 'pending', 'dismissed')),

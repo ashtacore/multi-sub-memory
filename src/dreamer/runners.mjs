@@ -58,6 +58,8 @@ export function extractJsonPlan(rawText) {
   return validateDreamPlan(value);
 }
 
+const HTTP_NOTE_PROMPT_BYTE_BUDGET = 8 * 1024;
+
 export function createHttpLlmRunner({
   baseUrl, model, apiKeyEnv, timeoutMs = 60_000, maxRetries = 2, retryDelayMs = 250,
   fetchImpl = globalThis.fetch, env = process.env,
@@ -72,7 +74,7 @@ export function createHttpLlmRunner({
   endpoint.search = '';
   endpoint.hash = '';
 
-  return async ({ systemPrompt, userPrompt }) => {
+  const run = async ({ systemPrompt, userPrompt }) => {
     const headers = new Headers({ 'Content-Type': 'application/json' });
     if (apiKeyEnv !== undefined) {
       const key = Object.hasOwn(env, apiKeyEnv) ? env[apiKeyEnv] : undefined;
@@ -120,6 +122,7 @@ export function createHttpLlmRunner({
       return { plan, runner: 'http', model };
     }
   };
+  return Object.assign(run, { promptBudget: { noteLimit: HTTP_NOTE_PROMPT_BYTE_BUDGET, measure: Buffer.byteLength } });
 }
 
 const MAX_STDOUT_BYTES = 1024 * 1024;

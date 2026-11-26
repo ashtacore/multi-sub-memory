@@ -65,9 +65,11 @@ argument is limited to 96 KiB in UTF-8. Dreamer fits whole memories in priority
 order, skipping oversized entries and continuing through later candidates up
 to the review cap. It then fits recent transcript excerpts in the remaining
 space. It uses remaining prompt space for eligible project note topics and
-their progress comments. Each eligible topic has at least five standalone
-progress comments. The plan can reference the memories, topics, and comments
-included in the prompt.
+their progress comments. HTTP mode limits the note section and its compaction
+instructions to 8 KiB in UTF-8. Dreamer skips whole chains that exceed the
+remaining space and continues considering smaller chains. Each eligible topic
+has at least five standalone progress comments. The plan can reference the
+memories, topics, and comments included in the prompt.
 The response must be a strict JSON object with a summary and an operations
 array. Optional Markdown fences around the JSON are accepted.
 

@@ -83,7 +83,7 @@ function* noteCommentCandidates(db, projectKey) {
 
 function buildPrompt(rows, topics, transcripts, promptBudget, runnerName) {
   const emptyPrompt = '{"memories":[],"transcripts":[]}';
-  const { limit = Infinity, measure = (value) => value.length } = promptBudget ?? {};
+  const { limit = Infinity, noteLimit = Infinity, measure = (value) => value.length } = promptBudget ?? {};
   let remaining = limit - measure(SYSTEM_PROMPT) - 2 - measure(emptyPrompt);
   if (remaining < 0) throw new Error(runnerName + ' spawn-error');
 
@@ -106,7 +106,7 @@ function buildPrompt(rows, topics, transcripts, promptBudget, runnerName) {
   const minMemoryLength = measure(JSON.stringify(encodeMemory({ id: '', content: '', category: '', importance: 1 })));
   const memories = selectEntries(rows, encodeMemory, MAX_REVIEWED_MEMORIES, minMemoryLength);
   const excerpts = selectEntries(transcripts, ({ role, timestamp, text }) => ({ role, timestamp, text }));
-  remaining -= measure(NOTE_COMPACTION_PROMPT) + measure(',"notes":[]');
+  remaining = Math.min(remaining, noteLimit) - measure(NOTE_COMPACTION_PROMPT) - measure(',"notes":[]');
   const notes = selectEntries(topics, ({ id, content, comments }) => ({
     id, content, comments: comments.map(({ id, body }) => ({ id, body })),
   }));

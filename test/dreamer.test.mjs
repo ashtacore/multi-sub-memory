@@ -1125,6 +1125,41 @@ function noteChain(db, id, progressCount, project = projectKey) {
   return { progress, comments, transition: comments().find(({ from_status }) => from_status) };
 }
 
+test('HTTP Dreamer bounds aggregate note history and skips chains that do not fit', async (t) => {
+  const { db, dream, memory } = fixture(t);
+  addMemory(db, 'memory');
+  for (const [id, revision, wideCommentLength] of [
+    ['oversized', 4, 3_000],
+    ['fits', 3, 1_500],
+    ['exceeds-remaining', 2, 1_500],
+    ['small', 1, 0],
+  ]) {
+    const { progress } = noteChain(db, id, 5);
+    if (wideCommentLength) {
+      updateNoteComment(db, { note_id: id, id: progress[0].id, body: '界'.repeat(wideCommentLength) });
+    }
+    db.prepare('UPDATE notes SET updated_at = ? WHERE id = ?').run(revision, id);
+  }
+
+  let request;
+  const runner = createHttpLlmRunner({
+    baseUrl: 'https://example.test', model: 'fixture',
+    fetchImpl: async (_url, { body }) => {
+      request = JSON.parse(body);
+      return Response.json(completion(JSON.stringify({
+        summary: 'Fixture plan',
+        operations: [{ type: 'archive', id: 'memory', reason: 'Ordinary consolidation' }],
+      })));
+    },
+  });
+  assert.equal((await dream(runner)).status, 'completed');
+  const { memories, notes } = JSON.parse(request.messages[1].content);
+  assert.deepEqual(memories.map(({ id }) => id), ['memory']);
+  assert.deepEqual(notes.map(({ id, comments }) => [id, comments.length]), [['fits', 5], ['small', 5]]);
+  assert.ok(Buffer.byteLength(JSON.stringify(notes)) <= 8 * 1024);
+  assert.equal(memory('memory').status, 'archived');
+});
+
 test('Dreamer compacts eligible standalone chains to three or one and keeps transitions intact', async (t) => {
   const { db, dream, runs } = fixture(t);
   const full = noteChain(db, 'full', 5);
