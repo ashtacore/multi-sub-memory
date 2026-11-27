@@ -20,12 +20,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
       - run: npm ci
       - run: npm run check
       - run: node --test --test-concurrency=4
         env:
-          # Node 22's SQLite warning changes the stderr asserted by CLI tests.
+          # Suppress Node's SQLite warning so CLI stderr assertions stay clean.
           NODE_OPTIONS: --disable-warning=ExperimentalWarning
       - run: npm pack --dry-run

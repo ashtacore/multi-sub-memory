@@ -33,7 +33,7 @@ async function sqliteCheck(add) {
     return true;
   } catch {
     add('SQLite / FTS5', 'fail', 'Could not initialize FTS5 with node:sqlite.', {
-      remediation: 'Use an official Node.js build at version 22.13.0 or newer with SQLite enabled.',
+      remediation: 'Use an official Node.js build at version 24.0.0 or newer with SQLite enabled.',
     });
     return false;
   }
@@ -259,10 +259,10 @@ export async function runDoctor(argv = [], options = {}) {
     return 1;
   }
 
-  const [major, minor] = process.versions.node.split('.').map(Number);
-  const supported = major > 22 || (major === 22 && minor >= 13);
+  const [major] = process.versions.node.split('.').map(Number);
+  const supported = major >= 24;
   add('Node.js', supported ? 'pass' : 'fail', 'Node.js ' + process.versions.node, supported ? {} : {
-    remediation: 'Upgrade to Node.js 22.13.0 or newer.',
+    remediation: 'Upgrade to Node.js 24.0.0 or newer.',
   });
   const sqliteAvailable = await sqliteCheck(add);
   let context;
