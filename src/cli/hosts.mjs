@@ -24,8 +24,8 @@ function dreamCliPreset(command, headlessArgs, restrictedArgs) {
 
 export const CLI_PRESETS = {
   omp: dreamCliPreset('omp', ['-p', '--no-session'], ['--no-tools']),
-  claude: dreamCliPreset('claude', ['-p'], ['--tools', '', '--strict-mcp-config']),
-  codex: dreamCliPreset('codex', ['exec'], [
+  claude: dreamCliPreset('claude', ['-p', '--output-format', 'json'], ['--tools', '', '--strict-mcp-config']),
+  codex: dreamCliPreset('codex', ['exec', '--json'], [
     '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config',
     '--ignore-rules', '-c', 'mcp_servers={}', '-c', 'features.shell_tool=false',
   ]),

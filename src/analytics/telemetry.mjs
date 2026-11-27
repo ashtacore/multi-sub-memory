@@ -156,9 +156,14 @@ export function createTelemetryRecorder(db, {
     if (toolName === 'mem_search' && !error && typeof query === 'string') {
       const words = wordSet(query.slice(0, 2048));
       queryHash = words.size ? createHmac('sha256', hashKey).update([...words].sort().join(' ')).digest('hex').slice(0, 16) : null;
-      research = lastCalls.get(projectKey)?.get === true || (queryHash !== null
-        && [...searches.values()].some((past) => past.projectKey === projectKey && wordSimilarity(words, past.words) >= 0.75));
-      if (queryHash) searches.set(JSON.stringify([projectKey, queryHash]), { projectKey, words, time: createdAt });
+      if (queryHash) {
+        const followsGet = lastCalls.get(projectKey)?.get === true;
+        research = [...searches.values()].some((past) => past.projectKey === projectKey
+          && (followsGet || wordSimilarity(words, past.words) >= 0.75));
+        const key = JSON.stringify([projectKey, queryHash]);
+        searches.delete(key);
+        searches.set(key, { projectKey, words, time: createdAt });
+      }
     }
     for (const { id, rank: position } of returnedMemories ?? []) {
       const key = JSON.stringify([projectKey, id]);

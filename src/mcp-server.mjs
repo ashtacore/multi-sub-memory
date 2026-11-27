@@ -1,9 +1,10 @@
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/server';
 import { loadSkills } from '@modelcontextprotocol/server/ext/skills/node';
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
-import { createTelemetryRecorder } from './analytics/telemetry.mjs';
+import { ATTRIBUTION_MS, createTelemetryRecorder } from './analytics/telemetry.mjs';
 import { formatBootstrap } from './bootstrap.mjs';
 import { loadConfig } from './config.mjs';
 import { openDatabase } from './db.mjs';
@@ -39,7 +40,10 @@ function textResult(text) {
   return { content: [{ type: 'text', text }] };
 }
 
-const MEMORY_ACTIONS = { get: 'mem_get', write: 'mem_remember' };
+const MEMORY_ACTIONS = {
+  get: 'mem_get', write: 'mem_remember', update: 'mem_memory:update',
+  archive: 'mem_memory:archive', list: 'mem_memory:list',
+};
 
 function publicRecord({ tokens_est, compaction_count, dreamer_touched_at, ...record }) {
   return record;
@@ -57,6 +61,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd,
 }) {
   const server = new McpServer({ name: 'multi-sub-memory', version: '0.1.0' });
   const context = { config, embeddingEngine, defaultCwd, trackAccess: true, deferAnalytics: telemetry.defer };
+  const retrievalProjects = new Map();
 
   function toolHandler(name, run, format = JSON.stringify) {
     return async (input) => {
@@ -73,15 +78,22 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd,
       const createdAt = Date.now();
       telemetry.defer(() => {
         const toolName = (name === 'mem_memory' && MEMORY_ACTIONS[input.action]) || name;
+        const workspace = path.resolve(input.cwd ?? defaultCwd ?? process.cwd());
         let projectKey = output?.projectKey ?? (name === 'mem_search' ? output?.project_key : undefined);
+        if (projectKey && (name === 'mem_search' || name === 'mem_bootstrap')) {
+          // A completed retrieval can attribute later gets for the full impression window.
+          retrievalProjects.delete(workspace);
+          if (retrievalProjects.size >= 64) retrievalProjects.delete(retrievalProjects.keys().next().value);
+          retrievalProjects.set(workspace, { projectKey, createdAt });
+        }
         if (!projectKey) {
-          try {
-            projectKey = resolveCachedProjectKey(input.cwd ?? defaultCwd, config, { optional: true })?.projectKey;
-          } catch {
-            // An invalid checkout still produces a tool event.
+          projectKey = resolveCachedProjectKey(workspace, config, { optional: true, cacheOnly: true })?.projectKey;
+          const retrieval = retrievalProjects.get(workspace);
+          if (!projectKey && retrieval && createdAt - retrieval.createdAt <= ATTRIBUTION_MS) {
+            projectKey = retrieval.projectKey;
           }
         }
-        projectKey ??= output?.memory?.project_key ?? output?.project_key ?? 'global';
+        projectKey ??= output?.memory?.project_key ?? output?.note?.project_key ?? output?.project_key ?? 'global';
         let returnedMemories;
         if (name === 'mem_search' && output) {
           returnedMemories = output.results.flatMap(({ id, source }, index) =>

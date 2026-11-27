@@ -177,7 +177,19 @@ test('CLI Dreamer applies tool restrictions and isolates each default and legacy
       );
     }
     for (const args of savedArgs) {
-      const { calls, spawnImpl } = spawnFixture({ stdout: '```\n' + JSON.stringify(emptyPlan) + '\n```' });
+      const structured = orchestrator !== 'omp' && savedArgs.indexOf(args) < 3;
+      const format = !structured ? [] : orchestrator === 'claude' ? ['--output-format', 'json'] : ['--json'];
+      const usage = { input_tokens: 50, output_tokens: 5 };
+      const records = orchestrator === 'claude'
+        ? [{ type: 'result', subtype: 'success', session_id: 'claude-run', result: JSON.stringify(emptyPlan), usage, total_cost_usd: 0.02 }]
+        : [
+          { type: 'thread.started', thread_id: 'codex-run' },
+          { type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(emptyPlan) } },
+          { type: 'turn.completed', usage },
+        ];
+      const stdout = structured ? records.map((record) => JSON.stringify(record)).join('\n')
+        : '```\n' + JSON.stringify(emptyPlan) + '\n```';
+      const { calls, spawnImpl } = spawnFixture({ stdout });
       const env = orchestrator === 'codex' ? { CODEX_HOME: codexHome } : {};
       const cli = { orchestrator, args };
       const runner = createDreamRunner({ dreamer: { enabled: true, mode: 'cli', cli: { ...cli, model: 'fixture' } } },
@@ -189,10 +201,13 @@ test('CLI Dreamer applies tool restrictions and isolates each default and legacy
           workingDirectories.add(cwd);
           return spawnImpl(...invocation);
         } });
-      assert.deepEqual(await runner(prompt), { plan: emptyPlan, runner: 'cli:' + orchestrator, model: 'fixture' });
+      assert.deepEqual(await runner(prompt), {
+        plan: emptyPlan, runner: 'cli:' + orchestrator, model: 'fixture',
+        ...(structured && { sessionId: orchestrator + '-run', usage, costUsd: orchestrator === 'claude' ? 0.02 : undefined }),
+      });
       const cwd = calls[0][2].cwd;
       assert.deepEqual(calls, [[orchestrator, [
-        ...legacyArgs, ...restrictions, '--model', 'fixture', ...delimiter, prompt.systemPrompt + '\n\n' + prompt.userPrompt,
+        ...legacyArgs, ...format, ...restrictions, '--model', 'fixture', ...delimiter, prompt.systemPrompt + '\n\n' + prompt.userPrompt,
       ], { shell: false, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env, cwd }]]);
       assert.equal(fs.existsSync(cwd), false);
     }

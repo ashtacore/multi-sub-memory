@@ -1,14 +1,9 @@
+import { transcriptMemoryToolName } from '../indexers/types.mjs';
 import { ATTRIBUTION_MS } from './telemetry.mjs';
 
-const CORE_TOOLS = new Set(['mem_search', 'mem_get', 'mem_remember', 'mem_memory', 'mem_bootstrap', 'mem_note', 'mem_expand']);
-
-function isMemoryTool(name) {
-  return CORE_TOOLS.has(name) || /(?:^|__)(?:multi[-_]sub[-_]memory)__mem_(?:search|get|remember|memory|bootstrap|note|expand)$/.test(name);
-}
-
 export function collectTranscriptAnalytics(db, { projectKey, start, end, events }) {
-  const startIso = new Date(start).toISOString();
-  const endIso = new Date(end).toISOString();
+  const startIso = new Date(start - ATTRIBUTION_MS).toISOString();
+  const endIso = new Date(end + ATTRIBUTION_MS).toISOString();
   const files = db.prepare(`
     SELECT f.id, f.project_key, f.session_id, MIN(m.timestamp) AS first_at, MAX(m.timestamp) AS last_at
     FROM transcript_files f JOIN transcript_messages m ON m.file_id = f.id
@@ -58,7 +53,7 @@ export function collectTranscriptAnalytics(db, { projectKey, start, end, events 
       const { time, role, tools, activity } = line;
       if (time >= start && time < end) session.time = Math.max(session.time, time);
       const hasResult = activity.some(({ type }) => type === 'result');
-      if (time >= start && time < end && tools.some(isMemoryTool)) session.observedMemoryUse = true;
+      if (time >= start && time < end && tools.some(transcriptMemoryToolName)) session.observedMemoryUse = true;
       // A user prompt starts a new turn, making the previous result ineligible.
       if (role === 'user' && !hasResult) {
         pending.clear();
@@ -68,10 +63,13 @@ export function collectTranscriptAnalytics(db, { projectKey, start, end, events 
         completeDetours(time);
         if (time >= start && time < end && !tools.length && !activity.length) session.turns++;
       }
-      for (const { type, callId, name } of activity) {
-        if (type === 'call' && isMemoryTool(name)) {
-          pending.set(callId, time);
-          if (time >= start && time < end) session.observedMemoryUse = true;
+      for (const { type, callId, name, action } of activity) {
+        if (type === 'call') {
+          const tool = transcriptMemoryToolName(name);
+          if (tool && time >= start && time < end) session.observedMemoryUse = true;
+          if (tool === 'mem_search' || tool === 'mem_get' || (tool === 'mem_memory' && action === 'get')) {
+            pending.set(callId, time);
+          }
         }
         if (type === 'result' && pending.has(callId)) {
           const startedAt = pending.get(callId);
@@ -97,20 +95,20 @@ export function collectTranscriptAnalytics(db, { projectKey, start, end, events 
 
   const groups = Map.groupBy(events, ({ project_key, connection_id }) => JSON.stringify([project_key, connection_id]));
   for (const group of groups.values()) {
-    const first = group[0];
-    const last = group.at(-1);
     const explicit = new Set(group.map(({ session_id }) => session_id).filter(Boolean));
-    // Overlap can suggest a session only if there is exactly one distinct candidate.
-    const overlaps = new Set((activeByProject.get(first.project_key) ?? [])
-      .filter((file) => file.last >= first.created_at - ATTRIBUTION_MS && file.first <= last.created_at + ATTRIBUTION_MS)
-      .map((file) => file.id));
-    if (explicit.size === 0 && overlaps.size > 1) {
-      for (const id of overlaps) sessions.get(id).ambiguous = true;
-    }
-    const inferred = explicit.size === 1 ? explicit.values().next().value
-      : explicit.size === 0 && overlaps.size === 1 ? overlaps.values().next().value : null;
+    const candidates = activeByProject.get(group[0].project_key) ?? [];
     for (const event of group) {
-      const id = event.session_id ?? inferred;
+      let id = event.session_id;
+      if (!id) {
+        const overlaps = new Set(candidates.filter(({ id, first, last }) =>
+          (explicit.size === 0 || explicit.has(id))
+          && last >= event.created_at - ATTRIBUTION_MS && first <= event.created_at + ATTRIBUTION_MS
+        ).map(({ id }) => id));
+        if (overlaps.size === 1) id = overlaps.values().next().value;
+        if (overlaps.size > 1) {
+          for (const candidate of overlaps) sessions.get(candidate).ambiguous = true;
+        }
+      }
       if (!id) continue;
       const session = sessionFor(id, event.created_at);
       session.calls++;

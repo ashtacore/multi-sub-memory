@@ -269,7 +269,11 @@ export function createCliLlmRunner({
     // Report lookup failures through the same diagnostic as process startup failures.
   }
   let restrictedArgs = preset.args;
-  if (args !== undefined && !isDeepStrictEqual(args, preset.args)) {
+  // Setup persisted the original preset args. Recognize them without changing custom commands.
+  const legacyArgs = { claude: ['-p'], codex: ['exec'] }[orchestrator];
+  const savedPreset = legacyArgs && (command === undefined || command === preset.command)
+    && (isDeepStrictEqual(args, legacyArgs) || isDeepStrictEqual(args, [...legacyArgs, ...preset.restrictedArgs]));
+  if (args !== undefined && !savedPreset && !isDeepStrictEqual(args, preset.args)) {
     restrictedArgs = orchestrator === 'codex'
       ? restrictCodexArgs(args, preset.restrictedArgs) : [...args, ...preset.restrictedArgs];
   }

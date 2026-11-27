@@ -2,7 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { expandHome } from '../config.mjs';
 import {
-  appendToolActivity, transcriptToolActivity, discoverJsonlFiles, extractMessageContent, firstNonBlankString, firstNonEmptyString, normalizeTranscriptRole,
+  appendToolActivity, transcriptToolActivity, transcriptToolCall, discoverJsonlFiles, extractMessageContent, firstNonBlankString, firstNonEmptyString, normalizeTranscriptRole,
   normalizeTranscriptTimestamp, parseJsonlRecord, readIncrementalJsonlLines,
 } from './types.mjs';
 
@@ -77,7 +77,7 @@ export const codexAdapter = {
         const calls = transcriptToolActivity(payload.content);
         const callId = firstNonBlankString(payload.call_id, payload.id);
         if (callId && ['function_call', 'custom_tool_call'].includes(payload.type) && message.toolNames.length) {
-          calls.push({ type: 'call', callId, name: message.toolNames[0] });
+          calls.push(transcriptToolCall(callId, message.toolNames[0], payload.arguments ?? payload.input));
         }
         appendToolActivity(toolActivity, lineNo, message.timestamp, calls, message.role, callId);
       }

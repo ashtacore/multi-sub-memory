@@ -456,6 +456,35 @@ export const MIGRATIONS = [{
         ON memories (project_key, dreamer_touched_at DESC) WHERE dreamer_touched_at IS NOT NULL;
     `);
   },
+}, {
+  version: 12,
+  up(db) {
+    // Re-read tool activity to distinguish mem_memory gets. The indexer preserves message IDs.
+    db.exec(`
+      UPDATE transcript_files SET tool_activity_indexed = 0 WHERE tool_activity_indexed = 1;
+
+      UPDATE mcp_tool_events AS event SET is_research = 0
+      WHERE event.tool_name = 'mem_search' AND event.is_research = 1 AND (
+        event.query_hash IS NULL OR NOT EXISTS (
+          SELECT 1 FROM mcp_tool_events AS prior
+          WHERE prior.connection_id = event.connection_id AND prior.project_key = event.project_key
+            AND prior.tool_name = 'mem_search' AND prior.error_flag = 0 AND prior.query_hash IS NOT NULL
+            AND prior.created_at BETWEEN event.created_at - 60000 AND event.created_at
+            AND (prior.created_at, prior.id) < (event.created_at, event.id)
+        )
+      );
+
+      WITH repeats AS (
+        SELECT date(created_at / 1000.0, 'unixepoch') AS day_utc, project_key, COUNT(*) AS count
+        FROM mcp_tool_events WHERE tool_name = 'mem_search' AND is_research = 1
+        GROUP BY 1, 2
+      )
+      UPDATE analytics_daily_rollups AS daily SET research_count = COALESCE((
+        SELECT count FROM repeats WHERE repeats.day_utc = daily.day_utc AND repeats.project_key = daily.project_key
+      ), 0)
+      WHERE daily.tool_name = 'mem_search' AND daily.research_count > 0;
+    `);
+  },
 }];
 
 const busyWait = new Int32Array(new SharedArrayBuffer(4));

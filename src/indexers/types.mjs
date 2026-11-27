@@ -270,6 +270,23 @@ export function parseJsonlRecord(line) {
   }
 }
 
+const MEMORY_TOOLS = new Set(['mem_search', 'mem_get', 'mem_remember', 'mem_memory', 'mem_bootstrap', 'mem_note', 'mem_expand']);
+
+export function transcriptMemoryToolName(name) {
+  if (MEMORY_TOOLS.has(name)) return name;
+  const suffix = /(?:^|__)multi[-_]sub[-_]memory__(mem_[a-z]+)$/.exec(name)?.[1];
+  return MEMORY_TOOLS.has(suffix) ? suffix : undefined;
+}
+
+export function transcriptToolCall(callId, name, args) {
+  const event = { type: 'call', callId, name };
+  if (transcriptMemoryToolName(name) === 'mem_memory') {
+    const input = typeof args === 'string' ? parseJsonlRecord(args) : args;
+    if (input?.action === 'get') event.action = 'get';
+  }
+  return event;
+}
+
 export function transcriptToolActivity(content) {
   if (!Array.isArray(content)) return [];
   const activities = [];
@@ -277,7 +294,7 @@ export function transcriptToolActivity(content) {
     const name = firstNonBlankString(block?.function?.name, block?.name, block?.recipient_name);
     const callId = firstNonBlankString(block?.id, block?.call_id, block?.tool_use_id);
     if (callId && name && ['toolCall', 'tool_use', 'tool_call', 'function_call'].includes(block?.type)) {
-      activities.push({ type: 'call', callId, name });
+      activities.push(transcriptToolCall(callId, name, block.input ?? block.arguments ?? block.function?.arguments));
     }
     if (['tool_result', 'toolResult', 'function_call_output'].includes(block?.type)) {
       const resultId = firstNonBlankString(block.tool_use_id, block.toolCallId, block.call_id);

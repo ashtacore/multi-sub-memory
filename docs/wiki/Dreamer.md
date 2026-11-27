@@ -31,8 +31,8 @@ The runner rejects redirects and retries transient network failures and HTTP
 CLI mode closes stdin and starts the runner in a fresh, empty temporary
 directory that Dreamer removes after the child closes. The presets use
 `omp -p --no-session --no-tools`,
-`claude -p --tools "" --strict-mcp-config`, and
-`codex exec --sandbox read-only --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -c mcp_servers={} -c features.shell_tool=false`.
+`claude -p --output-format json --tools "" --strict-mcp-config`, and
+`codex exec --json --sandbox read-only --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -c mcp_servers={} -c features.shell_tool=false`.
 The Codex restrictions keep session files ephemeral, exclude user config and
 execution rules, and clear configured MCP servers. Codex still uses
 `CODEX_HOME` for authentication.
@@ -95,13 +95,17 @@ or assignments.
 
 Dreamer stores reported input and output tokens, USD cost, and available
 session IDs on `dream_runs`. HTTP runs capture usage from the response.
-Supported CLI runs capture usage and session IDs when reported, and the
-[dashboard](Dashboard.md#analytics) can fill missing usage or pricing from
-matching local ccusage sessions. Average cost uses runs with known prices.
+The default Claude and Codex presets request structured output for session IDs
+and usage. Claude also reports USD cost. The [dashboard](Dashboard.md#analytics)
+can fill missing usage or pricing when a matching local ccusage session exists.
+Default Codex runs are ephemeral, so their usage comes from CLI output. Average
+cost uses runs with known prices.
 
 A merge sets the target's `compaction_count` to one plus the largest source
 count. The dashboard shows the current distribution and lists churn candidates
-with a count of at least two. Quality signals include average source access
+with a compaction depth of at least three or another compaction within seven
+days, including a recent compaction inherited from a merge source. Quality
+signals include average source access
 velocity before compaction and target velocity after compaction, age-normalized
 access velocity by compaction count, and search-impression-to-get CTR for
 original and compacted memories. The report also counts likely resurrections

@@ -211,7 +211,12 @@ its metadata and an ellipsis fit.
 
 Tool handlers record elapsed time, estimated response tokens, result counts,
 and retrieval attribution when available. The recorder queues writes after
-each call and fails open if telemetry storage is unavailable. Stdio output
+each call and fails open if telemetry storage is unavailable. Attribution uses
+the tool's project, an already-cached workspace identity, or the known record
+scope. The recorder never starts Git discovery. A search can count as re-search
+only when a successful query preceded it in the same project and connection
+within one minute. Searches immediately after compacted gets are tracked
+separately. Stdio output
 stays reserved for JSON-RPC. The [dashboard](Dashboard.md#analytics) is the
 analytics surface. Analytics are never exposed as MCP tools.
 

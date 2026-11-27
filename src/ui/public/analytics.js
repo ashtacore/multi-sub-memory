@@ -221,9 +221,10 @@ function taskCost(cost) {
   );
 }
 
-const toolNames = ['mem_bootstrap', 'mem_search', 'mem_get', 'mem_remember', 'mem_note'];
+const standardTools = ['mem_bootstrap', 'mem_search', 'mem_get', 'mem_remember', 'mem_note', 'mem_expand'];
 
 function speedAndTokens({ tools, memoryDetour }) {
+  const toolNames = [...new Set([...standardTools, ...Object.keys(tools)])];
   const { count, durationMs, toolResultDurationMs } = memoryDetour;
   const toolChart = (title, key, format) => bars(title, toolNames.map((tool) => [tool, [
     [tools[tool]?.[key].avg, 0, 'Average'], [tools[tool]?.[key].p95, 1, 'p95'],
@@ -256,6 +257,7 @@ function dreamerPerformance(dreamer) {
   const { cost, repeatCompaction, velocity, searchImpressions, resurrection, human } = dreamer;
   const pricedRuns = cost.runs.filter(({ costUsd }) => Number.isFinite(costUsd)).length;
   const averageCost = pricedRuns ? cost.costUsd / pricedRuns : null;
+  const countAndRate = (count, rate) => number(count) + (rate == null ? ' (rate unavailable)' : ' (' + percent(rate) + ')');
   const churn = repeatCompaction.memories.map(({ memoryId, compactionCount }) => [memoryId, number(compactionCount)]);
   const distribution = Object.entries(dreamer.compactionCountDistribution).map(([count, memories]) => [count, [[memories, 0]]]);
   const byCount = dreamer.accessVelocityByCompactionCount.map(({ compactionCount, averageAccessesPerWeek }) =>
@@ -272,7 +274,7 @@ function dreamerPerformance(dreamer) {
     node('h4', { text: 'Efficiency' }),
     node('div', { className: 'analytics-grid' },
       chartCard('Repeat-compaction churn',
-        node('p', { text: number(repeatCompaction.count) + ' memories compacted at least twice.' }),
+        node('p', { text: number(repeatCompaction.count) + ' memories compacted again within seven days or with a compaction depth of three or more.' }),
         churn.length ? table('Memories with repeated compactions', ['Memory ID', 'Compactions'], churn)
           : empty('No repeatedly compacted memories in this selection.'),
       ),
@@ -283,9 +285,9 @@ function dreamerPerformance(dreamer) {
       ['Original Search → Get CTR', percent(searchImpressions.original.ctr)],
       ['Compacted Search → Get CTR', percent(searchImpressions.compacted.ctr)],
       ['Re-search after compacted get', percent(dreamer.compactedGetResearchRate)],
-      ['Post-Dreamer resurrections', number(resurrection.count)],
-      ['Human undo', number(human.undoCount)],
-      ['Human edits', number(human.editCount)],
+      ['Post-Dreamer resurrections', countAndRate(resurrection.count, resurrection.rate)],
+      ['Human undo', countAndRate(human.undoCount, human.undoRate)],
+      ['Human edits', countAndRate(human.editCount, human.editRate)],
     ]),
     node('div', { className: 'analytics-grid' },
       bars('Average accesses/week before and after compaction', [

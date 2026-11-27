@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { readCcusage } from './analytics/ccusage.mjs';
-import { accessesPerWeek } from './analytics/dreamer-events.mjs';
+import { accessesPerWeek, WEEK_MS } from './analytics/dreamer-events.mjs';
 import { ATTRIBUTION_MS, DAY_MS, utcDay } from './analytics/telemetry.mjs';
 import { collectTranscriptAnalytics } from './analytics/transcripts.mjs';
 
@@ -221,7 +221,16 @@ function dreamQuality({ events, allCompactions, memories, now, retrieval, touche
       after: accessesPerWeek(Math.max(0, target.access_count - event.target_access_count_at_event), event.created_at, now),
     }];
   });
-  const churn = memories.filter(({ compaction_count }) => compaction_count >= 2)
+  const rapidRepeats = new Set();
+  const previousCompactions = new Map();
+  for (const { memory_id, source_memory_ids_json, created_at } of allCompactions) {
+    const lineage = [memory_id, ...JSON.parse(source_memory_ids_json ?? '[]')];
+    if (lineage.some((id) => created_at - (previousCompactions.get(id) ?? -Infinity) <= WEEK_MS)) {
+      rapidRepeats.add(memory_id);
+    }
+    previousCompactions.set(memory_id, created_at);
+  }
+  const churn = memories.filter(({ id, compaction_count }) => compaction_count >= 3 || rapidRepeats.has(id))
     .map(({ id, compaction_count }) => ({ memoryId: id, compactionCount: compaction_count }))
     .sort((a, b) => b.compactionCount - a.compactionCount || a.memoryId.localeCompare(b.memoryId));
   return {
@@ -277,7 +286,8 @@ export async function buildAnalyticsReport(db, {
       SELECT * FROM dreamer_memory_events WHERE created_at >= ? AND created_at < ? ${projectFilter} ORDER BY created_at, id
     `).all(start, end, ...projectArgs);
     const allCompactions = db.prepare(`
-      SELECT id, memory_id, created_at FROM dreamer_memory_events WHERE event_type = 'compacted' ORDER BY created_at, id
+      SELECT id, memory_id, created_at, source_memory_ids_json FROM dreamer_memory_events
+      WHERE event_type = 'compacted' ORDER BY created_at, id
     `).all();
     const compactionTimes = new Map();
     for (const event of allCompactions) {

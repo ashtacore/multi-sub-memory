@@ -98,14 +98,19 @@ The report flags buckets that extend beyond the telemetry retention period.
   zero-hit and repeat searches, call volume, and the origin of memory gets.
   Unused memory share and estimated token sizes describe the current stored corpus.
 - **Total Task Cost** compares sessions with no, light, or heavy memory use
-  using local usage matched by session. Task complexity can affect which cohort
+  using local usage matched by session. Codex rollout paths are matched by
+  their session UUID. Inferred matches require a single plausible session
+  within one minute of each call. Task complexity can affect which cohort
   a session lands in and how much it costs. Missing usage leaves the affected
   metrics as an em dash while the other report sections remain available.
 - **Speed & Tokens** compares average and 95th-percentile latency and estimated
-  response tokens per tool. The memory detour uses indexed transcript timestamps
-  from the search or get call through the tool result and next assistant turn.
+  response tokens for each recorded tool or memory action. The memory detour
+  uses indexed transcript timestamps from a search or get, including
+  `mem_memory` with action `get`, through the tool result and next assistant turn.
 - **Dreamer Performance** shows recorded run costs and usage, compaction depth and
-  churn, and [quality signals](Dreamer.md#analytics).
+  churn, and [quality signals](Dreamer.md#analytics). Resurrection, human undo,
+  and human edit metrics show counts and rates. The rate is unavailable when
+  there is no eligible population.
 
 **Export JSON** downloads the structured report with pseudonymized record
 identifiers. **Export Markdown** downloads a compact digest. Both exports use

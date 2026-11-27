@@ -22,6 +22,8 @@ export function normalizeUsage(usage, cost) {
   };
 }
 
+const CODEX_ROLLOUT_ID = /(?:^|[\\/])rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:\.jsonl)?$/i;
+
 async function bundledRunner(args, options) {
   // Execute ccusage's installed native CLI directly so the timeout owns the process.
   const fromCcusage = createRequire(require.resolve('ccusage/package.json'));
@@ -60,8 +62,9 @@ export function readCcusage({ runner = bundledRunner, since, until } = {}) {
       if (!Array.isArray(rows)) throw new Error('Unexpected session report');
       const sessions = new Map();
       for (const row of rows) {
-        const sessionId = row?.sessionId ?? row?.session_id ?? row?.id ?? row?.period;
-        if (typeof sessionId !== 'string' || !sessionId.trim()) continue;
+        const id = row?.sessionId ?? row?.session_id ?? row?.id ?? row?.period;
+        if (typeof id !== 'string' || !id.trim()) continue;
+        const sessionId = row.agent === 'codex' ? CODEX_ROLLOUT_ID.exec(id)?.[1] ?? id : id;
         const usage = normalizeUsage(row);
         if (Object.values(usage).every((value) => value === null)) continue;
         // Ambiguous IDs across multiple local providers cannot be joined safely.

@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import {
   buildAnalyticsReport, comparisonBuckets, createTelemetryRecorder, estimateTokens, formatAnalyticsExport,
   readCcusage, rollupAndPruneAnalytics,
@@ -62,7 +64,7 @@ test('migration 11 upgrades v10, backfills estimates and can run twice', async (
     INSERT INTO notes (id, project_key, content, created_at, updated_at) VALUES ('note','global','abcdefghi',1,1);
   `);
   runMigrations(db);
-  MIGRATIONS.at(-1).up(db);
+  MIGRATIONS.find(({ version }) => version === 11).up(db);
   runMigrations(db);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 11').get().count, 1);
   assert.deepEqual({ ...db.prepare('SELECT tokens_est, compaction_count, dreamer_touched_at FROM memories').get() },
@@ -81,6 +83,30 @@ test('migration 11 upgrades v10, backfills estimates and can run twice', async (
   `), /CHECK/);
 });
 
+test('migration 12 corrects first-search re-search flags and preserves post-get follow-ups', async (t) => {
+  const db = withDb(t);
+  db.exec('DELETE FROM schema_migrations WHERE version = 12');
+  memoryFixture(db, 'project', 'compacted', 'fixture', { compactions: 1 });
+  db.prepare(`
+    INSERT INTO dreamer_memory_events (project_key, memory_id, event_type, created_at)
+    VALUES ('project', 'compacted', 'compacted', ?)
+  `).run(sampleTime - day);
+  const insert = db.prepare(`
+    INSERT INTO mcp_tool_events (project_key, connection_id, tool_name, duration_ms, target_memory_id, query_hash, is_research, created_at)
+    VALUES ('project', 'connection', ?, 1, ?, ?, ?, ?)
+  `);
+  insert.run('mem_get', 'compacted', null, 0, sampleTime);
+  insert.run('mem_search', null, 'first-hash', 1, sampleTime + 1);
+  insert.run('mem_search', null, 'first-hash', 1, sampleTime + 2);
+  runMigrations(db);
+  const searches = db.prepare("SELECT is_research FROM mcp_tool_events WHERE tool_name = 'mem_search' ORDER BY id").all();
+  assert.deepEqual(searches.map(({ is_research }) => is_research), [0, 1]);
+  assert.equal(db.prepare("SELECT research_count FROM analytics_daily_rollups WHERE tool_name = 'mem_search'").get().research_count, 1);
+  const report = await buildAnalyticsReport(db, { now, includeSessions: false, projectKey: 'project' });
+  assert.equal(report.quality.researchRate, 0.5);
+  assert.equal(report.dreamer.compactedGetResearchRate, 1);
+});
+
 test('analytics retention defaults to 93 and validates its bounds', () => {
   const load = (analytics) => loadConfig({ cwd: null, env: {}, userConfigData: { analytics } }).analytics.retention_days;
   assert.equal(load(undefined), 93);
@@ -92,7 +118,26 @@ test('analytics retention defaults to 93 and validates its bounds', () => {
 test('stdio records all core tools passively and flushes at EOF without stray output', { timeout: 20_000 }, async (t) => {
   const cwd = initGit(tempDir(t));
   const dbPath = path.join(cwd, 'fixture.sqlite');
-  const child = spawn(process.execPath, [cli, 'serve', '--cwd', cwd], {
+  const nonRepo = tempDir(t);
+  const probeMarker = path.join(nonRepo, 'unexpected-git');
+  const ageMarker = path.join(nonRepo, 'age-workspace-cache');
+  const preload = path.join(cwd, 'slow-git.cjs');
+  writeFileSync(preload, `
+    const childProcess = require('node:child_process');
+    const realSpawnSync = childProcess.spawnSync;
+    childProcess.spawnSync = (command, args, options) => {
+      if (command === 'git' && options.cwd === ${JSON.stringify(nonRepo)}) {
+        require('node:fs').writeFileSync(${JSON.stringify(probeMarker)}, 'probe');
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 4000);
+      }
+      return realSpawnSync(command, args, options);
+    };
+    require('node:module').syncBuiltinESMExports();
+    const performanceNow = performance.now.bind(performance);
+    performance.now = () => performanceNow()
+      + (require('node:fs').existsSync(${JSON.stringify(ageMarker)}) ? 6000 : 0);
+  `);
+  const child = spawn(process.execPath, ['--require', preload, cli, 'serve', '--cwd', cwd], {
     cwd, windowsHide: true, stdio: 'pipe',
     env: {
       ...process.env, MULTI_SUB_MEMORY_DB: dbPath, MULTI_SUB_MEMORY_NO_EMBEDDINGS: '1',
@@ -125,7 +170,8 @@ test('stdio records all core tools passively and flushes at EOF without stray ou
     return response.result;
   }
   const call = (name, args) => request('tools/call', { name, arguments: args });
-  const write = async (content) => JSON.parse((await call('mem_memory', { action: 'write', content })).content[0].text).memory.id;
+  const write = async (content, scope) =>
+    JSON.parse((await call('mem_memory', { action: 'write', content, scope })).content[0].text).memory.id;
   const get = (memoryId) => call('mem_memory', { action: 'get', id: memoryId });
   await request('initialize', {
     protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'analytics-fixture', version: '1' },
@@ -135,17 +181,33 @@ test('stdio records all core tools passively and flushes at EOF without stray ou
   assert.deepEqual(names, ['mem_bootstrap', 'mem_expand', 'mem_memory', 'mem_note', 'mem_search']);
   const direct = await write('fixture for a direct read');
   const first = await write('fixture shared search phrase alpha');
-  const second = await write('fixture shared search phrase beta');
-  await get(direct);
+  const second = await write('fixture shared search phrase beta', 'global');
+  const read = await call('mem_memory', { action: 'get', id: direct, cwd: nonRepo });
+  assert.equal(JSON.parse(read.content[0].text).id, direct);
+  let pingTimeout;
+  try {
+    await Promise.race([
+      request('ping', {}),
+      new Promise((_, reject) => {
+        pingTimeout = setTimeout(() => reject(new Error('Git discovery blocked the second stdio request')), 2500);
+      }),
+    ]);
+  } finally {
+    clearTimeout(pingTimeout);
+  }
   await call('mem_bootstrap', {});
   await get(first);
   const result = JSON.parse((await call('mem_search', { query: 'shared search phrase', sources: ['memory'] })).content[0].text);
-  const ranked = result.results[1].id;
-  assert.ok([first, second].includes(ranked));
-  await get(ranked);
+  const rank = result.results.findIndex(({ id: hit }) => hit === second) + 1;
+  assert.ok(rank > 0);
+  writeFileSync(ageMarker, '');
+  await get(second);
   await call('mem_search', { query: 'a separate query' });
   await call('mem_search', { query: 'phrase SHARED search!', sources: ['memory'] });
   await call('mem_note', { action: 'read' });
+  await call('mem_memory', { action: 'update', id: direct, importance: 3 });
+  await call('mem_memory', { action: 'archive', id: direct });
+  await call('mem_memory', { action: 'list' });
   assert.equal((await call('mem_expand', { session_id: 'missing-fixture' })).isError, true);
   child.stdin.end();
   assert.deepEqual(await exited, [0, null], stderr);
@@ -153,13 +215,17 @@ test('stdio records all core tools passively and flushes at EOF without stray ou
   const db = openDatabase(dbPath, { readOnly: true });
   try {
     const rows = db.prepare('SELECT * FROM mcp_tool_events ORDER BY id').all();
-    assert.equal(rows.length, 12);
+    assert.equal(existsSync(probeMarker), false, 'get-by-ID telemetry must not launch Git on a cache miss');
+    assert.equal(rows.length, 15);
+    assert.deepEqual(rows.filter(({ tool_name }) => tool_name.startsWith('mem_memory:'))
+      .map(({ tool_name, error_flag }) => [tool_name, error_flag]),
+    [['mem_memory:update', 0], ['mem_memory:archive', 0], ['mem_memory:list', 0]]);
     assert.equal(new Set(rows.map(({ connection_id }) => connection_id)).size, 1);
     assert.ok(rows.every(({ session_id, duration_ms }) => session_id === 'fixture-session' && duration_ms >= 0));
     assert.deepEqual(rows.filter(({ tool_name }) => tool_name === 'mem_get')
-      .map(({ origin, search_rank }) => [origin, search_rank]), [['direct', null], ['bootstrap', null], ['search', 2]]);
+      .map(({ origin, search_rank }) => [origin, search_rank]), [['direct', null], ['bootstrap', null], ['search', rank]]);
     const searches = rows.filter(({ tool_name }) => tool_name === 'mem_search');
-    assert.deepEqual(searches.map(({ is_research }) => is_research), [1, 1, 1]);
+    assert.deepEqual(searches.map(({ is_research }) => is_research), [0, 1, 1]);
     assert.equal(searches[0].query_hash, searches[2].query_hash);
     assert.match(searches[0].query_hash, /^[a-f\d]{16}$/);
     assert.deepEqual(JSON.parse(searches[0].returned_memory_ids_json), result.results.map(({ id: hit }) => hit));
@@ -286,8 +352,8 @@ test('ccusage reads both JSON report shapes, degrades gracefully, and shares in-
     assert.equal(options.env.DO_NOT_TRACK, '1');
     return { stdout: JSON.stringify({ session: [
       { period: 'codex-session', agent: 'codex', inputTokens: 100, outputTokens: 20, cacheReadTokens: 40, totalCost: 0.1 },
-      { sessionId: 'collision', inputTokens: 0 },
-      { sessionId: 'collision', inputTokens: 0 },
+      { period: '2026\\03\\17\\rollout-2026-03-17T12-00-00-abcdef01-2345-6789-abcd-ef0123456789.jsonl', agent: 'codex', inputTokens: 0 },
+      { sessionId: 'abcdef01-2345-6789-abcd-ef0123456789', agent: 'claude', inputTokens: 0 },
     ] }) };
   };
   const [first, second] = await Promise.all([readCcusage({ runner }), readCcusage({ runner })]);
@@ -296,7 +362,7 @@ test('ccusage reads both JSON report shapes, degrades gracefully, and shares in-
   assert.deepEqual(first.sessions.get('codex-session'), {
     inputTokens: 100, outputTokens: 20, cacheReadTokens: 40, cacheCreationTokens: null, costUsd: 0.1,
   });
-  assert.equal(first.sessions.has('collision'), false);
+  assert.equal(first.sessions.has('abcdef01-2345-6789-abcd-ef0123456789'), false);
   const focused = await readCcusage({ runner: () => ({ sessions: [{ session_id: 'focused', input_tokens: 42 }] }) });
   assert.equal(focused.sessions.get('focused').inputTokens, 42);
   const missing = await readCcusage({ runner: () => ({ sessions: [] }) });
@@ -305,6 +371,60 @@ test('ccusage reads both JSON report shapes, degrades gracefully, and shares in-
   const failed = await readCcusage({ runner: () => { throw Error('D:/private/secret.jsonl'); } });
   assert.equal(failed.available, false);
   assert.doesNotMatch(failed.reason, /private|secret/);
+});
+
+test('bundled ccusage joins Codex rollouts and bare Claude session IDs', async (t) => {
+  const require = createRequire(import.meta.url);
+  const fromCcusage = createRequire(require.resolve('ccusage/package.json'));
+  const binary = fromCcusage.resolve(`@ccusage/ccusage-${process.platform}-${process.arch}/bin/ccusage${process.platform === 'win32' ? '.exe' : ''}`);
+  const cwd = initGit(tempDir(t));
+  const db = withDb(t);
+  const codexHome = path.join(cwd, '.codex');
+  const claudeHome = path.join(cwd, '.claude');
+  const codexSessions = path.join(codexHome, 'sessions');
+  const datedSessions = path.join(codexSessions, '2026', '03', '17');
+  const claudeProject = path.join(claudeHome, 'projects', 'fixture');
+  mkdirSync(datedSessions, { recursive: true });
+  mkdirSync(claudeProject, { recursive: true });
+  const codexId = '01234567-89ab-7def-8123-456789abcdef';
+  const claudeId = '87654321-89ab-7def-8123-456789abcdef';
+  const rollout = 'rollout-2026-03-17T12-00-00-' + codexId;
+  const timestamp = iso(sampleTime);
+  const counts = { input_tokens: 110, cached_input_tokens: 10, output_tokens: 20, total_tokens: 130 };
+  writeFileSync(path.join(datedSessions, rollout + '.jsonl'), [
+    { type: 'session_meta', payload: { id: codexId, cwd, timestamp, model_provider: 'openai' } },
+    { type: 'turn_context', payload: { model: 'gpt-5', cwd } },
+    { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: counts, last_token_usage: counts } } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'fixture' }] } },
+  ].map((item) => JSON.stringify({ timestamp, ...item })).join('\n') + '\n');
+  writeFileSync(path.join(claudeProject, claudeId + '.jsonl'), JSON.stringify({
+    type: 'assistant', timestamp, sessionId: claudeId, cwd, requestId: 'fixture-request',
+    message: { id: 'fixture-message', role: 'assistant', model: 'claude-sonnet-4-5', usage: { input_tokens: 40, output_tokens: 8 },
+      content: [{ type: 'text', text: 'fixture' }] },
+  }) + '\n');
+  const index = await runIndexers({
+    db, config: { indexers: { enabled: true, codex: { sessionsDir: codexSessions }, claude: { sessionsDir: path.dirname(claudeProject) } } },
+    orchestrators: ['codex', 'claude'],
+  });
+  assert.deepEqual(index.errors, []);
+  const runner = async (args, options) => {
+    return (await promisify(execFile)(binary, args, {
+      ...options, cwd, env: {
+        ...(process.env.SystemRoot && { SystemRoot: process.env.SystemRoot }),
+        HOME: cwd, USERPROFILE: cwd, APPDATA: cwd, LOCALAPPDATA: cwd,
+        XDG_CONFIG_HOME: cwd, XDG_DATA_HOME: cwd, XDG_CACHE_HOME: cwd,
+        CODEX_HOME: codexHome, CLAUDE_CONFIG_DIR: claudeHome, DO_NOT_TRACK: '1',
+      },
+    })).stdout;
+  };
+  const flags = ['session', '--json', '--offline', '--timezone', 'UTC', '--no-color'];
+  const { session } = JSON.parse(await runner(flags, { timeout: 4000, windowsHide: true }));
+  assert.ok(session.some(({ agent, period }) => agent === 'codex' && period === '2026/03/17/' + rollout));
+  const result = await readCcusage({ runner });
+  assert.ok(result.sessions.get(codexId).costUsd > 0);
+  assert.equal(result.sessions.get(claudeId).outputTokens, 8);
+  const report = await buildAnalyticsReport(db, { now, ccusageRunner: runner });
+  assert.equal(report.cost.matchedSessionCount, 2);
 });
 
 test('indexed Codex call IDs correlate sessions and measure only matched detours', async (t) => {
@@ -328,21 +448,44 @@ test('indexed Codex call IDs correlate sessions and measure only matched detours
     record('response_item', { type: 'function_call_output', call_id: 'other', output: 'Ignore' }, 50),
     record('response_item', { type: 'function_call_output', call_id: 'match', output: 'Private result' }, 200),
     turn('An assistant reply', 800),
+    ...['mem_note', 'mem_memory:write', 'mem_memory:list', 'mem_memory:get'].flatMap((operation, index) => {
+      const [name, action] = operation.split(':');
+      const offset = (index + 1) * 1000;
+      return [
+        record('response_item', {
+          type: 'function_call', name: 'mcp__multi_sub_memory__' + name,
+          call_id: operation, arguments: JSON.stringify({ action, id: 'private-argument' }),
+        }, offset),
+        record('response_item', { type: 'function_call_output', call_id: operation, output: 'Private result' }, offset + 200),
+        turn('A subsequent assistant reply', offset + 800),
+      ];
+    }),
   ]);
   transcript('no-memory-session', 3 * 60_000, [turn('A later session', 3 * 60_000)]);
   const index = await runIndexers({ db, config: { indexers: { enabled: true, codex: { sessionsDir } } }, orchestrators: ['codex'] });
   assert.deepEqual(index.errors, []);
-  assert.equal(index.messagesIndexed, 3, 'standalone Codex results remain outside searchable transcript messages');
+  assert.equal(index.messagesIndexed, 11, 'standalone Codex results remain outside searchable transcript messages');
   const messageIds = db.prepare('SELECT id FROM transcript_messages ORDER BY id').all();
-  db.exec('DELETE FROM transcript_tool_activity; UPDATE transcript_files SET tool_activity_indexed = 0');
+  db.exec("UPDATE transcript_tool_activity SET activity_json = replace(activity_json, ',\"action\":\"get\"', '')");
+  db.exec('DELETE FROM schema_migrations WHERE version = 12');
+  runMigrations(db);
+  assert.equal(db.prepare('SELECT MAX(tool_activity_indexed) AS indexed FROM transcript_files').get().indexed, 0);
   const skipped = await runIndexers({
     db, config: { indexers: { enabled: true, codex: { sessionsDir } } }, orchestrators: ['codex'],
   });
   assert.deepEqual(skipped.errors, []);
   assert.equal(skipped.messagesIndexed, 0);
   assert.deepEqual(db.prepare('SELECT id FROM transcript_messages ORDER BY id').all(), messageIds);
+  const activity = db.prepare('SELECT activity_json FROM transcript_tool_activity').all()
+    .flatMap(({ activity_json }) => JSON.parse(activity_json));
+  assert.deepEqual(activity.filter(({ action }) => action), [
+    { type: 'call', callId: 'mem_memory:get', name: 'mcp__multi_sub_memory__mem_memory', action: 'get' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(activity), /private-argument/);
   const recorder = createTelemetryRecorder(db, { now: () => now, env: {} });
+  recorder.record({ projectKey, toolName: 'mem_search', createdAt: sampleTime - 3 * 60 * 60_000, responseText: 'distant morning' });
   recorder.record({ projectKey, toolName: 'mem_search', createdAt: sampleTime + 100, responseText: '12345678' });
+  recorder.record({ projectKey, toolName: 'mem_search', createdAt: sampleTime + 5 * 60 * 60_000, responseText: 'distant afternoon' });
   recorder.close();
   const report = await buildAnalyticsReport(db, {
     projectKey, now, ccusageRunner: () => ({ session: [
@@ -354,12 +497,38 @@ test('indexed Codex call IDs correlate sessions and measure only matched detours
   assert.equal(report.cost.cohorts.lite.sessionCount, 1);
   assert.equal(report.cost.cohorts.lite.memoryContextTax, 0.1);
   assert.equal(report.cost.cohorts.lite.cacheHitRatio, 0.25);
-  assert.equal(report.cost.cohorts.lite.averageTurnsPerSession, 1);
+  assert.equal(report.cost.cohorts.lite.averageTurnsPerSession, 5);
   assert.equal(report.cost.correlatedCallCount, 1);
+  assert.equal(report.cost.uncorrelatedCallCount, 2);
   assert.deepEqual(report.speedAndTokens.memoryDetour, {
-    count: 1, durationMs: { avg: 800, p95: 800 }, toolResultDurationMs: { avg: 200, p95: 200 },
+    count: 2, durationMs: { avg: 800, p95: 800 }, toolResultDurationMs: { avg: 200, p95: 200 },
   });
   assert.doesNotMatch(JSON.stringify(formatAnalyticsExport(report)), /memory-session|Private result|sessionsDir/);
+});
+
+test('churn requires compactions within seven days or a lineage depth of three', async (t) => {
+  const db = withDb(t);
+  for (const [id, compactions] of [['rapid', 2], ['slow', 2], ['deep', 3], ['source', 1], ['merged', 2]]) {
+    memoryFixture(db, 'project', id, id, { compactions });
+  }
+  const addCompaction = db.prepare(`
+    INSERT INTO dreamer_memory_events (project_key, memory_id, event_type, source_memory_ids_json, created_at)
+    VALUES ('project', ?, 'compacted', ?, ?)
+  `);
+  for (const [id, days] of [['rapid', 7], ['slow', 730], ['source', 1]]) {
+    addCompaction.run(id, null, sampleTime - days * day);
+  }
+  addCompaction.run('rapid', null, sampleTime);
+  addCompaction.run('slow', null, sampleTime);
+  addCompaction.run('merged', '["source"]', sampleTime);
+  db.prepare('UPDATE memories SET project_key = ? WHERE id = ?').run('destination', 'merged');
+  const moved = await buildAnalyticsReport(db, { now, includeSessions: false, projectKey: 'destination' });
+  assert.deepEqual(moved.dreamer.repeatCompaction.memories, [{ memoryId: 'merged', compactionCount: 2 }]);
+  const { dreamer } = await buildAnalyticsReport(db, { now, includeSessions: false, projectKey: 'project' });
+  assert.deepEqual(dreamer.repeatCompaction.memories, [
+    { memoryId: 'deep', compactionCount: 3 },
+    { memoryId: 'rapid', compactionCount: 2 },
+  ]);
 });
 
 test('Dreamer captures HTTP and CLI usage, lineage, resurrection, retrieval quality, and dashboard changes', async (t) => {
@@ -458,7 +627,7 @@ test('Dreamer captures HTTP and CLI usage, lineage, resurrection, retrieval qual
     assert.equal(report.cost.cohorts.heavy.sessionCount, 1);
     assert.equal(report.dreamer.cost.inputTokens, 190);
     assert.ok(Math.abs(report.dreamer.cost.costUsd - 0.11) < 1e-9);
-    assert.equal(report.dreamer.repeatCompaction.count, 1);
+    assert.equal(report.dreamer.repeatCompaction.count, 0, 'lineage depth two alone does not establish rapid churn');
     assert.equal(report.dreamer.velocity.before, 7);
     assert.ok(report.dreamer.velocity.after > 0);
     assert.equal(report.dreamer.searchImpressions.compacted.ctr, 1);

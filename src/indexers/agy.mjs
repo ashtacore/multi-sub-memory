@@ -2,7 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { expandHome } from '../config.mjs';
 import {
-  appendToolActivity, transcriptToolActivity, discoverJsonlFiles, extractMessageContent, firstNonBlankString, firstNonEmptyString, normalizeTranscriptTimestamp,
+  appendToolActivity, transcriptToolActivity, transcriptToolCall, discoverJsonlFiles, extractMessageContent, firstNonBlankString, firstNonEmptyString, normalizeTranscriptTimestamp,
   parseJsonlRecord, readIncrementalJsonlLines,
 } from './types.mjs';
 
@@ -90,7 +90,7 @@ export const agyAdapter = {
         for (const call of Array.isArray(record.tool_calls) ? record.tool_calls : []) {
           const callId = firstNonBlankString(call?.id, call?.call_id);
           const name = firstNonBlankString(call?.name, call?.function?.name);
-          if (callId && name) calls.push({ type: 'call', callId, name });
+          if (callId && name) calls.push(transcriptToolCall(callId, name, call.arguments ?? call.function?.arguments));
         }
         appendToolActivity(toolActivity, lineNo, message.timestamp, calls, message.role);
       }

@@ -68,7 +68,11 @@ also gain `compaction_count` and `dreamer_touched_at`, with lineage and quality
 signals in `dreamer_memory_events`. Dreamer runs gain nullable `session_id`,
 `input_tokens`, `output_tokens`, and `cost_usd`. Transcript indexing stores
 timestamped tool activity in `transcript_tool_activity` and tracks its indexing
-state in `transcript_files.tool_activity_indexed`.
+state in `transcript_files.tool_activity_indexed`. Migration 12 marks activity
+for backfill so the next index pass can distinguish `mem_memory` gets without
+rewriting searchable message IDs. The activity records only the `get`
+discriminator from tool arguments. The migration also corrects stored
+re-search flags and daily counts using the retained query history.
 [Dashboard analytics](Dashboard.md#analytics)
 
 ## Design rules and why
