@@ -376,7 +376,16 @@ test('ccusage reads both JSON report shapes, degrades gracefully, and shares in-
 test('bundled ccusage joins Codex rollouts and bare Claude session IDs', async (t) => {
   const require = createRequire(import.meta.url);
   const fromCcusage = createRequire(require.resolve('ccusage/package.json'));
-  const binary = fromCcusage.resolve(`@ccusage/ccusage-${process.platform}-${process.arch}/bin/ccusage${process.platform === 'win32' ? '.exe' : ''}`);
+  let binary;
+  try {
+    binary = fromCcusage.resolve(`@ccusage/ccusage-${process.platform}-${process.arch}/bin/ccusage${process.platform === 'win32' ? '.exe' : ''}`);
+  } catch (error) {
+    if (error?.code === 'MODULE_NOT_FOUND' && !process.env.CI) {
+      t.skip('Optional native ccusage binary is not installed');
+      return;
+    }
+    throw error;
+  }
   const cwd = initGit(tempDir(t));
   const db = withDb(t);
   const codexHome = path.join(cwd, '.codex');
