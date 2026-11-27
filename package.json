@@ -2,7 +2,21 @@
   "name": "multi-sub-memory",
   "version": "0.1.0",
   "description": "Cross-orchestrator local Memory MCP server backed by node:sqlite",
+  "author": "ashtacore",
   "license": "MIT",
+  "homepage": "https://github.com/ashtacore/multi-sub-memory#readme",
+  "bugs": {
+    "url": "https://github.com/ashtacore/multi-sub-memory/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "memory",
+    "sqlite",
+    "claude-code",
+    "codex",
+    "ai-agents"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ashtacore/multi-sub-memory.git"

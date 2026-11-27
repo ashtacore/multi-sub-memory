@@ -17,6 +17,8 @@ The five Phase 1 MCP Core tools are `mem_memory`, `mem_note`, `mem_bootstrap`,
 - [`docs/HANDOFF.md`](docs/HANDOFF.md) — current state, next actions, and blockers
 - [`docs/wiki/Home.md`](docs/wiki/Home.md) — durable architecture and area documentation
 - [`docs/wiki/Decisions.md`](docs/wiki/Decisions.md) — accepted Architecture Decision Records (ADRs)
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution guidelines, PR scope rules, and local testing
+- [`SECURITY.md`](SECURITY.md) — private vulnerability reporting policy
 - [`LICENSE`](LICENSE) — MIT License
 
 ## Quick start
