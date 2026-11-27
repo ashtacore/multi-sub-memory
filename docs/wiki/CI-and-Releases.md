@@ -18,7 +18,10 @@ your Node 24 build emits a SQLite warning on `stderr`.
   from the verified commit if it does not already exist.
 - The npm publishing job uses [npm Trusted Publishing (OIDC)](https://docs.npmjs.com/trusted-publishers)
   via GitHub Actions `id-token: write` on Node 24 (no stored `NPM_TOKEN` secret
-  is required). It publishes with public access and adds
+  is required). Before the first automated publish, the package must exist on
+  npmjs.com with `ashtacore/multi-sub-memory` and workflow `release.yml`
+  configured under **Package Settings → Trusted Publisher**. The job publishes
+  with public access and adds
   [npm provenance](https://docs.npmjs.com/generating-provenance-statements/) when
   the source repository is public.
 - After npm publishes the package, a separate job creates or updates the
