@@ -1,10 +1,10 @@
 # CI and releases
 
 Pull requests and pushes to `main` run GitHub Actions CI on Ubuntu and Windows
-with Node 22. CI runs `npm ci`, `npm run check`, the Node test suite, and
+with Node 24. CI runs `npm ci`, `npm run check`, the Node test suite, and
 `npm pack --dry-run`. Run the same commands locally to verify a change. Set
-`NODE_OPTIONS=--disable-warning=ExperimentalWarning` for the test command on
-Node 22 so the SQLite warning stays out of CLI stderr assertions.
+`NODE_OPTIONS=--disable-warning=ExperimentalWarning` for the test command if
+your Node 24 build emits a SQLite warning on `stderr`.
 
 ## Design rules and why
 
@@ -16,8 +16,9 @@ Node 22 so the SQLite warning stays out of CLI stderr assertions.
   `v` followed by the package version, including for dry runs on a tag.
   When dispatched on a branch, the workflow uses that version tag and creates it
   from the verified commit if it does not already exist.
-- The npm publishing job requires the `NPM_TOKEN` Actions secret. It publishes
-  with public access in either case and adds
+- The npm publishing job uses [npm Trusted Publishing (OIDC)](https://docs.npmjs.com/trusted-publishers)
+  via GitHub Actions `id-token: write` on Node 24 (no stored `NPM_TOKEN` secret
+  is required). It publishes with public access and adds
   [npm provenance](https://docs.npmjs.com/generating-provenance-statements/) when
   the source repository is public.
 - After npm publishes the package, a separate job creates or updates the

@@ -94,11 +94,9 @@ test('release verifies before publishing and defaults manual runs to dry runs', 
   assert.equal(setupNode.uses, 'actions/setup-node@v4');
   assert.deepEqual(setupNode.with, {
     'node-version': '24',
-    'registry-url': 'https://registry.npmjs.org',
   });
   assert.equal(validateTag.id, 'version');
   assert.deepEqual(publishNpm.env, {
-    NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}',
     REPO_PRIVATE: '${{ github.event.repository.private }}',
   });
   assert.doesNotMatch(publishNpm.run, /\$\{\{/);

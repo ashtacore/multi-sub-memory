@@ -1,6 +1,6 @@
 {
   "name": "multi-sub-memory",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Cross-orchestrator local Memory MCP server backed by node:sqlite",
   "author": "ashtacore",
   "license": "MIT",
