@@ -320,6 +320,142 @@ export const MIGRATIONS = [{
       END;
     `);
   },
+}, {
+  version: 11,
+  up(db) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_tool_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_key TEXT NOT NULL,
+        connection_id TEXT NOT NULL,
+        session_id TEXT,
+        tool_name TEXT NOT NULL,
+        duration_ms REAL NOT NULL CHECK (duration_ms >= 0),
+        response_tokens_est INTEGER NOT NULL DEFAULT 0 CHECK (response_tokens_est >= 0),
+        result_count INTEGER NOT NULL DEFAULT 0 CHECK (result_count >= 0),
+        origin TEXT,
+        search_rank INTEGER CHECK (search_rank >= 1),
+        target_memory_id TEXT,
+        returned_memory_ids_json TEXT CHECK (json_type(returned_memory_ids_json) = 'array'),
+        query_hash TEXT,
+        is_research INTEGER NOT NULL DEFAULT 0 CHECK (is_research IN (0, 1)),
+        error_flag INTEGER NOT NULL DEFAULT 0 CHECK (error_flag IN (0, 1)),
+        created_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS idx_mcp_events_project_time ON mcp_tool_events (project_key, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_mcp_events_connection_time ON mcp_tool_events (connection_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_events_session ON mcp_tool_events (session_id);
+      CREATE INDEX IF NOT EXISTS idx_mcp_events_time ON mcp_tool_events (created_at);
+      CREATE TABLE IF NOT EXISTS analytics_daily_rollups (
+        day_utc TEXT NOT NULL,
+        project_key TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        call_count INTEGER NOT NULL CHECK (call_count >= 0),
+        error_count INTEGER NOT NULL CHECK (error_count >= 0),
+        total_duration_ms REAL NOT NULL CHECK (total_duration_ms >= 0),
+        max_duration_ms REAL NOT NULL CHECK (max_duration_ms >= 0),
+        total_response_tokens INTEGER NOT NULL CHECK (total_response_tokens >= 0),
+        total_results INTEGER NOT NULL CHECK (total_results >= 0),
+        zero_result_count INTEGER NOT NULL CHECK (zero_result_count >= 0),
+        search_to_get_count INTEGER NOT NULL CHECK (search_to_get_count >= 0),
+        direct_get_count INTEGER NOT NULL CHECK (direct_get_count >= 0),
+        bootstrap_get_count INTEGER NOT NULL CHECK (bootstrap_get_count >= 0),
+        research_count INTEGER NOT NULL CHECK (research_count >= 0),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (day_utc, project_key, tool_name)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS idx_analytics_rollups_project_day ON analytics_daily_rollups (project_key, day_utc);
+      CREATE TRIGGER IF NOT EXISTS mcp_event_rollup AFTER INSERT ON mcp_tool_events BEGIN
+        INSERT INTO analytics_daily_rollups (
+          day_utc, project_key, tool_name, call_count, error_count, total_duration_ms, max_duration_ms,
+          total_response_tokens, total_results, zero_result_count,
+          search_to_get_count, direct_get_count, bootstrap_get_count, research_count, updated_at
+        ) VALUES (
+          date(new.created_at / 1000.0, 'unixepoch'), new.project_key, new.tool_name, 1, new.error_flag,
+          new.duration_ms, new.duration_ms, new.response_tokens_est, new.result_count,
+          new.error_flag = 0 AND new.result_count = 0,
+          COALESCE(new.error_flag = 0 AND new.origin = 'search', 0),
+          COALESCE(new.error_flag = 0 AND new.origin = 'direct', 0),
+          COALESCE(new.error_flag = 0 AND new.origin = 'bootstrap', 0),
+          new.is_research, new.created_at
+        )
+        ON CONFLICT (day_utc, project_key, tool_name) DO UPDATE SET
+          call_count = call_count + 1,
+          error_count = error_count + excluded.error_count,
+          total_duration_ms = total_duration_ms + excluded.total_duration_ms,
+          max_duration_ms = MAX(max_duration_ms, excluded.max_duration_ms),
+          total_response_tokens = total_response_tokens + excluded.total_response_tokens,
+          total_results = total_results + excluded.total_results,
+          zero_result_count = zero_result_count + excluded.zero_result_count,
+          search_to_get_count = search_to_get_count + excluded.search_to_get_count,
+          direct_get_count = direct_get_count + excluded.direct_get_count,
+          bootstrap_get_count = bootstrap_get_count + excluded.bootstrap_get_count,
+          research_count = research_count + excluded.research_count,
+          updated_at = MAX(updated_at, excluded.updated_at);
+      END;
+      CREATE TABLE IF NOT EXISTS dreamer_memory_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_key TEXT NOT NULL,
+        dream_run_id TEXT,
+        memory_id TEXT NOT NULL,
+        event_type TEXT NOT NULL CHECK (event_type IN ('compacted', 'archived', 'resurrected', 'human_undo', 'human_edit')),
+        source_memory_ids_json TEXT CHECK (json_type(source_memory_ids_json) = 'array'),
+        source_access_rate_per_week REAL CHECK (source_access_rate_per_week >= 0),
+        compaction_count_after INTEGER CHECK (compaction_count_after >= 0),
+        target_access_count_at_event INTEGER CHECK (target_access_count_at_event >= 0),
+        created_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS idx_dreamer_events_project_time
+        ON dreamer_memory_events (project_key, created_at);
+      CREATE INDEX IF NOT EXISTS idx_dreamer_events_memory ON dreamer_memory_events (memory_id, created_at);
+      CREATE TABLE IF NOT EXISTS transcript_tool_activity (
+        file_id INTEGER NOT NULL REFERENCES transcript_files(id) ON DELETE CASCADE,
+        line_no INTEGER NOT NULL,
+        timestamp TEXT,
+        activity_json TEXT NOT NULL CHECK (json_type(activity_json) = 'array'),
+        PRIMARY KEY (file_id, line_no)
+      ) STRICT;
+    `);
+    const columns = {
+      memories: {
+        tokens_est: 'INTEGER NOT NULL DEFAULT 0 CHECK (tokens_est >= 0)',
+        compaction_count: 'INTEGER NOT NULL DEFAULT 0 CHECK (compaction_count >= 0)',
+        dreamer_touched_at: 'INTEGER',
+      },
+      notes: { tokens_est: 'INTEGER NOT NULL DEFAULT 0 CHECK (tokens_est >= 0)' },
+      transcript_files: { tool_activity_indexed: 'INTEGER NOT NULL DEFAULT 0 CHECK (tool_activity_indexed IN (0, 1))' },
+      dream_runs: {
+        session_id: 'TEXT',
+        input_tokens: 'INTEGER CHECK (input_tokens >= 0)',
+        output_tokens: 'INTEGER CHECK (output_tokens >= 0)',
+        cost_usd: 'REAL CHECK (cost_usd >= 0)',
+      },
+    };
+    for (const [table, definitions] of Object.entries(columns)) {
+      const existing = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(({ name }) => name));
+      for (const [column, definition] of Object.entries(definitions)) {
+        if (!existing.has(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      }
+      if (table !== 'memories' && table !== 'notes') continue;
+      // The current schema stores content without a separate title.
+      db.exec(`
+        UPDATE ${table} SET tokens_est = (length(content) + 3) / 4
+        WHERE tokens_est = 0 AND length(content) > 0;
+        CREATE TRIGGER IF NOT EXISTS ${table}_tokens_insert AFTER INSERT ON ${table}
+        WHEN new.tokens_est != (length(new.content) + 3) / 4 BEGIN
+          UPDATE ${table} SET tokens_est = (length(new.content) + 3) / 4 WHERE id = new.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS ${table}_tokens_update AFTER UPDATE OF content ON ${table}
+        WHEN new.tokens_est != (length(new.content) + 3) / 4 BEGIN
+          UPDATE ${table} SET tokens_est = (length(new.content) + 3) / 4 WHERE id = new.id;
+        END;
+      `);
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_memories_project_dreamer_touch
+        ON memories (project_key, dreamer_touched_at DESC) WHERE dreamer_touched_at IS NOT NULL;
+    `);
+  },
 }];
 
 const busyWait = new Int32Array(new SharedArrayBuffer(4));

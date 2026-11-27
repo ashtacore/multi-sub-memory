@@ -2,7 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { expandHome } from '../config.mjs';
 import {
-  discoverJsonlFiles, extractMessageContent, firstNonBlankString, firstNonEmptyString, normalizeTranscriptTimestamp,
+  appendToolActivity, transcriptToolActivity, discoverJsonlFiles, extractMessageContent, firstNonBlankString, firstNonEmptyString, normalizeTranscriptTimestamp,
   parseJsonlRecord, readIncrementalJsonlLines,
 } from './types.mjs';
 
@@ -77,6 +77,7 @@ export const agyAdapter = {
     let { sessionId, cwd } = existingMeta;
     let seq = existingMeta.nextSeq ?? 0;
     const messages = [];
+    const toolActivity = [];
 
     for (const { line, lineNo } of lines) {
       const record = parseJsonlRecord(line);
@@ -84,10 +85,19 @@ export const agyAdapter = {
       sessionId = agySessionId(record) ?? sessionId;
       cwd = firstNonEmptyString(record.cwd, record.workspace, record.workspace_root) ?? cwd;
       const message = parseAgyMessage(record);
+      if (message) {
+        const calls = transcriptToolActivity(record.content);
+        for (const call of Array.isArray(record.tool_calls) ? record.tool_calls : []) {
+          const callId = firstNonBlankString(call?.id, call?.call_id);
+          const name = firstNonBlankString(call?.name, call?.function?.name);
+          if (callId && name) calls.push({ type: 'call', callId, name });
+        }
+        appendToolActivity(toolActivity, lineNo, message.timestamp, calls, message.role);
+      }
       if (!message || message.role === 'system' || (!message.text && !message.toolNames.length)) continue;
       messages.push({ seq: seq++, lineNo, ...message });
     }
 
-    return { sessionId: sessionId ?? fallbackId, cwd, messages, ...checkpoint };
+    return { sessionId: sessionId ?? fallbackId, cwd, messages, toolActivity, ...checkpoint };
   },
 };

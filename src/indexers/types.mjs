@@ -270,6 +270,31 @@ export function parseJsonlRecord(line) {
   }
 }
 
+export function transcriptToolActivity(content) {
+  if (!Array.isArray(content)) return [];
+  const activities = [];
+  for (const block of content) {
+    const name = firstNonBlankString(block?.function?.name, block?.name, block?.recipient_name);
+    const callId = firstNonBlankString(block?.id, block?.call_id, block?.tool_use_id);
+    if (callId && name && ['toolCall', 'tool_use', 'tool_call', 'function_call'].includes(block?.type)) {
+      activities.push({ type: 'call', callId, name });
+    }
+    if (['tool_result', 'toolResult', 'function_call_output'].includes(block?.type)) {
+      const resultId = firstNonBlankString(block.tool_use_id, block.toolCallId, block.call_id);
+      if (resultId) activities.push({ type: 'result', callId: resultId });
+    }
+  }
+  return activities;
+}
+
+export function appendToolActivity(activity, lineNo, timestamp, calls, role, resultId) {
+  const events = [...calls];
+  if (role === 'toolResult' || role === 'tool') {
+    if (typeof resultId === 'string' && resultId) events.push({ type: 'result', callId: resultId });
+  }
+  if (events.length) activity.push({ lineNo, timestamp, events });
+}
+
 export function extractMessageContent(content) {
   if (!Array.isArray(content)) {
     return { text: typeof content === 'string' ? content : '', toolNames: [], hasToolResult: false };

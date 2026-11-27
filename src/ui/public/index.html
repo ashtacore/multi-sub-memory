@@ -34,6 +34,7 @@
       <button type="button" data-view="memories" data-testid="nav-memories" aria-pressed="true" aria-controls="view-memories">Memories</button>
       <button type="button" data-view="notes" data-testid="nav-notes" aria-pressed="false" aria-controls="view-notes">Notes</button>
       <button type="button" data-view="dreamer" data-testid="nav-dreamer" aria-pressed="false" aria-controls="view-dreamer">Dreamer</button>
+      <button type="button" data-view="analytics" data-testid="nav-analytics" aria-pressed="false" aria-controls="view-analytics">Analytics</button>
     </nav>
     <div class="banner error" data-testid="error-banner" id="error-banner" hidden>
       <span id="error-message" role="alert"></span>
@@ -148,6 +149,35 @@
         </div>
       </div>
       <div id="dream-history" data-testid="dream-history"></div>
+    </section>
+
+    <section class="panel" id="view-analytics" data-testid="view-analytics" aria-labelledby="analytics-heading" hidden>
+      <div class="panel-heading"><h2 id="analytics-heading" tabindex="-1">Analytics</h2></div>
+      <div class="toolbar analytics-controls">
+        <div class="analytics-fields">
+          <label>Comparison window
+            <select id="analytics-window">
+              <option value="7d">7 Days</option>
+              <option value="3w">3 Weeks</option>
+              <option value="2m">2 Months</option>
+            </select>
+          </label>
+          <label id="analytics-month-field" hidden>Month mode
+            <select id="analytics-month-mode" disabled>
+              <option value="calendar">Calendar Months</option>
+              <option value="rolling30">Rolling 30-Day</option>
+            </select>
+          </label>
+        </div>
+        <div class="actions">
+          <button type="button" id="analytics-refresh">Refresh</button>
+          <button type="button" id="analytics-export-json">Export JSON</button>
+          <button type="button" id="analytics-export-markdown">Export Markdown</button>
+        </div>
+      </div>
+      <p class="muted" id="analytics-status" role="status"></p>
+      <div id="analytics-export-error" class="banner error" role="alert" hidden></div>
+      <div id="analytics-report"></div>
     </section>
   </main>
 

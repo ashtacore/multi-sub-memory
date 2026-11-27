@@ -55,6 +55,22 @@ as project writes register them. The dashboard uses per-repository write order
 to rank checkouts by recency, even for writes in the same millisecond. It
 verifies the recorded paths with Git before offering them for Dreamer runs.
 
+Migration 11 adds `mcp_tool_events` for passive per-call telemetry and
+`analytics_daily_rollups` for UTC daily aggregates keyed by project and tool.
+Each event insert updates its rollup in the same transaction. Reports use raw
+samples for percentiles and retrieval attribution. The global YAML setting
+`analytics.retention_days` defaults to 93. The recorder's daily maintenance
+prunes raw events and rollups older than the UTC retention boundary.
+
+The migration backfills `tokens_est` on memories and notes. SQLite triggers
+maintain the estimate at one token per four characters, rounded up. Memories
+also gain `compaction_count` and `dreamer_touched_at`, with lineage and quality
+signals in `dreamer_memory_events`. Dreamer runs gain nullable `session_id`,
+`input_tokens`, `output_tokens`, and `cost_usd`. Transcript indexing stores
+timestamped tool activity in `transcript_tool_activity` and tracks its indexing
+state in `transcript_files.tool_activity_indexed`.
+[Dashboard analytics](Dashboard.md#analytics)
+
 ## Design rules and why
 
 - Embedding rows require an explicit parent ID. The `transcript_embeddings` table uses `WITHOUT ROWID` so SQLite rejects a missing message ID instead of generating one.

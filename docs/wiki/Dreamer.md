@@ -91,6 +91,23 @@ definition. A `describe` operation specifies `tag` and `description`.
 Dry runs validate and report the operations without changing definitions
 or assignments.
 
+## Analytics
+
+Dreamer stores reported input and output tokens, USD cost, and available
+session IDs on `dream_runs`. HTTP runs capture usage from the response.
+Supported CLI runs capture usage and session IDs when reported, and the
+[dashboard](Dashboard.md#analytics) can fill missing usage or pricing from
+matching local ccusage sessions. Average cost uses runs with known prices.
+
+A merge sets the target's `compaction_count` to one plus the largest source
+count. The dashboard shows the current distribution and lists churn candidates
+with a count of at least two. Quality signals include average source access
+velocity before compaction and target velocity after compaction, age-normalized
+access velocity by compaction count, and search-impression-to-get CTR for
+original and compacted memories. The report also counts likely resurrections
+of recently archived or pre-compaction content and dashboard undo or edit
+actions on Dreamer-touched memories.
+
 ## Design rules and why
 
 - Dreamer redacts configured secrets, URL userinfo, and every URL query

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { expandHome, loadWorkspaceConfig, resolveConfigProject } from '../config.mjs';
 import { openDatabase } from '../db.mjs';
 import { createEmbeddingEngine } from '../embeddings.mjs';
-import { createApi, RequestError } from './routes.mjs';
+import { analyticsAttachment, createApi, RequestError } from './routes.mjs';
 
 export const DEFAULT_UI_PORT = 3847;
 const host = '127.0.0.1';
@@ -128,7 +128,10 @@ export async function startDashboardServer(options = {}) {
     ? createEmbeddingEngine({ embedding: config.embedding, env }) : options.embeddingEngine;
   const ownsDb = !options.db;
   const db = options.db ?? openDatabase(config.dbPath);
-  const api = createApi({ db, config, tagConfig: baseConfig, cwd, defaultProjectKey, defaultProjectRoot, embeddingEngine, env, configOptions });
+  const api = createApi({
+    db, config, tagConfig: baseConfig, cwd, defaultProjectKey, defaultProjectRoot, embeddingEngine, env, configOptions,
+    ccusageRunner: options.ccusageRunner, analyticsNow: options.analyticsNow,
+  });
   const inFlight = new Set();
   let hosts;
   let origins;
@@ -155,8 +158,17 @@ export async function startDashboardServer(options = {}) {
       if (writes && !validToken(req.headers['x-msm-token'], tokenBytes)) {
         throw new RequestError(403, 'Invalid or missing CSRF token');
       }
-      if (isApi) json(res, 200, await api(req, pathname, params));
-      else await staticFile(req, res, pathname, publicRoot, csrfToken);
+      if (isApi) {
+        const result = await api(req, pathname, params);
+        if (result?.[analyticsAttachment]) {
+          res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+          send(res, 200, result.contentType, result.body);
+        } else {
+          json(res, 200, result);
+        }
+      } else {
+        await staticFile(req, res, pathname, publicRoot, csrfToken);
+      }
     } catch (error) {
       req.resume();
       if (!res.destroyed) {

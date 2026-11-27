@@ -17,6 +17,7 @@ const defaults = {
   dbPath: DEFAULT_DB_PATH,
   embedding: { model: 'BAAI/bge-base-en-v1.5', enabled: DEFAULT_EMBEDDING_ENABLED },
   bootstrap: { tokenBudget: 2500 },
+  analytics: { retention_days: 93 },
   indexers: {
     enabled: true, backgroundRefresh: false, refreshIntervalMs: 60_000,
     omp: {}, claude: {}, codex: {}, agy: {},
@@ -83,6 +84,8 @@ const indexersSchema = z.object({
   agy: adapterSchema,
 }).strict();
 
+const analyticsSchema = z.strictObject({ retention_days: z.number().int().min(7).max(3650) });
+
 const configFields = z.object({
   dbPath: z.string().min(1),
   embedding: embeddingSchema,
@@ -90,6 +93,7 @@ const configFields = z.object({
   dreamer: dreamerSchema,
   tags: tagsSchema.prefault({}),
   indexers: indexersSchema,
+  analytics: analyticsSchema.default(defaults.analytics),
 }).strict();
 
 export const ConfigSchema = configFields.superRefine(({ dreamer }, context) => {
@@ -110,11 +114,12 @@ const configLayerSchema = configFields.extend({
     cadence: cadenceFields.partial(),
   }).partial(),
   indexers: indexersSchema.partial(),
+  analytics: analyticsSchema.partial(),
   strictTags: z.boolean(),
   tags: tagFields.partial(),
 }).partial();
 
-const projectLayerSchema = configLayerSchema.extend({
+const projectLayerSchema = configLayerSchema.omit({ analytics: true }).extend({
   checkouts: z.array(nonEmptyString).optional(),
   forkMode: z.enum(['origin', 'upstream']).optional(),
 });
@@ -291,6 +296,7 @@ function resolveEffectiveConfig(options, includeProject) {
     dreamer: mergeDreamer(user.dreamer, layer.dreamer),
     tags: mergeTags(user, project?.projectKey ?? 'global'),
     indexers,
+    analytics: { ...defaults.analytics, ...user.analytics },
   });
   config.dbPath = expandHome(config.dbPath, homeDir);
   configSources.set(config, user);

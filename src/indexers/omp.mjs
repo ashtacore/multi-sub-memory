@@ -3,7 +3,7 @@ import path from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import { expandHome } from '../config.mjs';
 import {
-  discoverJsonlFiles, extractMessageContent, normalizeTranscriptRole, normalizeTranscriptTimestamp,
+  appendToolActivity, transcriptToolActivity, discoverJsonlFiles, extractMessageContent, normalizeTranscriptRole, normalizeTranscriptTimestamp,
   parseJsonlRecord, readIncrementalJsonlLinesAsync,
 } from './types.mjs';
 
@@ -33,6 +33,7 @@ export const ompAdapter = {
     let seq = nextSeq ?? 0;
     let recognized = false;
     const messages = [];
+    const toolActivity = [];
 
     signal?.throwIfAborted();
     for (const [index, { line, lineNo }] of lines.entries()) {
@@ -50,16 +51,18 @@ export const ompAdapter = {
       const role = normalizeTranscriptRole(message?.role);
       if (record?.type !== 'message' || role === null) continue;
       recognized = true;
+      const timestamp = normalizeTranscriptTimestamp(message.timestamp) ?? normalizeTranscriptTimestamp(record.timestamp);
+      appendToolActivity(toolActivity, lineNo, timestamp, transcriptToolActivity(message.content), role, message.toolCallId);
       const { text, toolNames, hasToolResult } = extractMessageContent(message.content);
       if (!text && !toolNames.length) continue;
       messages.push({
         seq: seq++, role, text, toolNames, lineNo,
-        timestamp: normalizeTranscriptTimestamp(message.timestamp) ?? normalizeTranscriptTimestamp(record.timestamp),
+        timestamp,
         skipEmbedding: hasToolResult,
       });
     }
     return {
-      sessionId: sessionId ?? path.basename(filePath, '.jsonl'), cwd, messages, recognized, ...checkpoint,
+      sessionId: sessionId ?? path.basename(filePath, '.jsonl'), cwd, messages, toolActivity, recognized, ...checkpoint,
       headerCwd: readHeaderCwd(headerLine),
     };
   },

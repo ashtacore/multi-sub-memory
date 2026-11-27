@@ -126,7 +126,11 @@ export function createHttpLlmRunner({
         continue;
       }
       const plan = extractJsonPlan(payload?.choices?.[0]?.message?.content);
-      return { plan, runner: 'http', model };
+      return {
+        plan, runner: 'http', model,
+        ...(payload?.usage && { usage: payload.usage }),
+        ...(payload?.cost_usd !== undefined && { costUsd: payload.cost_usd }),
+      };
     }
   };
   return Object.assign(run, { promptBudget: { noteLimit: HTTP_NOTE_PROMPT_BYTE_BUDGET, measure: Buffer.byteLength } });
@@ -218,6 +222,36 @@ function restrictCodexArgs(args, restrictions) {
   return [...remaining, ...restrictions];
 }
 
+function parseCliOutput(rawText) {
+  try {
+    return { plan: extractJsonPlan(rawText) };
+  } catch (error) {
+    // Some CLI configurations return a JSON envelope or a JSONL event stream.
+    let records;
+    try {
+      records = [JSON.parse(rawText)];
+    } catch {
+      records = rawText.split('\n').flatMap((line) => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      });
+    }
+    const output = {};
+    let finalResponse;
+    for (const record of records) {
+      if (!record || typeof record !== 'object') continue;
+      output.sessionId = record.session_id ?? record.sessionId ?? record.thread_id ?? output.sessionId;
+      output.usage = record.usage ?? output.usage;
+      output.costUsd = record.total_cost_usd ?? record.cost_usd ?? record.costUsd ?? output.costUsd;
+      const response = record.result ?? record.output ?? record.plan
+        ?? (record.type === 'item.completed' && record.item?.type === 'agent_message' ? record.item.text : undefined);
+      if (response !== undefined) finalResponse = response;
+    }
+    if (finalResponse === undefined) throw error;
+    const plan = typeof finalResponse === 'string' ? extractJsonPlan(finalResponse) : validateDreamPlan(finalResponse);
+    return { ...output, plan };
+  }
+}
+
 export function createCliLlmRunner({
   orchestrator, command, args, model, timeoutMs = 120_000, spawnImpl = spawn, env = process.env,
 } = {}) {
@@ -290,8 +324,8 @@ export function createCliLlmRunner({
             reject(failure('process-exit', signal ?? (Number.isInteger(code) ? 'code ' + code : undefined)));
           } else {
             try {
-              const plan = extractJsonPlan(Buffer.concat(stdout).toString('utf8'));
-              resolve({ plan, runner, model: model ?? null });
+              const output = parseCliOutput(Buffer.concat(stdout).toString('utf8'));
+              resolve({ ...output, runner, model: model ?? null });
             } catch {
               reject(failure('invalid-output'));
             }

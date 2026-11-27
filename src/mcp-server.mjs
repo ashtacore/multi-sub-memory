@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { loadSkills } from '@modelcontextprotocol/server/ext/skills/node';
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
+import { createTelemetryRecorder } from './analytics/telemetry.mjs';
 import { formatBootstrap } from './bootstrap.mjs';
 import { loadConfig } from './config.mjs';
 import { openDatabase } from './db.mjs';
@@ -12,7 +13,7 @@ import { runIndexers } from './indexers/runner.mjs';
 import {
   MEMORY_CATEGORIES, MEMORY_SCOPES, MEMORY_STATUSES, NOTE_STATUSES,
   addNoteComment, archiveMemory, dismissNote, getMemory, getNote, listMemories, listNoteComments, readNotes,
-  readWithAccess, recordAccess, updateMemory, updateNote, writeMemory, writeNote,
+  readWithAccess, recordAccess, resolveCachedProjectKey, updateMemory, updateNote, writeMemory, writeNote,
 } from './memory-service.mjs';
 import { MEMORY_GUIDE_URI, readMemoryGuide } from './memory-guide.mjs';
 import { hybridSearch, SEARCH_ORCHESTRATORS, SEARCH_SCOPES, SEARCH_SOURCES } from './search.mjs';
@@ -38,19 +39,69 @@ function textResult(text) {
   return { content: [{ type: 'text', text }] };
 }
 
-function toolHandler(run, format = JSON.stringify) {
-  return async (input) => {
-    try {
-      return textResult(format(await run(input)));
-    } catch (error) {
-      return { ...textResult(error instanceof Error ? error.message : String(error)), isError: true };
-    }
-  };
+const MEMORY_ACTIONS = { get: 'mem_get', write: 'mem_remember' };
+
+function publicRecord({ tokens_est, compaction_count, dreamer_touched_at, ...record }) {
+  return record;
 }
 
-export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
+function formatRecordResult(output) {
+  if (Array.isArray(output)) return JSON.stringify(output.map(publicRecord));
+  if (output.memory) return JSON.stringify({ ...output, memory: publicRecord(output.memory) });
+  if (output.note) return JSON.stringify({ ...output, note: publicRecord(output.note) });
+  return JSON.stringify(publicRecord(output));
+}
+
+export function createMcpServer({ db, config, embeddingEngine, defaultCwd,
+  telemetry = createTelemetryRecorder(db, { retentionDays: config?.analytics?.retention_days }),
+}) {
   const server = new McpServer({ name: 'multi-sub-memory', version: '0.1.0' });
-  const context = { config, embeddingEngine, defaultCwd, trackAccess: true };
+  const context = { config, embeddingEngine, defaultCwd, trackAccess: true, deferAnalytics: telemetry.defer };
+
+  function toolHandler(name, run, format = JSON.stringify) {
+    return async (input) => {
+      const start = performance.now();
+      let output;
+      let result;
+      try {
+        output = await run(input);
+        result = textResult(format(output));
+      } catch (error) {
+        result = { ...textResult(error instanceof Error ? error.message : String(error)), isError: true };
+      }
+      const durationMs = performance.now() - start;
+      const createdAt = Date.now();
+      telemetry.defer(() => {
+        const toolName = (name === 'mem_memory' && MEMORY_ACTIONS[input.action]) || name;
+        let projectKey = output?.projectKey ?? (name === 'mem_search' ? output?.project_key : undefined);
+        if (!projectKey) {
+          try {
+            projectKey = resolveCachedProjectKey(input.cwd ?? defaultCwd, config, { optional: true })?.projectKey;
+          } catch {
+            // An invalid checkout still produces a tool event.
+          }
+        }
+        projectKey ??= output?.memory?.project_key ?? output?.project_key ?? 'global';
+        let returnedMemories;
+        if (name === 'mem_search' && output) {
+          returnedMemories = output.results.flatMap(({ id, source }, index) =>
+            source === 'memory' ? [{ id, rank: index + 1 }] : []);
+        }
+        if (name === 'mem_bootstrap' && output) {
+          returnedMemories = output.includedMemoryIds.map((id, index) => ({ id, rank: index + 1 }));
+        }
+        const resultCount = output?.results?.length ?? output?.messages?.length
+          ?? (name === 'mem_bootstrap' && output ? output.includedMemories + output.includedNotes : undefined)
+          ?? (Array.isArray(output) ? output.length : Number(output != null));
+        return {
+          toolName, projectKey, durationMs, createdAt, resultCount, returnedMemories,
+          responseText: result.content[0].text, error: Boolean(result.isError),
+          targetMemoryId: toolName === 'mem_get' ? input.id ?? null : null, query: input.query,
+        };
+      });
+      return result;
+    };
+  }
 
   server.registerResource('memory-guide', MEMORY_GUIDE_URI, {
     title: 'Memory guide', mimeType: 'text/markdown',
@@ -74,7 +125,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       tag: z.string().describe('Tag filter for list.').optional(),
       limit: z.number().int().optional(),
     }),
-  }, toolHandler((input) => {
+  }, toolHandler('mem_memory', (input) => {
     switch (input.action) {
       case 'write':
         return writeMemory(db, input, context);
@@ -92,7 +143,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       case 'list':
         return readWithAccess(db, 'memories', () => listMemories(db, input, context));
     }
-  }));
+  }, formatRecordResult));
 
   server.registerTool('mem_note', {
     description: 'Write or read handoff topics, get a topic with paginated comments, update a topic, append a progress comment, or dismiss a topic. Status changes and dismiss require a nonblank comment. Get, update, comment, and dismiss require id.',
@@ -107,7 +158,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       surface_condition: z.string().nullable().optional(),
       include_global: z.boolean().optional(),
     }),
-  }, toolHandler((input) => {
+  }, toolHandler('mem_note', (input) => {
     const noteMutation = { expectedUpdatedAt: input.expected_updated_at, trackAccess: context.trackAccess };
     switch (input.action) {
       case 'write':
@@ -133,7 +184,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
         requireId(input);
         return dismissNote(db, input, noteMutation);
     }
-  }));
+  }, formatRecordResult));
 
   server.registerTool('mem_bootstrap', {
     description: 'Return a token-budgeted summary of active project and global memories and project handoff notes.',
@@ -142,8 +193,8 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       token_budget: z.number().int().positive().optional(),
       include_notes: z.boolean().optional(),
     }),
-  }, toolHandler(({ cwd, token_budget, include_notes }) => formatBootstrap(db, {
-    cwd, defaultCwd, config, tokenBudget: token_budget, includeNotes: include_notes, recordAccess: true,
+  }, toolHandler('mem_bootstrap', ({ cwd, token_budget, include_notes }) => formatBootstrap(db, {
+    cwd, defaultCwd, config, tokenBudget: token_budget, includeNotes: include_notes, recordAccess: true, includeMemoryIds: true,
   }), ({ text }) => text));
 
   server.registerTool('mem_search', {
@@ -158,7 +209,7 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       since: z.string().describe('Include records at or after this ISO 8601 date or timestamp.').optional(),
       limit: z.number().describe('Defaults to 10 and is clamped to 1–50.').optional(),
     }),
-  }, toolHandler(async (input) => {
+  }, toolHandler('mem_search', async (input) => {
     const search = await hybridSearch(db, { ...input, ...context });
     const memories = [];
     const notes = [];
@@ -181,8 +232,12 @@ export function createMcpServer({ db, config, embeddingEngine, defaultCwd }) {
       line_end: z.number().int().positive().optional(),
       max_chars: z.number().int().positive().describe('Combined JSON length of returned message records. Defaults to 16,000 characters.').optional(),
     }),
-  }, toolHandler((input) => expandSession(db, input)));
+  }, toolHandler('mem_expand', (input) => expandSession(db, input)));
 
+  const close = server.close.bind(server);
+  server.close = async () => {
+    try { await close(); } finally { telemetry.close(); }
+  };
   return server;
 }
 
@@ -192,6 +247,7 @@ export async function startStdioServer({ cwd, config, db, embeddingEngine } = {}
   const input = process.stdin;
   const refreshAbort = new AbortController();
   let server;
+  let telemetry;
   let shutdown;
   let initialRefresh;
   let periodicRefresh;
@@ -210,6 +266,7 @@ export async function startStdioServer({ cwd, config, db, embeddingEngine } = {}
         try {
           await refreshing;
         } finally {
+          telemetry?.close();
           if (!db) database.close();
         }
       }
@@ -229,7 +286,9 @@ export async function startStdioServer({ cwd, config, db, embeddingEngine } = {}
     const engine = embeddingEngine ?? createEmbeddingEngine({ embedding: settings.embedding });
     const transport = new StdioServerTransport(input, process.stdout);
     server = serveStdio(async ({ era }) => {
+      telemetry = createTelemetryRecorder(database, { retentionDays: settings.analytics?.retention_days });
       const mcp = createMcpServer({
+        telemetry,
         db: database,
         config: settings,
         embeddingEngine: engine,

@@ -1,3 +1,5 @@
+import { normalizeUsage } from '../analytics/ccusage.mjs';
+import { accessesPerWeek, recordDreamerEvent } from '../analytics/dreamer-events.mjs';
 import { randomUUID } from 'node:crypto';
 import { acquireLease, hashNormalizedContent, releaseLease } from '../db.mjs';
 import { DEFAULT_EMBEDDING_MODEL } from '../embeddings.mjs';
@@ -340,17 +342,21 @@ function mergeDreamMetadata(previousJson, dreamPatch) {
 function applyOperations(db, { projectKey, runId, memories, prepared, txNow }) {
   const insert = db.prepare(`
     INSERT INTO memories (id, project_key, scope, category, content, normalized_hash, importance,
-      source_orchestrator, metadata_json, created_at, updated_at, last_accessed_at, access_count)
-    VALUES (?, ?, 'project', ?, ?, ?, ?, 'dreamer', ?, ?, ?, ?, ?)
+      source_orchestrator, metadata_json, created_at, updated_at, last_accessed_at, access_count, compaction_count, dreamer_touched_at)
+    VALUES (?, ?, 'project', ?, ?, ?, ?, 'dreamer', ?, ?, ?, ?, ?, ?, ?)
   `);
   const merge = db.prepare(`
     UPDATE memories SET content = ?, category = ?, importance = ?, status = 'active', superseded_by = NULL,
       source_orchestrator = 'dreamer', source_session_id = NULL, metadata_json = ?, updated_at = MAX(?, updated_at + 1),
-      last_accessed_at = ?, access_count = ? WHERE id = ?
+      last_accessed_at = ?, access_count = ?, compaction_count = ?, dreamer_touched_at = ? WHERE id = ?
   `);
   const mergeAccess = db.prepare(`
-    SELECT MAX(last_accessed_at) AS last_accessed_at, SUM(access_count) AS access_count
+    SELECT id, created_at, last_accessed_at, access_count, compaction_count
     FROM memories WHERE id IN (SELECT value FROM json_each(?)) OR id = ?
+  `);
+  const previousCompaction = db.prepare(`
+    SELECT created_at, target_access_count_at_event FROM dreamer_memory_events
+    WHERE memory_id = ? AND event_type = 'compacted' ORDER BY created_at DESC, id DESC LIMIT 1
   `);
   const inheritTags = db.prepare(`
     INSERT INTO memory_tags (memory_id, tag)
@@ -362,14 +368,16 @@ function applyOperations(db, { projectKey, runId, memories, prepared, txNow }) {
     LIMIT (5 - (SELECT COUNT(*) FROM memory_tags WHERE memory_id = ?))
   `);
   const supersede = db.prepare(`
-    UPDATE memories SET status = 'superseded', superseded_by = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ?
+    UPDATE memories SET status = 'superseded', superseded_by = ?, updated_at = MAX(?, updated_at + 1),
+      dreamer_touched_at = ? WHERE id = ?
   `);
   const archive = db.prepare(`
-    UPDATE memories SET status = 'archived', metadata_json = ?, updated_at = MAX(?, updated_at + 1) WHERE id = ?
+    UPDATE memories SET status = 'archived', metadata_json = ?, updated_at = MAX(?, updated_at + 1),
+      dreamer_touched_at = ? WHERE id = ?
   `);
   const update = db.prepare(`
-    UPDATE memories SET content = ?, normalized_hash = ?, category = ?, importance = ?, metadata_json = ?, updated_at = MAX(?, updated_at + 1)
-    WHERE id = ?
+    UPDATE memories SET content = ?, normalized_hash = ?, category = ?, importance = ?, metadata_json = ?, updated_at = MAX(?, updated_at + 1),
+      dreamer_touched_at = ? WHERE id = ?
   `);
   const pendingEmbeddings = [];
   const runMetadata = { dream_run_id: runId };
@@ -382,24 +390,41 @@ function applyOperations(db, { projectKey, runId, memories, prepared, txNow }) {
         const metadata = mergeDreamMetadata(target?.metadata_json, {
           ...runMetadata, merged_from: op.source_ids, merge_reason: op.reason,
         });
-        const { last_accessed_at, access_count } = mergeAccess.get(JSON.stringify(op.source_ids), target?.id ?? null);
+        const sources = mergeAccess.all(JSON.stringify(op.source_ids), target?.id ?? null);
+        const sourceIds = [...new Set([...op.source_ids, ...sources.map((source) => source.id)])];
+        const compactionCount = 1 + Math.max(...sources.map((source) => source.compaction_count));
+        const sourceRate = sources.reduce((total, source) => {
+          const previous = source.compaction_count > 0 ? previousCompaction.get(source.id) : null;
+          const baseline = previous?.target_access_count_at_event ?? 0;
+          return total + accessesPerWeek(Math.max(0, source.access_count - baseline), previous?.created_at ?? source.created_at, txNow);
+        }, 0);
+        const accessCount = sources.reduce((total, source) => total + source.access_count, 0);
+        const lastAccessedAt = sources.reduce((latest, source) =>
+          source.last_accessed_at === null ? latest : Math.max(latest ?? 0, source.last_accessed_at), null);
         if (target) {
-          merge.run(op.content, category, importance, metadata, txNow, last_accessed_at, access_count, id);
+          merge.run(op.content, category, importance, metadata, txNow, lastAccessedAt, accessCount, compactionCount, txNow, id);
           if (target.content !== op.content) invalidateEmbedding(db, id);
         } else {
-          insert.run(id, projectKey, category, op.content, hash, importance, metadata, txNow, txNow, last_accessed_at, access_count);
+          insert.run(id, projectKey, category, op.content, hash, importance, metadata, txNow, txNow, lastAccessedAt, accessCount, compactionCount, txNow);
         }
         inheritTags.run(id, JSON.stringify(op.source_ids), id, id);
         for (const sourceId of op.source_ids) {
-          if (sourceId !== id) supersede.run(id, txNow, sourceId);
+          if (sourceId !== id) supersede.run(id, txNow, txNow, sourceId);
         }
+        recordDreamerEvent(db, {
+          projectKey, runId, memoryId: id, type: 'compacted', sourceIds, sourceRate,
+          compactionCount, accessCount, now: txNow,
+        });
         pendingEmbeddings.push({ id, content: op.content });
         break;
       }
       case 'archive': {
         const existing = memories.get(op.id);
         const metadata = mergeDreamMetadata(existing.metadata_json, { ...runMetadata, archive_reason: op.reason });
-        archive.run(metadata, txNow, op.id);
+        archive.run(metadata, txNow, txNow, op.id);
+        recordDreamerEvent(db, {
+          projectKey, runId, memoryId: op.id, type: 'archived', compactionCount: existing.compaction_count, now: txNow,
+        });
         break;
       }
       case 'update': {
@@ -409,7 +434,7 @@ function applyOperations(db, { projectKey, runId, memories, prepared, txNow }) {
           ...runMetadata, ...(op.reason === undefined ? {} : { update_reason: op.reason }),
         });
         update.run(content, hash ?? existing.normalized_hash, op.category ?? existing.category,
-          op.importance ?? existing.importance, metadata, txNow, op.id);
+          op.importance ?? existing.importance, metadata, txNow, txNow, op.id);
         if (content !== existing.content) invalidateEmbedding(db, op.id);
         pendingEmbeddings.push({ id: op.id, content });
         break;
@@ -417,7 +442,7 @@ function applyOperations(db, { projectKey, runId, memories, prepared, txNow }) {
       case 'add': {
         const id = generateId();
         const metadata = JSON.stringify({ ...runMetadata, reason: op.reason });
-        insert.run(id, projectKey, op.category ?? 'GENERAL', op.content, hash, op.importance ?? 3, metadata, txNow, txNow, null, 0);
+        insert.run(id, projectKey, op.category ?? 'GENERAL', op.content, hash, op.importance ?? 3, metadata, txNow, txNow, null, 0, 0, txNow);
         pendingEmbeddings.push({ id, content: op.content });
         break;
       }
@@ -446,6 +471,8 @@ export async function runDream({
   let runnerName = runner ? 'custom' : settings.mode === 'cli' ? 'cli:' + settings.cli?.orchestrator : settings.mode;
   let model = runner ? null : settings[settings.mode]?.model ?? null;
   let memoriesReviewed = 0;
+  let sessionId = null;
+  let usage = normalizeUsage();
   let heartbeat;
   let leaseError;
   function record(status, {
@@ -453,10 +480,11 @@ export async function runDream({
   } = {}) {
     db.prepare(`
       INSERT INTO dream_runs (id, project_key, runner, model, status, memories_reviewed,
-        memories_merged, memories_archived, summary, error, started_at, finished_at, last_transcript_message_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        memories_merged, memories_archived, summary, error, started_at, finished_at, last_transcript_message_id,
+        session_id, input_tokens, output_tokens, cost_usd)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(runId, projectKey, runnerName, model, status, memoriesReviewed, merged, archived, summary, error,
-      startedAt, finishedAt, transcriptMessageId);
+      startedAt, finishedAt, transcriptMessageId, sessionId, usage.inputTokens, usage.outputTokens, usage.costUsd);
   }
   try {
     if (automatic && !shouldTriggerAutoDream(db, config, projectKey, startedAt)) {
@@ -483,6 +511,8 @@ export async function runDream({
     const output = await run({ systemPrompt, userPrompt });
     runnerName = output.runner ?? runnerName;
     model = output.model ?? null;
+    sessionId = typeof (output.sessionId ?? output.session_id) === 'string' ? (output.sessionId ?? output.session_id) : null;
+    usage = normalizeUsage(output.usage, output.costUsd ?? output.cost_usd);
     const plan = validateDreamPlan(output.plan);
     const summary = createDreamRedactor(env, settings?.http?.apiKeyEnv)(plan.summary);
     if (transcriptCount === 0 && plan.operations.some(({ type }) => type === 'add')) {

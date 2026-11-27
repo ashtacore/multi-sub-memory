@@ -1,3 +1,4 @@
+import { analyticsFilters, bindAnalyticsControls, renderAnalytics } from './analytics.js';
 import { api } from './api.js';
 import { addOptions, byId, node } from './dom.js';
 import { dreamResult, renderDream, renderDreamControls } from './dreamer.js';
@@ -244,7 +245,9 @@ async function refreshView({ quiet = false, append = false } = {}) {
   viewRequest = request;
   const current = view;
   const panel = byId('view-' + current);
-  const params = { project_key: projectSelect.value };
+  const params = current === 'analytics'
+    ? analyticsFilters(projectSelect.value)
+    : { project_key: projectSelect.value };
   if (current === 'memories') {
     syncMemorySort();
     Object.assign(params, {
@@ -272,7 +275,12 @@ async function refreshView({ quiet = false, append = false } = {}) {
   if (current === 'dreamer') {
     Object.assign(params, { status: dreamStatus, sort: dreamSort, order: dreamOrder });
   }
-  if (current !== 'dreamer' && !append) {
+  if (current === 'analytics') {
+    byId('analytics-report').replaceChildren();
+    byId('analytics-status').textContent = 'Loading analytics…';
+    byId('analytics-export-error').hidden = true;
+  }
+  if ((current === 'memories' || current === 'notes') && !append) {
     const key = new URLSearchParams(params).toString();
     if (recordQueries.get(current) !== key) {
       recordQueries.set(current, key);
@@ -297,6 +305,10 @@ async function refreshView({ quiet = false, append = false } = {}) {
       updateDreamControls();
       return;
     }
+    if (current === 'analytics') {
+      renderAnalytics(data);
+      return;
+    }
     const kind = current === 'memories' ? 'memory' : 'note';
     const heading = byId(current + '-heading');
     const firstAdded = renderRecords(byId(kind + '-list'), data[current], kind, {
@@ -319,6 +331,7 @@ async function refreshView({ quiet = false, append = false } = {}) {
     if (!request.signal.aborted) {
       showError('view', error);
       if (current === 'memories') memoryCount.textContent = 'Results unavailable';
+      if (current === 'analytics') byId('analytics-status').textContent = 'Analytics unavailable';
       if (current === 'notes' && !byId('note-list').querySelector('article')) byId('note-list').replaceChildren();
       if (current === 'dreamer') {
         dreamData = undefined;
@@ -392,6 +405,7 @@ projectSelect.addEventListener('change', () => {
   updateDreamControls();
   void refreshView();
 });
+bindAnalyticsControls(projectSelect, refreshView);
 search.addEventListener('input', scheduleSearch);
 memTag.addEventListener('input', scheduleSearch);
 for (const id of ['mem-scope', 'mem-category', 'mem-status', 'mem-sort', 'note-sort']) {
