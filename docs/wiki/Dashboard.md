@@ -84,6 +84,39 @@ open the app from source. Build on Windows with
   proposed comment compactions.
   [Dreamer configuration and trust](Dreamer.md)
 
+## Analytics
+
+The Analytics view uses the dashboard's Project selector. **All Projects**
+includes global records, and **Global** restricts the report to global records.
+**Refresh** reloads the selected report. Comparisons use complete UTC periods:
+**7 Days** shows seven days, **3 Weeks** shows three Monday-to-Sunday weeks,
+and **2 Months** shows either the last two **Calendar Months** or two
+**Rolling 30-Day** buckets ending at the start of the current UTC day.
+The report flags buckets that extend beyond the telemetry retention period.
+
+- **Output Quality** shows retrieval conversion, mean reciprocal rank,
+  zero-hit and repeat searches, call volume, and the origin of memory gets.
+  Unused memory share and estimated token sizes describe the current stored corpus.
+- **Total Task Cost** compares sessions with no, light, or heavy memory use
+  using local usage matched by session. Codex rollout paths are matched by
+  their session UUID. Inferred matches require a single plausible session
+  within one minute of each call. Task complexity can affect which cohort
+  a session lands in and how much it costs. Missing usage leaves the affected
+  metrics as an em dash while the other report sections remain available.
+- **Speed & Tokens** compares average and 95th-percentile latency and estimated
+  response tokens for each recorded tool or memory action. The memory detour
+  uses indexed transcript timestamps from a search or get, including
+  `mem_memory` with action `get`, through the tool result and next assistant turn.
+- **Dreamer Performance** shows recorded run costs and usage, compaction depth and
+  churn, and [quality signals](Dreamer.md#analytics). Resurrection, human undo,
+  and human edit metrics show counts and rates. The rate is unavailable when
+  there is no eligible population.
+
+**Export JSON** downloads the structured report with pseudonymized record
+identifiers. **Export Markdown** downloads a compact digest. Both exports use
+the active filters and omit memory text, transcript text, and session IDs.
+They can be shared for AI analysis.
+
 ## Dreamer checkouts
 
 The dashboard finds checkout roots from current and past project writes, indexed
@@ -113,7 +146,8 @@ the selected repository's embedding settings.
 
 ## HTTP API
 
-All API responses use JSON. List limits default to 100 and are capped at 200.
+API responses use JSON, with Markdown available for analytics exports.
+List limits default to 100 and are capped at 200.
 Omit `project_key` or use `all` for all projects, including global entries.
 Use `global` for global rows alone.
 
@@ -133,6 +167,9 @@ Use `global` for global rows alone.
 | `DELETE /api/notes/:id/comments/:commentId` | Removes a progress comment and advances the topic revision. Accepts an optional comment `expected_updated_at` query parameter. Deleting a transition comment returns 400. |
 | `GET /api/dreamer` | Active leases, fresh sanitized configuration with `config_fingerprint` and runner authorization, the selected project’s verified `checkouts` in default-first order, its `runnable_project_key` when a checkout is available, and up to 50 runs. History supports `project_key`, `status`, `sort` (`started_at`, `finished_at`, or `duration`), and `order` (`asc` or `desc`). |
 | `POST /api/dreamer/run` | Requires a repository `project_key`. Accepts an optional absolute `checkout` path, boolean `dry_run`, and string `expected_config_fingerprint`. Omit `checkout` to use the first verified checkout. An invalid supplied path returns 400. A fingerprint mismatch returns 409 before contacting the runner. Returns the run result or a skip reason. |
+
+| `GET /api/analytics` | Report and bucket series. Accepts `project` (`all`, `global`, or a project key), `window` (`7d`, `3w`, `2m`), and `monthMode` (`calendar`, `rolling30`). |
+| `GET /api/analytics/export` | Downloads the report using the same filters and `format` (`json` or `markdown`). |
 
 Record PATCH routes use the supplied fields to update the stored row.
 A project memory keeps its existing assignment when a PATCH specifies

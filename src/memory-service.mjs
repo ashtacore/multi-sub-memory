@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { recordDreamerEvent, recordResurrection } from './analytics/dreamer-events.mjs';
 import { hashNormalizedContent } from './db.mjs';
 import { maybeTriggerAutoDream } from './dreamer/trigger.mjs';
 import { encodeFloat32Vector } from './embeddings.mjs';
@@ -99,6 +100,10 @@ export function normalizeTag(value) {
       '. Use 1-48 characters in lowercase alphanumeric groups separated by single hyphens.');
   }
   return tag;
+}
+
+function isSameTags(first, second) {
+  return first.length === second.length && first.every((tag, index) => tag === second[index]);
 }
 
 function normalizeTags(values) {
@@ -297,23 +302,25 @@ export async function writeMemory(db, input, context = {}) {
   const hash = hashNormalizedContent(content);
   const tags = input.tags === undefined ? undefined : normalizeTags(input.tags);
   const descriptions = tagDescriptions(input);
+  let resurrection;
   const result = inWriteTransaction(db, () => {
     const now = Date.now();
     recordProject(db, projectKey, projectRoot, now);
     const row = db.prepare(`
       INSERT INTO memories (
         id, project_key, scope, category, content, normalized_hash, importance,
-        source_orchestrator, source_session_id, metadata_json, created_at, updated_at, last_accessed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_orchestrator, source_session_id, metadata_json, created_at, updated_at, last_accessed_at, tokens_est
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (length(?) + 3) / 4)
       ON CONFLICT (project_key, scope, normalized_hash) DO NOTHING
       RETURNING *
     `).get(
       generateId(), projectKey, scope, category, content, hash, importance,
       input.source_orchestrator ?? null, input.source_session_id ?? null,
-      mergeMetadata(null, input.metadata), now, now, now,
+      mergeMetadata(null, input.metadata), now, now, now, content,
     );
     if (row) {
       setMemoryTags(db, row, tags ?? [], context.config, descriptions);
+      if (context.trackAccess) resurrection = { memory: row, now };
       return { memory: formatMemory(db, row), deduplicated: false, reactivated: false };
     }
 
@@ -322,21 +329,27 @@ export async function writeMemory(db, input, context = {}) {
     `).get(projectKey, scope, hash);
     const reactivated = existing.status !== 'active';
     const updated = db.prepare(`
-      UPDATE memories SET content = ?, category = ?, importance = ?, status = 'active',
+      UPDATE memories SET content = ?, tokens_est = (length(?) + 3) / 4, category = ?, importance = ?, status = 'active',
         superseded_by = NULL, source_orchestrator = ?, source_session_id = ?,
         metadata_json = ?, updated_at = MAX(?, updated_at + 1)
       WHERE id = ? RETURNING *
     `).get(
-      reactivated ? content : existing.content, input.category ?? existing.category,
+      reactivated ? content : existing.content, reactivated ? content : existing.content, input.category ?? existing.category,
       input.importance ?? existing.importance, input.source_orchestrator ?? existing.source_orchestrator,
       input.source_session_id ?? existing.source_session_id, mergeMetadata(existing.metadata_json, input.metadata),
       now, existing.id,
     );
     if (updated.content !== existing.content) invalidateEmbedding(db, existing.id);
+    if (reactivated && context.trackAccess) resurrection = { memory: updated, now, previous: existing };
     if (tags !== undefined) setMemoryTags(db, updated, tags, context.config, descriptions);
     const memory = formatMemory(db, trackMutationAccess(db, 'memories', updated, context.trackAccess));
     return { memory, deduplicated: true, reactivated };
   });
+  if (resurrection) {
+    const observe = (analyticsDb) => recordResurrection(analyticsDb, resurrection.memory, resurrection);
+    if (context.deferAnalytics) context.deferAnalytics(observe);
+    else observe(db);
+  }
   if (!result.deduplicated || result.reactivated) {
     void storeEmbedding(db, result.memory, context.embeddingEngine);
   }
@@ -393,9 +406,12 @@ export async function updateMemory(db, input, context = {}) {
         throw new Error('Use archive with superseded_by to mark a memory as superseded');
       }
       const changedContent = content !== undefined && content !== existing.content;
+      const now = Date.now();
+      const editedTags = context.trackDreamerEdits && tags !== undefined && !isSameTags(memoryTags(db, existing.id), tags);
       const row = db.prepare(`
         UPDATE memories SET project_key = ?, scope = ?, content = ?, normalized_hash = ?,
-          category = ?, importance = ?, status = ?, superseded_by = ?, metadata_json = ?, updated_at = MAX(?, updated_at + 1)
+          category = ?, importance = ?, status = ?, superseded_by = ?, metadata_json = ?, updated_at = MAX(?, updated_at + 1),
+          tokens_est = (length(?) + 3) / 4
         WHERE id = ? RETURNING *
       `).get(
         projectKey, scope, content ?? existing.content,
@@ -403,11 +419,22 @@ export async function updateMemory(db, input, context = {}) {
         input.category ?? existing.category, input.importance ?? existing.importance, status,
         input.status === undefined || status === 'superseded' ? existing.superseded_by : null,
         input.metadata === undefined ? existing.metadata_json : JSON.stringify(input.metadata),
-        Date.now(), input.id,
+        now, content ?? existing.content, input.id,
       );
       if (changedContent) invalidateEmbedding(db, input.id);
       if (tags !== undefined || projectKey !== existing.project_key) {
         setMemoryTags(db, row, tags ?? normalizeTags(memoryTags(db, row.id)), context.config, descriptions);
+      }
+      if (context.trackDreamerEdits && existing.dreamer_touched_at !== null) {
+        const event = { projectKey, memoryId: row.id, compactionCount: row.compaction_count, now };
+        if (existing.status !== 'active' && status === 'active') {
+          recordDreamerEvent(db, { ...event, type: 'human_undo' });
+        }
+        if (changedContent || editedTags || row.category !== existing.category || row.importance !== existing.importance
+          || row.project_key !== existing.project_key || row.scope !== existing.scope
+          || row.metadata_json !== existing.metadata_json || (status !== existing.status && status !== 'active')) {
+          recordDreamerEvent(db, { ...event, type: 'human_edit' });
+        }
       }
       const accessed = trackMutationAccess(db, 'memories', row, context.trackAccess);
       const memory = context.rawRow ? { ...accessed, tags: memoryTags(db, row.id) } : formatMemory(db, accessed);
@@ -496,11 +523,11 @@ export function writeNote(db, input, context = {}) {
     return db.prepare(`
       INSERT INTO notes (
         id, project_key, status, content, surface_condition, source_orchestrator,
-        source_session_id, created_at, updated_at, last_accessed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
+        source_session_id, created_at, updated_at, last_accessed_at, tokens_est
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (length(?) + 3) / 4) RETURNING *
     `).get(
       generateId(), projectKey, status, content, input.surface_condition ?? null,
-      input.source_orchestrator ?? null, input.source_session_id ?? null, now, now, now,
+      input.source_orchestrator ?? null, input.source_session_id ?? null, now, now, now, content,
     );
   });
 }
@@ -619,11 +646,11 @@ export function updateNote(db, input, { expectedUpdatedAt, trackAccess } = {}) {
     }
 
     const note = db.prepare(`
-      UPDATE notes SET content = ?, status = ?,
+      UPDATE notes SET content = ?, tokens_est = (length(?) + 3) / 4, status = ?,
         surface_condition = CASE WHEN ? THEN ? ELSE surface_condition END, updated_at = MAX(?, updated_at + 1)
       WHERE id = ? RETURNING *
     `).get(
-      content, input.status ?? existing.status, Number(input.surface_condition !== undefined),
+      content, content, input.status ?? existing.status, Number(input.surface_condition !== undefined),
       input.surface_condition ?? null, now, input.id,
     );
     return trackMutationAccess(db, 'notes', note, trackAccess);

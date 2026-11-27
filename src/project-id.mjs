@@ -129,12 +129,12 @@ function discoverProject(cwd, deadline) {
   };
 }
 
-export function resolveProjectKey(cwd = process.cwd(), { timeoutMs, optional = false, forkMode, projects, cache = false } = {}) {
+export function resolveProjectKey(cwd = process.cwd(), { timeoutMs, optional = false, forkMode, projects, cache = false, cacheOnly = false } = {}) {
   const deadline = timeoutMs === undefined ? undefined : performance.now() + timeoutMs;
   const directory = path.resolve(cwd);
-  const cached = cache ? projectCache.get(directory) : undefined;
+  const cached = cache || cacheOnly ? projectCache.get(directory) : undefined;
   const hit = cached && cached.expiresAt > performance.now();
-  const git = hit ? cached.git : discoverProject(directory, deadline);
+  const git = hit ? cached.git : cacheOnly ? undefined : discoverProject(directory, deadline);
   if (cache && !hit && git) {
     projectCache.delete(directory);
     if (projectCache.size >= 64) projectCache.delete(projectCache.keys().next().value);

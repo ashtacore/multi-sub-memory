@@ -43,14 +43,19 @@ function sqlStatements(db) {
     deleteFile: db.prepare('DELETE FROM transcript_files WHERE id = ?'),
     nextSeq: db.prepare('SELECT COALESCE(MAX(seq) + 1, 0) AS nextSeq FROM transcript_messages WHERE file_id = ?'),
     clearMessages: db.prepare('DELETE FROM transcript_messages WHERE file_id = ?'),
+    clearToolActivity: db.prepare('DELETE FROM transcript_tool_activity WHERE file_id = ?'),
+    markToolActivity: db.prepare('UPDATE transcript_files SET tool_activity_indexed = 1 WHERE id = ?'),
+    addToolActivity: db.prepare(`
+      INSERT INTO transcript_tool_activity (file_id, line_no, timestamp, activity_json) VALUES (?, ?, ?, ?)
+    `),
     addFile: db.prepare(`
       INSERT INTO transcript_files (file_path, orchestrator, session_id, project_key, project_root, mtime_ms, byte_offset,
-        line_count, file_identity, checkpoint_hash, file_size, last_indexed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        line_count, file_identity, checkpoint_hash, file_size, last_indexed_at, tool_activity_indexed)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     updateFile: db.prepare(`
       UPDATE transcript_files SET session_id = ?, project_key = ?, project_root = ?, mtime_ms = ?, byte_offset = ?,
-        line_count = ?, file_identity = ?, checkpoint_hash = ?, file_size = ?, last_indexed_at = ?
+        line_count = ?, file_identity = ?, checkpoint_hash = ?, file_size = ?, last_indexed_at = ?, tool_activity_indexed = ?
       WHERE id = ?
     `),
     addMessage: db.prepare(`
@@ -111,6 +116,11 @@ export async function runIndexers({
 
     const sql = sqlStatements(db);
     const projects = new Map();
+    function storeToolActivity(fileId, records) {
+      for (const { lineNo, timestamp, events } of records ?? []) {
+        sql.addToolActivity.run(fileId, lineNo, normalizeTranscriptTimestamp(timestamp), JSON.stringify(events));
+      }
+    }
     function projectFor(cwd) {
       if (!projects.has(cwd)) projects.set(cwd, resolveConfigProject(cwd, config, { optional: true }));
       return projects.get(cwd);
@@ -155,15 +165,34 @@ export async function runIndexers({
         const sameSize = existing && fileSize === (existing.file_size ?? existing.byte_offset);
         const fileIdentity = transcriptFileIdentity(stat);
         const replaced = existing?.file_identity != null && existing.file_identity !== fileIdentity;
+        const fullMeta = { sessionsDir, signal };
+        let parsedFull;
         if (existing && !replaced && sameSize && Number(stat.mtimeMs) === existing.mtime_ms) {
-          summary.filesSkipped++;
-          return true;
+          if (existing.tool_activity_indexed || !BUILTIN_ADAPTERS.includes(adapter)) {
+            summary.filesSkipped++;
+            return true;
+          }
+          // Backfill old stable files without replacing their message IDs or Dreamer cursors.
+          parsedFull = await adapter.parseIncremental(filePath, 0, fullMeta);
+          renewIfDue();
+          if (signal?.aborted || leaseLost) return;
+          if (parsedFull.recognized !== false && parsedFull.newByteOffset === existing.byte_offset
+            && (existing.checkpoint_hash == null || parsedFull.checkpointHash === existing.checkpoint_hash)) {
+            inTransaction(db, () => {
+              renewIfDue();
+              if (leaseLost) return;
+              sql.clearToolActivity.run(existing.id);
+              storeToolActivity(existing.id, parsedFull.toolActivity);
+              sql.markToolActivity.run(existing.id);
+            });
+            summary.filesSkipped++;
+            return !leaseLost;
+          }
         }
-        let reindex = Boolean(existing && (replaced || fileSize <= existing.byte_offset
+        let reindex = Boolean(existing && (parsedFull || replaced || fileSize <= existing.byte_offset
           || (existing.byte_offset > 0 && existing.checkpoint_hash == null)));
         const offset = existing && !reindex ? existing.byte_offset : 0;
-        const fullMeta = { sessionsDir, signal };
-        let parsed = await adapter.parseIncremental(filePath, offset, existing && !reindex ? {
+        let parsed = parsedFull ?? await adapter.parseIncremental(filePath, offset, existing && !reindex ? {
           ...fullMeta, sessionId: existing.session_id, lineCount: existing.line_count ?? undefined,
           checkpointHash: existing.checkpoint_hash ?? undefined,
           recoverHeaderCwd: offset > 0 && existing.project_root == null,
@@ -201,18 +230,23 @@ export async function runIndexers({
           const headerProject = projectFor(parsed.headerCwd);
           if (headerProject?.projectKey === existing.project_key) resolvedRoot = headerProject.projectRoot;
         }
+        const activityIndexed = Number(reindex || !existing || existing.tool_activity_indexed);
         const fileValues = [sessionId, projectKey, resolvedRoot, mtimeMs, newByteOffset, lineCount,
-          parsed.fileIdentity ?? fileIdentity, parsed.checkpointHash ?? null, parsed.fileSize ?? fileSize, Date.now()];
+          parsed.fileIdentity ?? fileIdentity, parsed.checkpointHash ?? null, parsed.fileSize ?? fileSize, Date.now(), activityIndexed];
         const messagesIndexed = inTransaction(db, () => {
           renewIfDue();
           if (leaseLost) return null;
           let fileId = existing?.id;
           if (existing) {
-            if (reindex) sql.clearMessages.run(fileId);
+            if (reindex) {
+              sql.clearMessages.run(fileId);
+              sql.clearToolActivity.run(fileId);
+            }
             sql.updateFile.run(...fileValues, fileId);
           } else {
             fileId = sql.addFile.run(filePath, orchestrator, ...fileValues).lastInsertRowid;
           }
+          storeToolActivity(fileId, parsed.toolActivity);
           let messagesIndexed = 0;
           for (const message of messages) {
             const { seq, timestamp, text, toolNames, lineNo } = message;

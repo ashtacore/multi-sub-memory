@@ -2,7 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { expandHome } from '../config.mjs';
 import {
-  discoverJsonlFiles, extractMessageContent, firstNonBlankString, firstNonEmptyString, normalizeTranscriptRole,
+  appendToolActivity, transcriptToolActivity, transcriptToolCall, discoverJsonlFiles, extractMessageContent, firstNonBlankString, firstNonEmptyString, normalizeTranscriptRole,
   normalizeTranscriptTimestamp, parseJsonlRecord, readIncrementalJsonlLines,
 } from './types.mjs';
 
@@ -62,6 +62,7 @@ export const codexAdapter = {
     let { sessionId, cwd } = existingMeta;
     let seq = existingMeta.nextSeq ?? 0;
     const messages = [];
+    const toolActivity = [];
 
     for (const { line, lineNo } of lines) {
       const record = parseJsonlRecord(line);
@@ -70,7 +71,16 @@ export const codexAdapter = {
       if (record.type === 'session_meta' || record.type === 'turn_context') {
         cwd = firstNonEmptyString(record.payload?.cwd) ?? cwd;
       }
-      const message = parseCodexResponseItem(record);
+      const message = parseCodexResponseItem(record, { includeToolOutput: true });
+      if (message) {
+        const payload = record.payload;
+        const calls = transcriptToolActivity(payload.content);
+        const callId = firstNonBlankString(payload.call_id, payload.id);
+        if (callId && ['function_call', 'custom_tool_call'].includes(payload.type) && message.toolNames.length) {
+          calls.push(transcriptToolCall(callId, message.toolNames[0], payload.arguments ?? payload.input));
+        }
+        appendToolActivity(toolActivity, lineNo, message.timestamp, calls, message.role, callId);
+      }
       if ((message?.role !== 'user' && message?.role !== 'assistant')
         || (!message.text && !message.toolNames.length)) continue;
       messages.push({ seq: seq++, lineNo, ...message });
@@ -78,6 +88,6 @@ export const codexAdapter = {
 
     const stem = path.basename(filePath, '.jsonl');
     const rolloutId = /^rollout-.*-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.exec(stem)?.[1];
-    return { sessionId: sessionId ?? rolloutId ?? stem, cwd, messages, ...checkpoint };
+    return { sessionId: sessionId ?? rolloutId ?? stem, cwd, messages, toolActivity, ...checkpoint };
   },
 };

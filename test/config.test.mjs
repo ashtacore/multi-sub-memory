@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -33,6 +33,7 @@ test('loads defaults and expands only the current home marker', (t) => {
     embedding: { model: 'BAAI/bge-base-en-v1.5', enabled: true },
     bootstrap: { tokenBudget: 2500 },
     dreamer: defaultDreamer,
+    analytics: { retention_days: 93 },
     tags: { strict: false, definitions: {} },
     indexers: defaultIndexers,
   });
@@ -83,6 +84,7 @@ test('merges global and repository YAML settings before applying environment ove
     embedding: { model: 'project-model', enabled: false },
     bootstrap: { tokenBudget: 1200 },
     dreamer: defaultDreamer,
+    analytics: { retention_days: 93 },
     tags: { strict: false, definitions: {} },
     indexers: {
       ...defaultIndexers, backgroundRefresh: true, refreshIntervalMs: 30_000,
@@ -104,6 +106,7 @@ test('merges global and repository YAML settings before applying environment ove
     embedding: { model: 'env-model', enabled: false },
     bootstrap: { tokenBudget: 1800 },
     dreamer: defaultDreamer,
+    analytics: { retention_days: 93 },
     tags: { strict: false, definitions: {} },
     indexers: defaultIndexers,
   });

@@ -205,12 +205,12 @@ dialog .actions { justify-content: end; }
   }
   .history-mobile-bar .inline-field { gap: .4rem; }
   .history-mobile-bar select { min-block-size: 2.25rem; padding-block: .3rem; }
-  table, tbody { display: block; }
-  thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  tbody { display: grid; gap: .6rem; }
+  #dream-history table, #dream-history tbody { display: block; }
+  #dream-history thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  #dream-history tbody { display: grid; gap: .6rem; }
   /* Six tracks let the card mix a 2-up detail grid (cells span 3) with a 3-up
      metrics strip (Reviewed / Merged / Archived span 2) without extra markup. */
-  tbody tr {
+  #dream-history tbody tr {
     display: grid;
     grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: .1rem 1.25rem;
@@ -219,8 +219,8 @@ dialog .actions { justify-content: end; }
     border-radius: .5rem;
     background: var(--card);
   }
-  tbody tr.empty-row { grid-template-columns: minmax(0, 1fr); padding: .7rem .8rem; }
-  td {
+  #dream-history tbody tr.empty-row { grid-template-columns: minmax(0, 1fr); padding: .7rem .8rem; }
+  #dream-history td {
     display: grid;
     grid-column: span 3;
     grid-template-columns: minmax(0, 7.5rem) minmax(0, 1fr);
@@ -255,8 +255,8 @@ dialog .actions { justify-content: end; }
   }
   .history-mobile-bar .inline-field { display: grid; grid-template-columns: auto minmax(0, 1fr); }
   .history-mobile-bar select { width: 100%; }
-  tbody tr { column-gap: 1rem; }
-  td { grid-column: 1 / -1; }
+  #dream-history tbody tr { column-gap: 1rem; }
+  #dream-history td { grid-column: 1 / -1; }
 }
 
 @media (max-width: 26rem) {
@@ -274,7 +274,7 @@ dialog .actions { justify-content: end; }
   .stat { display: grid; grid-template-columns: minmax(0, 5rem) minmax(0, 1fr); gap: .55rem; align-items: start; padding: .5rem .65rem; }
   .stat dl { margin: 0; gap: .35rem .7rem; }
   .stat dd { font-size: 1.05rem; }
-  td { grid-template-columns: minmax(0, 5.5rem) minmax(0, 1fr); }
+  #dream-history td { grid-template-columns: minmax(0, 5.5rem) minmax(0, 1fr); }
 }
 
 /* Only the narrowest phones (< ~352px) drop the 3-up metrics strip back to
@@ -293,3 +293,52 @@ dialog .actions { justify-content: end; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+.analytics-fields, .analytics-cost-status { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem 1rem; }
+.analytics-fields label { flex: 1 1 10rem; }
+.analytics-controls .actions [aria-disabled="true"] { opacity: .62; cursor: wait; }
+#analytics-report { display: grid; gap: 1.5rem; margin-top: .85rem; }
+#analytics-export-error { margin-top: .65rem; }
+.analytics-section { display: grid; gap: .65rem; min-width: 0; }
+.analytics-section + .analytics-section { padding-top: 1.15rem; border-top: 1px solid var(--line); }
+.analytics-section h3 { font-size: 1.1rem; }
+.analytics-grid, .analytics-metrics { display: grid; gap: .65rem; }
+.analytics-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); }
+.analytics-metrics { grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr)); }
+.analytics-metrics dt { color: var(--muted); font-size: .82rem; }
+.analytics-metrics dd {
+  margin: .25rem 0 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.analytics-chart { display: grid; align-content: start; gap: .55rem; }
+.analytics-chart h4 { color: var(--text); }
+.analytics-bars, .analytics-legend { display: grid; gap: .45rem; padding: 0; list-style: none; }
+.analytics-bars li { display: grid; gap: .2rem; }
+.analytics-bar-row { display: flex; align-items: center; justify-content: space-between; gap: .65rem; }
+.analytics-bar-row > span {
+  flex: 0 0 11ch;
+  text-align: right;
+  font-size: .82rem;
+  font-variant-numeric: tabular-nums;
+}
+.analytics-bar-label, .analytics-legend { color: var(--muted); font-size: .78rem; }
+.analytics-bar { display: block; flex: 1; min-width: 0; height: .55rem; border-radius: .2rem; background: var(--bg); }
+.analytics-legend { display: flex; flex-wrap: wrap; gap: .75rem; }
+.analytics-legend li { display: flex; align-items: center; gap: .3rem; }
+.analytics-legend span { width: .65rem; height: .65rem; border-radius: .15rem; background: var(--chart-color); }
+.analytics-mark-0 { --chart-color: var(--accent); }
+.analytics-mark-1 { --chart-color: var(--success); }
+.analytics-mark-2 { --chart-color: var(--warning); }
+.analytics-chart svg [class^="analytics-mark-"] { fill: var(--chart-color); }
+.analytics-trend { display: block; width: 100%; max-height: 13rem; }
+.analytics-trend text { fill: var(--muted); font-size: 11px; }
+.analytics-gridline { stroke: var(--line); }
+.analytics-trend-line { stroke: var(--accent); stroke-width: 2; }
+.analytics-table { max-width: 100%; overflow-x: auto; }
+.analytics-table caption { padding: .35rem .6rem; text-align: left; font-weight: 600; }
+.analytics-table td { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.analytics-table tbody th { white-space: normal; }
+.analytics-details summary { width: fit-content; cursor: pointer; font-size: .9rem; }
+.analytics-details[open] > summary { margin-bottom: .45rem; }

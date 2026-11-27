@@ -92,7 +92,9 @@ test('dashboard binds to IPv4 loopback and keeps a supplied database open', asyn
   const elementIds = new Set([...page.text.matchAll(/\sid="([^"]+)"/g)].map(([, id]) => id));
   for (const id of [
     'project', 'stats', 'error-banner', 'error-message', 'retry', 'toast-region',
-    'view-memories', 'view-notes', 'view-dreamer',
+    'view-memories', 'view-notes', 'view-dreamer', 'view-analytics',
+    'analytics-window', 'analytics-month-mode', 'analytics-refresh',
+    'analytics-export-json', 'analytics-export-markdown', 'analytics-report',
     'memories-heading', 'mem-search', 'mem-count', 'mem-scope', 'mem-category', 'mem-status', 'mem-tag', 'memory-list',
     'notes-heading', 'note-list', 'notes-load-more',
     'dream-trigger', 'dream-dryrun', 'dream-hint', 'dream-result', 'dream-status', 'dream-config', 'dream-history',
@@ -101,6 +103,14 @@ test('dashboard binds to IPv4 loopback and keeps a supplied database open', asyn
     assert.ok(elementIds.has(id), `Served dashboard HTML is missing id="${id}"`);
   }
   assert.match((await request('/app.js')).headers['content-type'], /^text\/javascript/);
+  assert.match(page.text, /data-view="analytics"[^>]*aria-controls="view-analytics"/);
+  for (const option of ['7d', '3w', '2m', 'calendar', 'rolling30']) {
+    assert.ok(page.text.includes('<option value="' + option + '">'), 'Missing analytics option ' + option);
+  }
+  const analyticsModule = await request('/analytics.js');
+  assert.equal(analyticsModule.status, 200);
+  assert.match(analyticsModule.headers['content-type'], /^text\/javascript/);
+  assert.match(analyticsModule.text, /export function renderAnalytics\(/);
   assert.match((await request('/styles.css')).headers['content-type'], /^text\/css/);
   assert.equal(page.headers['cache-control'], 'no-store');
   assert.equal(page.headers['x-content-type-options'], 'nosniff');

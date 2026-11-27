@@ -142,6 +142,7 @@ export function formatBootstrap(db, options = {}) {
   }
   return {
     text, projectKey, displayName,
+    ...(options.includeMemoryIds ? { includedMemoryIds: renderedMemories.included } : {}),
     includedMemories: renderedMemories.included.length,
     omittedMemories: memories.length - renderedMemories.included.length,
     includedNotes: includedNotes.length,

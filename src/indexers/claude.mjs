@@ -3,7 +3,7 @@ import path from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import { expandHome } from '../config.mjs';
 import {
-  discoverJsonlFiles, extractMessageContent, normalizeTranscriptRole, normalizeTranscriptTimestamp,
+  appendToolActivity, transcriptToolActivity, discoverJsonlFiles, extractMessageContent, normalizeTranscriptRole, normalizeTranscriptTimestamp,
   parseJsonlRecord, readIncrementalJsonlLinesAsync,
 } from './types.mjs';
 
@@ -40,6 +40,7 @@ export const claudeAdapter = {
     let seq = nextSeq ?? 0;
     let recognized = false;
     const messages = [];
+    const toolActivity = [];
 
     signal?.throwIfAborted();
     for (const [index, { line, lineNo }] of lines.entries()) {
@@ -56,11 +57,13 @@ export const claudeAdapter = {
       if (typeof record.cwd === 'string' && record.cwd) cwd = record.cwd;
       if (record.type !== 'user' && record.type !== 'assistant') continue;
       recognized = true;
+      const role = normalizeTranscriptRole(record.message?.role) ?? record.type;
+      const timestamp = normalizeTranscriptTimestamp(record.message?.timestamp) ?? normalizeTranscriptTimestamp(record.timestamp);
+      appendToolActivity(toolActivity, lineNo, timestamp, transcriptToolActivity(record.message?.content), role);
       const { text, toolNames, hasToolResult } = extractMessageContent(record.message?.content);
       if (!text && !toolNames.length) continue;
       messages.push({
-        seq: seq++, role: normalizeTranscriptRole(record.message?.role) ?? record.type, text, toolNames, lineNo,
-        timestamp: normalizeTranscriptTimestamp(record.message?.timestamp) ?? normalizeTranscriptTimestamp(record.timestamp),
+        seq: seq++, role, text, toolNames, lineNo, timestamp,
         skipEmbedding: hasToolResult,
       });
     }
@@ -70,6 +73,6 @@ export const claudeAdapter = {
       cwd = decodeProjectFolder(filePath, root);
       cwdInferred = Boolean(cwd);
     }
-    return { sessionId: sessionId ?? path.basename(filePath, '.jsonl'), cwd, cwdInferred, messages, recognized, ...checkpoint };
+    return { sessionId: sessionId ?? path.basename(filePath, '.jsonl'), cwd, cwdInferred, messages, toolActivity, recognized, ...checkpoint };
   },
 };

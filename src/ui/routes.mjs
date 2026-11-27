@@ -1,3 +1,4 @@
+import { buildAnalyticsReport, formatAnalyticsExport } from '../analytics.mjs';
 import { createHmac, randomBytes } from 'node:crypto';
 import { statSync } from 'node:fs';
 import path from 'node:path';
@@ -17,6 +18,8 @@ import {
 import { formatProjectLabels, normalizePath, resolveProjectKey } from '../project-id.mjs';
 import { hybridSearch } from '../search.mjs';
 import { createCheckoutState } from './checkout-state.mjs';
+
+export const analyticsAttachment = Symbol('analytics attachment');
 
 const all = 'all';
 const globalKey = GLOBAL_PROJECT_KEY;
@@ -463,7 +466,7 @@ async function changeRecord(context, req, table, id, params) {
   try {
     if (table === 'memories') {
       const memory = await updateMemory(db, { ...body, id }, {
-        config: tagConfig, defaultProject, embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt,
+        config: tagConfig, defaultProject, embeddingEngine, embeddingModel: config.embedding?.model, rawRow: true, expectedUpdatedAt, trackDreamerEdits: true,
       });
       const catalog = knownProjectCatalog(context, configuredProjects);
       return { memory: attachMemoryProject(memory, catalog) };
@@ -618,6 +621,28 @@ async function startDream(context, req) {
   return result;
 }
 
+async function analytics(context, params, exporting) {
+  const project = params.get('project');
+  const options = {
+    projectKey: project && project !== all ? project : undefined,
+    window: choice(params, 'window', ['7d', '3w', '2m'], '7d'),
+    monthMode: choice(params, 'monthMode', ['calendar', 'rolling30'], 'calendar'),
+    retentionDays: context.config.analytics?.retention_days,
+    ccusageRunner: context.ccusageRunner,
+    now: context.analyticsNow?.(),
+  };
+  const format = exporting ? choice(params, 'format', ['json', 'markdown'], 'json') : null;
+  const report = await buildAnalyticsReport(context.db, options);
+  if (!format) return report;
+  const content = formatAnalyticsExport(report, format);
+  return {
+    [analyticsAttachment]: true,
+    filename: format === 'markdown' ? 'memory-analytics.md' : 'memory-analytics.json',
+    contentType: format === 'markdown' ? 'text/markdown; charset=utf-8' : 'application/json; charset=utf-8',
+    body: format === 'markdown' ? content : JSON.stringify(content, null, 2),
+  };
+}
+
 export function createApi(context) {
   context = { ...context, fingerprintKey: randomBytes(32), checkoutState: createCheckoutState(context.db) };
   return async function api(req, pathname, params) {
@@ -631,6 +656,9 @@ export function createApi(context) {
       if (pathname === '/api/memories') return memories(context, params);
       if (pathname === '/api/notes') return notes(context, params);
       if (pathname === '/api/dreamer') return dreamer(context, params);
+      if (pathname === '/api/analytics' || pathname === '/api/analytics/export') {
+        return analytics(context, params, pathname.endsWith('/export'));
+      }
     }
     const comments = /^\/api\/notes\/([^/]+)\/comments(?:\/([^/]+))?$/.exec(pathname);
     if (comments && (comments[2] ? ['PATCH', 'DELETE'].includes(req.method) : ['GET', 'POST'].includes(req.method))) {
