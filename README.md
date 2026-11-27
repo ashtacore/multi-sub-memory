@@ -7,7 +7,7 @@ The five Phase 1 MCP Core tools are `mem_memory`, `mem_note`, `mem_bootstrap`,
 
 ## Requirements
 
-- Node.js `^22.16.0 || >=24.0.0` (24/26+ recommended) with built-in `node:sqlite` and FTS5 support
+- Node.js `>=24.0.0` with built-in `node:sqlite` and FTS5 support
 - Git for project-scoped memories and notes
 - Pure ESM (`.mjs`), zero build step, `npx`-installable
 

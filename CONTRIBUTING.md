@@ -27,7 +27,7 @@ Before changing code, please keep these project invariants in mind (see [`docs/w
 
 ## Local Development & Verification
 
-Requirements: Node.js `^22.16.0 || >=24.0.0` (with built-in `node:sqlite` + FTS5) and Git.
+Requirements: Node.js `>=24.0.0` (with built-in `node:sqlite` + FTS5) and Git.
 
 ```bash
 npm ci
@@ -35,11 +35,10 @@ npm run check
 npm test
 ```
 
-- Run `npm run check` (syntax & package entrypoint checks) and `npm test` before opening a PR.
+- Run `npm run check` (syntax & package entrypoint checks) and `npm test` before opening a PR. (If your Node.js 24.x build prints a SQLite `ExperimentalWarning` to `stderr`, run with `NODE_OPTIONS=--disable-warning=ExperimentalWarning npm test`.)
 - Update the relevant documentation under [`docs/wiki/`](docs/wiki/Home.md) or [`README.md`](README.md) whenever behavior or configuration changes.
 - For dashboard UI changes (`src/ui/`), verify the rendered UI in a real browser against an isolated temporary database.
 
-## Code of Conduct & Security
+## Security
 
-- Participation is governed by our [Code of Conduct](CODE_OF_CONDUCT.md).
-- To report a security vulnerability privately, please see [SECURITY.md](SECURITY.md).
+To report a security vulnerability privately, please see [SECURITY.md](SECURITY.md).

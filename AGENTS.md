@@ -15,7 +15,7 @@ There is no session log. Use Git and PR descriptions for change history; keep ru
 ## Session start
 
 1. Read `README.md` and `docs/HANDOFF.md`, then start at `docs/wiki/Home.md`. Read the relevant area pages and linked ADRs.
-2. Load `web-development` and `web-testing` before dashboard UI work (`src/ui/`), `project-planning` for planning, and `ticket-batch` for grouped ticket refinement or implementation lanes. Verify the installed Node runtime (`>=22.13`, `node:sqlite` + FTS5) rather than assuming environment versions.
+2. Load `web-development` and `web-testing` before dashboard UI work (`src/ui/`), `project-planning` for planning, and `ticket-batch` for grouped ticket refinement or implementation lanes. Verify the installed Node runtime (`>=24.0.0`, `node:sqlite` + FTS5) rather than assuming environment versions.
 3. For ticket work, read the full issue, comments, dependencies, and linked decisions. For PR work, also read the complete discussion and review threads. Resolve factual questions from source and evidence; ask the project owner about consequential design choices that remain open.
 
 ## GitHub workflow

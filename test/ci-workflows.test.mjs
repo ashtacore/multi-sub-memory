@@ -21,7 +21,7 @@ function assertVerificationSteps(steps) {
   assert.equal(checkout.uses, 'actions/checkout@v4');
   assert.equal(checkout.with['persist-credentials'], false);
   assert.equal(setupNode.uses, 'actions/setup-node@v4');
-  assert.deepEqual(setupNode.with, { 'node-version': '22', cache: 'npm' });
+  assert.deepEqual(setupNode.with, { 'node-version': '24', cache: 'npm' });
   assert.deepEqual(commands.map((step) => step.run), verificationSteps);
   assert.ok(steps.every((step) => step.if === undefined));
   assert.deepEqual(commands[2].env, { NODE_OPTIONS: '--disable-warning=ExperimentalWarning' });
@@ -93,7 +93,7 @@ test('release verifies before publishing and defaults manual runs to dry runs', 
   });
   assert.equal(setupNode.uses, 'actions/setup-node@v4');
   assert.deepEqual(setupNode.with, {
-    'node-version': '22',
+    'node-version': '24',
     'registry-url': 'https://registry.npmjs.org',
   });
   assert.equal(validateTag.id, 'version');
