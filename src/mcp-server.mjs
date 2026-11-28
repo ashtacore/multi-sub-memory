@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/server';
@@ -21,6 +22,7 @@ import { hybridSearch, SEARCH_ORCHESTRATORS, SEARCH_SCOPES, SEARCH_SOURCES } fro
 
 export { expandSession, hybridSearch };
 
+const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const skillsDirectory = fileURLToPath(new URL('../skills/', import.meta.url));
 const cwdField = z.string().min(1).describe('Workspace directory. Defaults to the server workspace.').optional();
 const recordFields = {
@@ -59,7 +61,7 @@ function formatRecordResult(output) {
 export function createMcpServer({ db, config, embeddingEngine, defaultCwd,
   telemetry = createTelemetryRecorder(db, { retentionDays: config?.analytics?.retention_days }),
 }) {
-  const server = new McpServer({ name: 'multi-sub-memory', version: '0.1.0' });
+  const server = new McpServer({ name: 'multi-sub-memory', version: packageVersion });
   const context = { config, embeddingEngine, defaultCwd, trackAccess: true, deferAnalytics: telemetry.defer };
   const retrievalProjects = new Map();
 

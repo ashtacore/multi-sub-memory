@@ -155,7 +155,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
       - name: Validate release tag
         id: version
         run: |
@@ -178,7 +177,6 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Publish to npm
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           REPO_PRIVATE: ${{ github.event.repository.private }}
         run: |
           if [[ "$REPO_PRIVATE" == false ]]; then
