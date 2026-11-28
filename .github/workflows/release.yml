@@ -232,7 +232,11 @@ jobs:
             exit 1
           fi
           assets=("${installers[@]}" "${portable[@]}" "${appimages[@]}")
-          if gh release view "$RELEASE_TAG" --json id >/dev/null 2>&1; then
+          if existing_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            if [[ "$existing_draft" != true ]]; then
+              echo "::error::Release $RELEASE_TAG is already published; refusing to overwrite live assets"
+              exit 1
+            fi
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
             gh release edit "$RELEASE_TAG" --draft --verify-tag
           else
