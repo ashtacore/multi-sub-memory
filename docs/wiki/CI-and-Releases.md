@@ -26,11 +26,13 @@ your Node 24 build emits a SQLite warning on `stderr`.
   [npm provenance](https://docs.npmjs.com/generating-provenance-statements/) when
   the source repository is public; a maintainer then approves the staged release
   with 2FA on npmjs.com (or via `npm stage approve`).
-- After npm publishes the package, a separate job creates or updates the
-  corresponding GitHub Release. It checks that the remote version tag resolves
-  to the commit published to npm before creating or updating the release.
-  Use **Re-run failed jobs** to retry a failed GitHub Release while keeping the
-  successful npm publish.
+- After npm stages the package, a separate job creates or updates a **draft**
+  GitHub Release with the verified desktop assets attached. It checks that the
+  remote version tag resolves to the staged commit before creating or updating
+  the draft, so nothing is published publicly on GitHub until the maintainer
+  approves the staged npm release with 2FA and publishes the draft GitHub
+  Release. Use **Re-run failed jobs** to retry a failed GitHub Release while
+  keeping the staged npm upload.
 - Windows and Linux runners build and smoke-test the standalone desktop
   packages from the verified commit before npm publishes. Authorized releases
   attach the Windows installer, Windows portable executable, and Linux AppImage

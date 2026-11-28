@@ -128,9 +128,10 @@ test('release verifies before publishing and defaults manual runs to dry runs', 
     publishRelease.run,
     /if \[\[ "\$tagged_commit" != "\$GITHUB_SHA" \]\]; then\s+echo "::error::[^\n]+"\s+exit 1\s+fi\s+shopt -s nullglob/,
   );
-  assert.match(publishRelease.run, /gh release create "\$RELEASE_TAG" "\$\{assets\[@\]\}" --verify-tag --generate-notes/);
+  assert.match(publishRelease.run, /gh release create "\$RELEASE_TAG" "\$\{assets\[@\]\}" --draft --verify-tag --generate-notes/);
   assert.match(publishRelease.run, /gh release upload "\$RELEASE_TAG" "\$\{assets\[@\]\}" --clobber/);
-  assert.match(publishRelease.run, /gh release edit "\$RELEASE_TAG" --draft=false --verify-tag/);
+  assert.match(publishRelease.run, /gh release edit "\$RELEASE_TAG" --draft --verify-tag/);
+  assert.doesNotMatch(publishRelease.run, /--draft=false/);
 });
 
 test('release builds and smoke-tests desktop assets from the verified revision before upload', () => {

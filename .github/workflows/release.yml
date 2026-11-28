@@ -234,7 +234,7 @@ jobs:
           assets=("${installers[@]}" "${portable[@]}" "${appimages[@]}")
           if gh release view "$RELEASE_TAG" --json id >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
-            gh release edit "$RELEASE_TAG" --draft=false --verify-tag
+            gh release edit "$RELEASE_TAG" --draft --verify-tag
           else
-            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --generate-notes
+            gh release create "$RELEASE_TAG" "${assets[@]}" --draft --verify-tag --generate-notes
           fi
