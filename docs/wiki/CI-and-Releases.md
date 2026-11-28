@@ -17,18 +17,22 @@ your Node 24 build emits a SQLite warning on `stderr`.
   When dispatched on a branch, the workflow uses that version tag and creates it
   from the verified commit if it does not already exist.
 - The npm publishing job uses [npm Trusted Publishing (OIDC)](https://docs.npmjs.com/trusted-publishers)
-  via GitHub Actions `id-token: write` on Node 24 (no stored `NPM_TOKEN` secret
-  is required). Before the first automated publish, the package must exist on
-  npmjs.com with `ashtacore/multi-sub-memory` and workflow `release.yml`
-  configured under **Package Settings → Trusted Publisher**. The job publishes
-  with public access and adds
+  with **Staged Publishing** (`npm stage publish`) via GitHub Actions
+  `id-token: write` on Node 24 (no stored `NPM_TOKEN` secret is required). Before
+  the first automated release, the package must exist on npmjs.com with
+  `ashtacore/multi-sub-memory` and workflow `release.yml` configured under
+  **Package Settings → Trusted Publisher** (stage-only; direct `npm publish`
+  remains disabled). The job stages the tarball with public access and adds
   [npm provenance](https://docs.npmjs.com/generating-provenance-statements/) when
-  the source repository is public.
-- After npm publishes the package, a separate job creates or updates the
-  corresponding GitHub Release. It checks that the remote version tag resolves
-  to the commit published to npm before creating or updating the release.
-  Use **Re-run failed jobs** to retry a failed GitHub Release while keeping the
-  successful npm publish.
+  the source repository is public; a maintainer then approves the staged release
+  with 2FA on npmjs.com (or via `npm stage approve`).
+- After npm stages the package, a separate job creates or updates a **draft**
+  GitHub Release with the verified desktop assets attached. It checks that the
+  remote version tag resolves to the staged commit before creating or updating
+  the draft, so nothing is published publicly on GitHub until the maintainer
+  approves the staged npm release with 2FA and publishes the draft GitHub
+  Release. Use **Re-run failed jobs** to retry a failed GitHub Release while
+  keeping the staged npm upload.
 - Windows and Linux runners build and smoke-test the standalone desktop
   packages from the verified commit before npm publishes. Authorized releases
   attach the Windows installer, Windows portable executable, and Linux AppImage

@@ -102,7 +102,7 @@ test('release verifies before publishing and defaults manual runs to dry runs', 
   assert.doesNotMatch(publishNpm.run, /\$\{\{/);
   assert.match(
     publishNpm.run,
-    /if \[\[ "\$REPO_PRIVATE" == false \]\]; then\s+npm publish --provenance --access public\s+else\s+npm publish --access public\s+fi/,
+    /if \[\[ "\$REPO_PRIVATE" == false \]\]; then\s+npm stage publish --provenance --access public\s+else\s+npm stage publish --access public\s+fi/,
   );
 
   assert.deepEqual(release.needs, ['publish-npm', 'build-desktop']);
@@ -128,9 +128,14 @@ test('release verifies before publishing and defaults manual runs to dry runs', 
     publishRelease.run,
     /if \[\[ "\$tagged_commit" != "\$GITHUB_SHA" \]\]; then\s+echo "::error::[^\n]+"\s+exit 1\s+fi\s+shopt -s nullglob/,
   );
-  assert.match(publishRelease.run, /gh release create "\$RELEASE_TAG" "\$\{assets\[@\]\}" --verify-tag --generate-notes/);
+  assert.match(
+    publishRelease.run,
+    /if existing_draft=\$\(gh release view "\$RELEASE_TAG" --json isDraft --jq '\.isDraft' 2>\/dev\/null\); then\s+if \[\[ "\$existing_draft" != true \]\]; then\s+echo "::error::[^\n]+"\s+exit 1\s+fi/,
+  );
+  assert.match(publishRelease.run, /gh release create "\$RELEASE_TAG" "\$\{assets\[@\]\}" --draft --verify-tag --generate-notes/);
   assert.match(publishRelease.run, /gh release upload "\$RELEASE_TAG" "\$\{assets\[@\]\}" --clobber/);
-  assert.match(publishRelease.run, /gh release edit "\$RELEASE_TAG" --draft=false --verify-tag/);
+  assert.match(publishRelease.run, /gh release edit "\$RELEASE_TAG" --draft --verify-tag/);
+  assert.doesNotMatch(publishRelease.run, /--draft=false/);
 });
 
 test('release builds and smoke-tests desktop assets from the verified revision before upload', () => {
