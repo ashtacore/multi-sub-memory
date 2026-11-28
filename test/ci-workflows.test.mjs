@@ -102,7 +102,7 @@ test('release verifies before publishing and defaults manual runs to dry runs', 
   assert.doesNotMatch(publishNpm.run, /\$\{\{/);
   assert.match(
     publishNpm.run,
-    /if \[\[ "\$REPO_PRIVATE" == false \]\]; then\s+npm publish --provenance --access public\s+else\s+npm publish --access public\s+fi/,
+    /if \[\[ "\$REPO_PRIVATE" == false \]\]; then\s+npm stage publish --provenance --access public\s+else\s+npm stage publish --access public\s+fi/,
   );
 
   assert.deepEqual(release.needs, ['publish-npm', 'build-desktop']);

@@ -175,14 +175,15 @@ jobs:
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - name: Publish to npm
+      - name: Stage npm release
         env:
           REPO_PRIVATE: ${{ github.event.repository.private }}
         run: |
+          npm stage --help >/dev/null 2>&1 || npm install -g npm@latest
           if [[ "$REPO_PRIVATE" == false ]]; then
-            npm publish --provenance --access public
+            npm stage publish --provenance --access public
           else
-            npm publish --access public
+            npm stage publish --access public
           fi
 
   github-release:
